@@ -873,6 +873,11 @@
   proname => 'heap_tableam_handler', provolatile => 'v',
   prorettype => 'table_am_handler', proargtypes => 'internal',
   prosrc => 'heap_tableam_handler' },
+{ oid => '6669', oid_symbol => 'ZEDSTORE_TABLE_AM_HANDLER_OID',
+  descr => 'column-oriented table access method handler',
+  proname => 'zedstore_tableam_handler', provolatile => 'v',
+  prorettype => 'table_am_handler', proargtypes => 'internal',
+  prosrc => 'zedstore_tableam_handler' },
 
 # Index access method handlers
 { oid => '330', descr => 'btree index access method handler',

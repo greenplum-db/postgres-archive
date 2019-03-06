@@ -33,5 +33,8 @@
 { oid => '3580', oid_symbol => 'BRIN_AM_OID',
   descr => 'block range index (BRIN) access method',
   amname => 'brin', amhandler => 'brinhandler', amtype => 'i' },
+{ oid => '6668', oid_symbol => 'ZEDSTORE_TABLE_AM_OID',
+  descr => 'zedstore table access method',
+  amname => 'zedstore', amhandler => 'zedstore_tableam_handler', amtype => 't' },
 
 ]
