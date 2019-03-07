@@ -1296,7 +1296,6 @@ static const TableAmRoutine heapam_methods = {
 	.index_validate_scan = heapam_index_validate_scan,
 };
 
-
 const TableAmRoutine *
 GetHeapamTableAmRoutine(void)
 {

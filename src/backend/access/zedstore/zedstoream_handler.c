@@ -316,6 +316,7 @@ zedstoream_estimate_rel_size(Relation rel, int32 *attr_widths,
 
 static const TableAmRoutine zedstoream_methods = {
 	.type = T_TableAmRoutine,
+	.scans_leverage_column_projection = true,
 
 	.slot_callbacks = zedstoream_slot_callbacks,
 

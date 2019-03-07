@@ -132,6 +132,7 @@ typedef struct TableAmRoutine
 {
 	/* this must be set to T_TableAmRoutine */
 	NodeTag		type;
+	bool scans_leverage_column_projection;
 
 
 	/* ------------------------------------------------------------------------
@@ -434,6 +435,12 @@ table_beginscan(Relation rel, Snapshot snapshot,
 {
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL,
 									   true, true, true, false, false, false);
+}
+
+static inline bool
+table_scans_leverage_column_projection(Relation relation)
+{
+	return relation->rd_tableam->scans_leverage_column_projection;
 }
 
 /*

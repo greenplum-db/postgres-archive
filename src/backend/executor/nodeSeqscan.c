@@ -31,6 +31,7 @@
 #include "access/tableam.h"
 #include "executor/execdebug.h"
 #include "executor/nodeSeqscan.h"
+#include "nodes/nodeFuncs.h"
 #include "utils/rel.h"
 
 static TupleTableSlot *SeqNext(SeqScanState *node);
@@ -39,6 +40,82 @@ static TupleTableSlot *SeqNext(SeqScanState *node);
  *						Scan Support
  * ----------------------------------------------------------------
  */
+typedef struct neededColumnContext
+{
+	bool *mask;
+	int n;
+} neededColumnContext;
+
+static bool
+neededColumnContextWalker(Node *node, neededColumnContext *c)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Var))
+	{
+		Var *var = (Var *)node;
+
+		if (var->varattno > 0)
+		{
+			Assert(var->varattno <= c->n);
+			c->mask[var->varattno - 1] = true;
+		}
+		/*
+		 * If all attributes are included,
+		 * set all entries in mask to true.
+		 */
+		else if (var->varattno == 0)
+			memset(c->mask, true, c->n);
+
+		return false;
+	}
+	return expression_tree_walker(node, neededColumnContextWalker, (void * )c);
+}
+
+/*
+ * n specifies the number of allowed entries in mask: we use
+ * it for bounds-checking in the walker above.
+ */
+static void
+GetNeededColumnsForNode(Node *expr, bool *mask, int n)
+{
+	neededColumnContext c;
+
+	c.mask = mask;
+	c.n = n;
+
+	neededColumnContextWalker(expr, &c);
+}
+
+static bool *
+GetNeededColumnsForScan(SeqScanState *scanstate, Relation currentRelation)
+{
+	bool *proj;
+	int ncol;
+	int i;
+
+	Assert(currentRelation != NULL);
+	ncol = currentRelation->rd_att->natts;
+	proj = palloc0(ncol * sizeof(bool));
+	GetNeededColumnsForNode((Node *) scanstate->ss.ps.plan->targetlist, proj, ncol);
+	GetNeededColumnsForNode((Node *) scanstate->ss.ps.plan->qual, proj, ncol);
+
+	for (i = 0; i < ncol; i++)
+	{
+		if (proj[i])
+			break;
+	}
+
+	/*
+	 * In some cases (for example, count(*)), no columns are specified.
+	 * We always scan the first column.
+	 */
+	if (i == ncol)
+		proj[0] = true;
+
+	return proj;
+}
 
 /* ----------------------------------------------------------------
  *		SeqNext
@@ -64,6 +141,12 @@ SeqNext(SeqScanState *node)
 
 	if (scandesc == NULL)
 	{
+		bool *proj;
+		if (table_scans_leverage_column_projection(node->ss.ss_currentRelation))
+			proj = GetNeededColumnsForScan(node, node->ss.ss_currentRelation);
+		else
+			proj = NULL;
+
 		/*
 		 * We reach here if the scan is not parallel, or if we're serially
 		 * executing a scan that was planned to be parallel.
