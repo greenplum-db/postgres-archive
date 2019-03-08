@@ -32,6 +32,7 @@
 #include "catalog/pg_am_d.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
+#include "optimizer/plancat.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
 #include "storage/bufmgr.h"
@@ -143,10 +144,6 @@ zedstoream_finish_bulk_insert(Relation relation, int options)
 static const TupleTableSlotOps *
 zedstoream_slot_callbacks(Relation relation)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
-
 	return &TTSOpsBufferHeapTuple;
 }
 
@@ -309,9 +306,105 @@ zedstoream_estimate_rel_size(Relation rel, int32 *attr_widths,
 						 BlockNumber *pages, double *tuples,
 						 double *allvisfrac)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
+	BlockNumber curpages;
+	BlockNumber relpages;
+	double		reltuples;
+	BlockNumber relallvisible;
+	double		density;
+
+	/* it has storage, ok to call the smgr */
+	curpages = RelationGetNumberOfBlocks(rel);
+
+	/* coerce values in pg_class to more desirable types */
+	relpages = (BlockNumber) rel->rd_rel->relpages;
+	reltuples = (double) rel->rd_rel->reltuples;
+	relallvisible = (BlockNumber) rel->rd_rel->relallvisible;
+
+	/*
+	 * HACK: if the relation has never yet been vacuumed, use a
+	 * minimum size estimate of 10 pages.  The idea here is to avoid
+	 * assuming a newly-created table is really small, even if it
+	 * currently is, because that may not be true once some data gets
+	 * loaded into it.  Once a vacuum or analyze cycle has been done
+	 * on it, it's more reasonable to believe the size is somewhat
+	 * stable.
+	 *
+	 * (Note that this is only an issue if the plan gets cached and
+	 * used again after the table has been filled.  What we're trying
+	 * to avoid is using a nestloop-type plan on a table that has
+	 * grown substantially since the plan was made.  Normally,
+	 * autovacuum/autoanalyze will occur once enough inserts have
+	 * happened and cause cached-plan invalidation; but that doesn't
+	 * happen instantaneously, and it won't happen at all for cases
+	 * such as temporary tables.)
+	 *
+	 * We approximate "never vacuumed" by "has relpages = 0", which
+	 * means this will also fire on genuinely empty relations.  Not
+	 * great, but fortunately that's a seldom-seen case in the real
+	 * world, and it shouldn't degrade the quality of the plan too
+	 * much anyway to err in this direction.
+	 *
+	 * If the table has inheritance children, we don't apply this
+	 * heuristic. Totally empty parent tables are quite common, so we should
+	 * be willing to believe that they are empty.
+	 */
+	if (curpages < 10 &&
+		relpages == 0 &&
+		!rel->rd_rel->relhassubclass)
+		curpages = 10;
+
+	/* report estimated # pages */
+	*pages = curpages;
+	/* quick exit if rel is clearly empty */
+	if (curpages == 0)
+	{
+		*tuples = 0;
+		*allvisfrac = 0;
+		return;
+	}
+
+	/* estimate number of tuples from previous tuple density */
+	if (relpages > 0)
+		density = reltuples / (double) relpages;
+	else
+	{
+		/*
+		 * When we have no data because the relation was truncated,
+		 * estimate tuple width from attribute datatypes.  We assume
+		 * here that the pages are completely full, which is OK for
+		 * tables (since they've presumably not been VACUUMed yet) but
+		 * is probably an overestimate for indexes.  Fortunately
+		 * get_relation_info() can clamp the overestimate to the
+		 * parent table's size.
+		 *
+		 * Note: this code intentionally disregards alignment
+		 * considerations, because (a) that would be gilding the lily
+		 * considering how crude the estimate is, and (b) it creates
+		 * platform dependencies in the default plans which are kind
+		 * of a headache for regression testing.
+		 */
+		int32		tuple_width;
+
+		tuple_width = get_rel_data_width(rel, attr_widths);
+		tuple_width += MAXALIGN(SizeofHeapTupleHeader);
+		tuple_width += sizeof(ItemIdData);
+		/* note: integer division is intentional here */
+		density = (BLCKSZ - SizeOfPageHeaderData) / tuple_width;
+	}
+	*tuples = rint(density * (double) curpages);
+
+	/*
+	 * We use relallvisible as-is, rather than scaling it up like we
+	 * do for the pages and tuples counts, on the theory that any
+	 * pages added since the last VACUUM are most likely not marked
+	 * all-visible.  But costsize.c wants it converted to a fraction.
+	 */
+	if (relallvisible == 0 || curpages <= 0)
+		*allvisfrac = 0;
+	else if ((double) relallvisible >= curpages)
+		*allvisfrac = 1;
+	else
+		*allvisfrac = (double) relallvisible / curpages;
 }
 
 static const TableAmRoutine zedstoream_methods = {
@@ -322,10 +415,10 @@ static const TableAmRoutine zedstoream_methods = {
 
 	.tuple_satisfies_snapshot = zedstoream_tuple_satisfies_snapshot,
 
-//	.scan_begin = heap_beginscan,
-//	.scansetlimits = heap_setscanlimits,
-//	.scan_getnextslot = heap_getnextslot,
-//	.scan_end = heap_endscan,
+	.scan_begin = heap_beginscan,
+	.scansetlimits = heap_setscanlimits,
+	.scan_getnextslot = heap_getnextslot,
+	.scan_end = heap_endscan,
 //	.scan_rescan = heap_rescan,
 //	.scan_update_snapshot = heap_update_snapshot,
 
