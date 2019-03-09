@@ -144,7 +144,21 @@ zedstoream_finish_bulk_insert(Relation relation, int options)
 static const TupleTableSlotOps *
 zedstoream_slot_callbacks(Relation relation)
 {
-	return &TTSOpsBufferHeapTuple;
+	return &TTSOpsVirtual;
+}
+
+static TupleTableSlot *
+zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
+{
+	TupleTableSlot *heap_slot = MakeSingleTupleTableSlot(sscan->rs_rd->rd_att, &TTSOpsBufferHeapTuple);
+	heap_getnextslot(sscan, direction, heap_slot);
+	if (!TTS_EMPTY(heap_slot))
+		ExecCopySlot(slot, heap_slot);
+	else
+		ExecClearTuple(slot);
+
+	ExecDropSingleTupleTableSlot(heap_slot);
+	return slot;
 }
 
 static bool
@@ -417,7 +431,7 @@ static const TableAmRoutine zedstoream_methods = {
 
 	.scan_begin = heap_beginscan,
 	.scansetlimits = heap_setscanlimits,
-	.scan_getnextslot = heap_getnextslot,
+	.scan_getnextslot = zedstoream_getnextslot,
 	.scan_end = heap_endscan,
 //	.scan_rescan = heap_rescan,
 //	.scan_update_snapshot = heap_update_snapshot,
