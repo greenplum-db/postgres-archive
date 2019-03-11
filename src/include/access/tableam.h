@@ -182,6 +182,18 @@ typedef struct TableAmRoutine
 								 bool is_samplescan,
 								 bool temp_snap);
 
+	TableScanDesc (*scan_begin_with_column_projection)(Relation relation,
+													   Snapshot snapshot,
+													   int nkeys, ScanKey key,
+													   ParallelTableScanDesc parallel_scan,
+													   bool *project_column,
+													   bool allow_strat,
+													   bool allow_sync,
+													   bool allow_pagemode,
+													   bool is_bitmapscan,
+													   bool is_samplescan,
+													   bool temp_snap);
+
 	/*
 	 * Release resources and deallocate scan. If TableScanDesc.temp_snap,
 	 * TableScanDesc.rs_snapshot needs to be unregistered.
@@ -467,6 +479,16 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 									   false, false, false);
 }
 
+static inline TableScanDesc
+table_beginscan_with_column_projection(Relation relation, Snapshot snapshot,
+									   int nkeys, ScanKey key, bool *project_column)
+{
+	Assert(relation->rd_tableam->scans_leverage_column_projection);
+
+	return relation->rd_tableam->scan_begin_with_column_projection(
+		relation, snapshot, nkeys, key, NULL, project_column,
+		true, true, true, false, false, false);
+}
 
 /*
  * table_beginscan_bm is an alternative entry point for setting up a

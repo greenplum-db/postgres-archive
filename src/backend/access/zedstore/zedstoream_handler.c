@@ -157,24 +157,23 @@ zedstoream_slot_callbacks(Relation relation)
 }
 
 static TableScanDesc
-zedstoream_beginscan(Relation relation, Snapshot snapshot,
-					 int nkeys, ScanKey key,
-					 ParallelTableScanDesc parallel_scan,
-					 bool *project_columns,
-					 bool allow_strat,
-					 bool allow_sync,
-					 bool allow_pagemode,
-					 bool is_bitmapscan,
-					 bool is_samplescan,
-					 bool temp_snap)
+zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot,
+											int nkeys, ScanKey key,
+											ParallelTableScanDesc parallel_scan,
+											bool *project_columns,
+											bool allow_strat,
+											bool allow_sync,
+											bool allow_pagemode,
+											bool is_bitmapscan,
+											bool is_samplescan,
+											bool temp_snap)
 {
 	int i;
 	ZedStoreDesc scan;
 	scan = (ZedStoreDesc) palloc(sizeof(ZedStoreDescData));
 	scan->heapscandesc = (HeapScanDesc) heap_beginscan(relation, snapshot, nkeys, key, parallel_scan,
-										project_columns, allow_strat, allow_sync,
-										allow_pagemode, is_bitmapscan,
-										is_samplescan, temp_snap);
+													   allow_strat, allow_sync, allow_pagemode,
+													   is_bitmapscan, is_samplescan, temp_snap);
 	scan->proj_atts = palloc(relation->rd_att->natts * sizeof(int));
 	scan->num_proj_atts = 0;
 	/*
@@ -195,6 +194,22 @@ zedstoream_beginscan(Relation relation, Snapshot snapshot,
 	 */
 	memcpy(&scan->rs_scan, &scan->heapscandesc->rs_scan, sizeof(TableScanDescData));
 	return (TableScanDesc) scan;
+}
+
+static TableScanDesc
+zedstoream_beginscan(Relation relation, Snapshot snapshot,
+					 int nkeys, ScanKey key,
+					 ParallelTableScanDesc parallel_scan,
+					 bool allow_strat,
+					 bool allow_sync,
+					 bool allow_pagemode,
+					 bool is_bitmapscan,
+					 bool is_samplescan,
+					 bool temp_snap)
+{
+	return zedstoream_beginscan_with_column_projection(relation, snapshot, nkeys, key, parallel_scan,
+													   NULL, allow_strat, allow_sync, allow_pagemode,
+													   is_bitmapscan, is_samplescan, temp_snap);
 }
 
 static void
@@ -531,6 +546,7 @@ static const TableAmRoutine zedstoream_methods = {
 	.tuple_satisfies_snapshot = zedstoream_tuple_satisfies_snapshot,
 
 	.scan_begin = zedstoream_beginscan,
+	.scan_begin_with_column_projection = zedstoream_beginscan_with_column_projection,
 	.scansetlimits = zedstoream_setscanlimits,
 	.scan_getnextslot = zedstoream_getnextslot,
 	.scan_end = zedstoream_endscan,

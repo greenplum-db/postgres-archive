@@ -141,19 +141,24 @@ SeqNext(SeqScanState *node)
 
 	if (scandesc == NULL)
 	{
-		bool *proj;
-		if (table_scans_leverage_column_projection(node->ss.ss_currentRelation))
-			proj = GetNeededColumnsForScan(node, node->ss.ss_currentRelation);
-		else
-			proj = NULL;
-
 		/*
 		 * We reach here if the scan is not parallel, or if we're serially
 		 * executing a scan that was planned to be parallel.
 		 */
-		scandesc = table_beginscan(node->ss.ss_currentRelation,
-								   estate->es_snapshot,
-								   0, NULL);
+		if (table_scans_leverage_column_projection(node->ss.ss_currentRelation))
+		{
+			bool *proj;
+			proj = GetNeededColumnsForScan(node, node->ss.ss_currentRelation);
+			scandesc = table_beginscan_with_column_projection(node->ss.ss_currentRelation,
+															  estate->es_snapshot,
+															  0, NULL, proj);
+		}
+		else
+		{
+			scandesc = table_beginscan(node->ss.ss_currentRelation,
+									   estate->es_snapshot,
+									   0, NULL);
+		}
 		node->ss.ss_currentScanDesc = scandesc;
 	}
 
