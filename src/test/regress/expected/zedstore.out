@@ -1,0 +1,50 @@
+-- simple tests to iteratively build the zedstore
+-- create and drop works
+create table t_zedstore(c1 int, c2 int, c3 int) USING zedstore;
+drop table t_zedstore;
+-- insert and select works
+create table t_zedstore(c1 int, c2 int, c3 int) USING zedstore;
+insert into t_zedstore select i,i+1,i+2 from generate_series(1, 10)i;
+select * from t_zedstore;
+ c1 | c2 | c3 
+----+----+----
+  1 |  2 |  3
+  2 |  3 |  4
+  3 |  4 |  5
+  4 |  5 |  6
+  5 |  6 |  7
+  6 |  7 |  8
+  7 |  8 |  9
+  8 |  9 | 10
+  9 | 10 | 11
+ 10 | 11 | 12
+(10 rows)
+
+-- selecting only few columns work
+select c1, c3 from t_zedstore;
+ c1 | c3 
+----+----
+  1 |  3
+  2 |  4
+  3 |  5
+  4 |  6
+  5 |  7
+  6 |  8
+  7 |  9
+  8 | 10
+  9 | 11
+ 10 | 12
+(10 rows)
+
+-- only few columns in output and where clause work
+select c3 from t_zedstore where c2 > 5;
+ c3 
+----
+  7
+  8
+  9
+ 10
+ 11
+ 12
+(6 rows)
+
