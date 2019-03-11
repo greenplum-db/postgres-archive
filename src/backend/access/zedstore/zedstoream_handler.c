@@ -220,7 +220,41 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	TupleTableSlot *heap_slot = MakeSingleTupleTableSlot(sscan->rs_rd->rd_att, &TTSOpsBufferHeapTuple);
 	heap_getnextslot((TableScanDesc)scan->heapscandesc, direction, heap_slot);
 	if (!TTS_EMPTY(heap_slot))
-		ExecCopySlot(slot, heap_slot);
+	{
+		TupleTableSlot *srcslot = heap_slot;
+		TupleTableSlot *dstslot = slot;
+		/*
+		 * if all the tuples need to be copied easier to use
+		 * ExecCopySlot(slot, heap_slot). But since we wish to pass back only
+		 * projected columns lets do the logic ourselves here.
+		 */
+		TupleDesc	srcdesc = dstslot->tts_tupleDescriptor;
+		Assert(srcdesc->natts <= dstslot->tts_tupleDescriptor->natts);
+		Assert(scan->num_proj_atts <= dstslot->tts_tupleDescriptor->natts);
+
+		dstslot->tts_nvalid = 0;
+		dstslot->tts_flags |= TTS_FLAG_EMPTY;
+
+		slot_getallattrs(srcslot);
+
+		for (int i = 0; i < scan->num_proj_atts; i++)
+		{
+			int natt = scan->proj_atts[i];
+			dstslot->tts_values[natt] = srcslot->tts_values[natt];
+			dstslot->tts_isnull[natt] = srcslot->tts_isnull[natt];
+		}
+
+		dstslot->tts_nvalid = srcdesc->natts;
+		dstslot->tts_flags &= ~TTS_FLAG_EMPTY;
+
+		/*
+		 * make sure storage doesn't depend on external memory, currently our
+		 * prototype only works for pass by value datums. Implementing this
+		 * materialize to copy pass-by-reference datums will make it work for
+		 * them, but that's definitely something which can be dealt later.
+		 */
+//		tts_virtual_materialize(dstslot);
+	}
 	else
 		ExecClearTuple(slot);
 
