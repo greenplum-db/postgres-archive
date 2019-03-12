@@ -41,8 +41,8 @@ typedef struct ZedStoreDescData
 {
 	/* scan parameters */
 	TableScanDescData rs_scan;  /* */
-	HeapScanDesc heapscandesc;
 	int *proj_atts;
+	FILE **fds;
 	int num_proj_atts;
 } ZedStoreDescData;
 
@@ -204,12 +204,43 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 {
 	int i;
 	ZedStoreDesc scan;
+	char       *path;
+	char *path_col;
+
+	/*
+	 * allocate and initialize scan descriptor
+	 */
 	scan = (ZedStoreDesc) palloc(sizeof(ZedStoreDescData));
-	scan->heapscandesc = (HeapScanDesc) heap_beginscan(relation, snapshot, nkeys, key, parallel_scan,
-													   allow_strat, allow_sync, allow_pagemode,
-													   is_bitmapscan, is_samplescan, temp_snap);
+
+	scan->rs_scan.rs_rd = relation;
+	scan->rs_scan.rs_snapshot = snapshot;
+	scan->rs_scan.rs_nkeys = nkeys;
+	scan->rs_scan.rs_bitmapscan = is_bitmapscan;
+	scan->rs_scan.rs_samplescan = is_samplescan;
+	scan->rs_scan.rs_allow_strat = allow_strat;
+	scan->rs_scan.rs_allow_sync = allow_sync;
+	scan->rs_scan.rs_temp_snap = temp_snap;
+	scan->rs_scan.rs_parallel = parallel_scan;
+
+	/*
+	 * we can use page-at-a-time mode if it's an MVCC-safe snapshot
+	 */
+	scan->rs_scan.rs_pageatatime = allow_pagemode && snapshot && IsMVCCSnapshot(snapshot);
+
+	/*
+	 * we do this here instead of in initscan() because heap_rescan also calls
+	 * initscan() and we don't want to allocate memory again
+	 */
+	if (nkeys > 0)
+		scan->rs_scan.rs_key = (ScanKey) palloc(sizeof(ScanKeyData) * nkeys);
+	else
+		scan->rs_scan.rs_key = NULL;
+
 	scan->proj_atts = palloc(relation->rd_att->natts * sizeof(int));
+	scan->fds = palloc(relation->rd_att->natts * sizeof(FILE*));
 	scan->num_proj_atts = 0;
+
+	path = relpathperm(relation->rd_node, MAIN_FORKNUM);
 	/*
 	 * convert booleans array into an array of the attribute numbers of the
 	 * required columns.
@@ -218,15 +249,19 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	{
 		/* if project_columns is empty means need all the columns */
 		if (project_columns == NULL || project_columns[i])
+		{
 			scan->proj_atts[scan->num_proj_atts++] = i;
+			path_col = psprintf("%s.%d", path, i+1);
+			scan->fds[i] = fopen(path_col, "r");
+			if (scan->fds[i] < 0)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not open file \"%s\": %m", path)));
+			pfree(path_col);
+		}
 	}
 
-	/*
-	 * This is not ideal to have duplicate TableScanDesc inside ZedStoreDesc
-	 * and HeapScanDesc. But for the purpose of the prototype seems fine for
-	 * now to use it this way.
-	 */
-	memcpy(&scan->rs_scan, &scan->heapscandesc->rs_scan, sizeof(TableScanDescData));
+	pfree(path);
 	return (TableScanDesc) scan;
 }
 
@@ -249,16 +284,24 @@ zedstoream_beginscan(Relation relation, Snapshot snapshot,
 static void
 zedstoream_setscanlimits(TableScanDesc sscan, BlockNumber startBlk, BlockNumber numBlks)
 {
-	heap_setscanlimits((TableScanDesc)((ZedStoreDesc)sscan)->heapscandesc, startBlk, numBlks);
+//	heap_setscanlimits((TableScanDesc)((ZedStoreDesc)sscan)->heapscandesc, startBlk, numBlks);
 }
 
 static void
 zedstoream_endscan(TableScanDesc sscan)
 {
+	int i;
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
-	heap_endscan((TableScanDesc)scan->heapscandesc);
 	if (scan->proj_atts)
 		pfree(scan->proj_atts);
+
+	for (i = 0; i < sscan->rs_rd->rd_att->natts; i++)
+	{
+		if (scan->fds[i])
+			fclose(scan->fds[i]);
+	}
+
+	pfree(scan->fds);
 	pfree(scan);
 }
 
@@ -266,48 +309,31 @@ static TupleTableSlot *
 zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
-	TupleTableSlot *heap_slot = MakeSingleTupleTableSlot(sscan->rs_rd->rd_att, &TTSOpsBufferHeapTuple);
-	heap_getnextslot((TableScanDesc)scan->heapscandesc, direction, heap_slot);
-	if (!TTS_EMPTY(heap_slot))
+
+	Assert(scan->num_proj_atts <= slot->tts_tupleDescriptor->natts);
+
+	slot->tts_nvalid = 0;
+	slot->tts_flags |= TTS_FLAG_EMPTY;
+
+	for (int i = 0; i < scan->num_proj_atts; i++)
 	{
-		TupleTableSlot *srcslot = heap_slot;
-		TupleTableSlot *dstslot = slot;
-		/*
-		 * if all the tuples need to be copied easier to use
-		 * ExecCopySlot(slot, heap_slot). But since we wish to pass back only
-		 * projected columns lets do the logic ourselves here.
-		 */
-		TupleDesc	srcdesc = dstslot->tts_tupleDescriptor;
-		Assert(srcdesc->natts <= dstslot->tts_tupleDescriptor->natts);
-		Assert(scan->num_proj_atts <= dstslot->tts_tupleDescriptor->natts);
+		int natt = scan->proj_atts[i];
 
-		dstslot->tts_nvalid = 0;
-		dstslot->tts_flags |= TTS_FLAG_EMPTY;
+		fread(&slot->tts_values[natt], 1,
+			  slot->tts_tupleDescriptor->attrs[i].attlen, scan->fds[natt]);
 
-		slot_getallattrs(srcslot);
-
-		for (int i = 0; i < scan->num_proj_atts; i++)
+		if (ferror(scan->fds[natt]))
+			elog(ERROR, "file read failed.");
+		if (feof(scan->fds[natt]))
 		{
-			int natt = scan->proj_atts[i];
-			dstslot->tts_values[natt] = srcslot->tts_values[natt];
-			dstslot->tts_isnull[natt] = srcslot->tts_isnull[natt];
+			ExecClearTuple(slot);
+			return slot;
 		}
-
-		dstslot->tts_nvalid = srcdesc->natts;
-		dstslot->tts_flags &= ~TTS_FLAG_EMPTY;
-
-		/*
-		 * make sure storage doesn't depend on external memory, currently our
-		 * prototype only works for pass by value datums. Implementing this
-		 * materialize to copy pass-by-reference datums will make it work for
-		 * them, but that's definitely something which can be dealt later.
-		 */
-//		tts_virtual_materialize(dstslot);
+		slot->tts_isnull[natt] = false;
 	}
-	else
-		ExecClearTuple(slot);
 
-	ExecDropSingleTupleTableSlot(heap_slot);
+	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
+	slot->tts_flags &= ~TTS_FLAG_EMPTY;
 	return slot;
 }
 
