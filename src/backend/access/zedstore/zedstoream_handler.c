@@ -65,6 +65,34 @@ zedstoream_fetch_row_version(Relation relation,
 	return false;
 }
 
+static void
+write_datum_to_file(Relation relation, Datum d, int att_num, Form_pg_attribute attr)
+{
+	char	   *path;
+	char *path_col;
+	FILE *fd;
+
+	path = relpathperm(relation->rd_node, MAIN_FORKNUM);
+	path_col = psprintf("%s.%d", path, att_num+1);
+	fd = fopen(path_col, "a");
+
+	if (fd < 0)
+	{
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\": %m", path)));
+	}
+
+	if (!attr->attbyval)
+		fwrite(DatumGetPointer(d), 1, attr->attlen, fd);
+	else
+		fwrite(&d, 1, attr->attlen, fd);
+	fflush(fd);
+	fclose(fd);
+	pfree(path);
+	pfree(path_col);
+}
+
 /*
  * Insert a heap tuple from a slot, which may contain an OID and speculative
  * insertion token.
@@ -73,20 +101,26 @@ static void
 zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 				   int options, BulkInsertState bistate)
 {
-	bool		shouldFree = true;
-	HeapTuple	tuple = ExecFetchSlotHeapTuple(slot, true, &shouldFree);
+	int i;
+	Datum *d;
+	bool *isnull;
+	slot_getallattrs(slot);
 
-	/* Update the tuple with table oid */
-	slot->tts_tableOid = RelationGetRelid(relation);
-	if (slot->tts_tableOid != InvalidOid)
-		tuple->t_tableOid = slot->tts_tableOid;
+	d = slot->tts_values;
+	isnull = slot->tts_isnull;
 
-	/* Perform the insertion, and copy the resulting ItemPointer */
-	heap_insert(relation, tuple, cid, options, bistate);
-	ItemPointerCopy(&tuple->t_self, &slot->tts_tid);
+	for(i=0; i < relation->rd_att->natts; i++)
+	{
+		Form_pg_attribute attr = &relation->rd_att->attrs[i];
 
-	if (shouldFree)
-		pfree(tuple);
+		if (attr->attlen < 0)
+			elog(LOG, "over ambitious. zedstore is only few weeks old, yet to learn handling variable lengths");
+
+		if (isnull[i])
+			elog(ERROR, "you are going too fast. zedstore can't handle NULLs currently.");
+
+		write_datum_to_file(relation, d[i], i, attr);
+	}
 }
 
 static void
