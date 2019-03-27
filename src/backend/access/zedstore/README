@@ -1,0 +1,211 @@
+
+src/backend/access/zedstore/README
+
+ZedStore - compressed column (and row) store for PostgreSQL
+===========================================================
+
+The purpose of this README is to provide overview of zedstore's
+design, major requirements/objectives it intends to fulfill and
+high-level implementation details.
+
+Objectives
+----------
+
+* Performance improvement for queries selecting subset of columns (reduced IO)
+
+* Reduced on-disk footprint compared to heap table. Achieved by
+  leveraging compression utilizing columnar storage like rle, delta,
+  dictionary, zstd
+
+* Be first-class citizen in the Postgres architecture (tables data can
+  just independently live in columnar storage) and not be at arm's
+  length though an opaque interface
+
+* Fully MVCC compliant - basically all operations supported similar to
+  heap update, delete etc...
+
+* All Indexes supported similar to heap
+
+* Hybrid row-column store, where some columns are stored together, and
+  others separately. So, provides flexibility of granularity on how to
+  divide the columns. Same columns always accessed together can be
+  stored together.
+
+* Provide better control over bloat (using zheap)
+
+* Possibly eliminate need for separate toast tables
+
+* Faster add / drop columns or changing the data type of a column
+
+Salient points for this design
+------------------------------
+
+* Layout the data/tuples in mapped fashion instead of keeping the
+  logical to physical mapping separate from actual data. So, keep all
+  the meta-data and data logically in single stream of file, avoiding
+  the need for separate forks/files to store meta-data and data.
+
+* Handle/treat operations at tuple level and not block level.
+
+* Stick to fixed size physical blocks. Variable size blocks (for
+  possibly higher compression ratios) pose need for increased logical
+  to physical mapping maintenance, plus restrictions on concurrency of
+  writes and reads to files. Hence adopt compression to fit fixed size
+  blocks instead of other way round.
+
+Highlevel design of zedStore - B-trees for the win!
+---------------------------------------------------
+
+The basic on-disk data structure is a B-tree, indexed by TID. It's a
+great data structure, fast and versatile.
+
+TID - used as a logical row identifier:
+The traditional division into block and offset numbers is
+meaningless. TID is just a 48-bit row identifier. In order to find a
+tuple with a given TID, one must always descend the B-tree. Having
+logical TID provides flexibility to move the tuples around different
+pages on page splits or page merges can be performed.
+
+The internal pages of the B-tree are quite boring. Each internal page
+just stores an array of TID/downlink pairs. Let's focus on the leaf
+level. Leaf blocks contain a short uncompressed header, and a
+variable-size compressed data section:
+
++-----------------------------
+| Fixed-size page header:
+|
+|   LSN
+|   TID low and hi key (for Lehman & Yao B-tree operations)
+|   left and right page pointers
+|   (attribute number, if column store)
+|
+| Compressed data follows:
+|
+|   TID | transaction slot (like in zheap) | size | data
+|   TID | transaction slot (like in zheap) | size | data
+|   TID | transaction slot (like in zheap) | size | data
+|   TID | transaction slot (like in zheap) | size | data
+|   ...
+|
++----------------------------
+
+Row store
+---------
+
+The tuples are stored one after another, sorted by TID. For each tuple,
+we store its 48-bit TID, a "transaction slot" (see zheap), and the
+actual tuple data. All the tuple data is compressed together as one big
+blob.
+
+In uncompressed form, the page can be arbitrarily large. But after
+compression, it must fit into a physical 8k block. If you insert or
+update a tuple, and as a result the page cannot be compressed below 8k
+anymore, the page must be split. Note that because TIDs are logical
+rather than physical identifiers, we can freely move tuples from one
+physical page to another during page split. A tuple's TID never changes.
+
+The transaction slots are used to implement MVCC, like in zheap. In
+zheap, there's a small, fixed, number of "transaction slots" on each
+page, but zedstore can have each tuple a slot of its own; in normal
+cases, the compression will squeeze them down to almost nothing.
+
+The buffer cache caches compressed blocks. Likewise, WAL-logging,
+full-page images etc. work on compressed blocks. Uncompression is done
+on-the-fly, as and when needed in backend-private memory, when
+reading. For some compressions like rel encoding or delta encoding
+tuples can be constructed directly from compressed data.
+
+Column store
+------------
+
+A column store uses the same structure but we have *multiple* B-trees,
+one for each column, all indexed by TID. A metapage at block 0, with
+links to the roots of the B-trees. Leaf pages look the same, but
+instead of storing the whole tuple, stores just a single attribute. To
+reconstruct a row with given TID, descend down the B-trees for all the
+columns using that TID, and fetch all attributes. Likewise, a
+sequential scan walks all the B-trees in lockstep.
+
+The B-trees for all columns are stored in the same physical file.
+
+TODO:
+* Although for efficiency, need to find smart allocation scheme, so
+  that blocks belonging to the same column are kept clustered.
+* Store infomask and infomask2 (transaction slot number and
+  transaction slot itself) with every column or only with one column.
+
+Insert:
+
+Inserting a new row, first decide which block to insert the row to,
+and after that, pick a TID for it. Need to maintain a Free Space Map,
+to track which (leaf) blocks have free space.
+
+Since it's a B-tree, every page has a low and high key, indicating the
+TID range that the page covers. Once target page is picked, can choose
+any unused TID in that range. Don't need a centralized "next TID"
+counter or anything like that.
+
+For column store insert to first column's Btree as mentioned above get
+the TID and then insert rest of columns using that TID.
+
+There's one subtle little issue here:
+
+Imagine that you load the table with very large rows, so that every page
+has just a single row. If you assign the TID ranges naively, as you add
+new leaf pages to the end, you will end up with leaf pages with only one
+TID each. So the first page covers TIDs [1, 2), the second [2, 3), and
+so forth. If you then delete a row, and try to insert 10 smaller rows to
+the same page, you can't, because there aren't enough unused TIDs in the
+page's range.
+
+Can avoid that by simply padding the TID ranges, as we add new pages,
+so that each page is initially allocated e.g. 50000 TIDs, even if you
+only place one row to it. That gives a lot of breathing room. There
+might still be some corner cases, where repeated updates cause page
+splits, so that you still end up with very small TIDs ranges on the
+split pages. But that seems fine.
+
+
+Select:
+
+Update:
+
+Page Format
+-----------
+(complete details once we have it)
+
+Free Space Map
+--------------
+
+
+Enhancements
+------------
+
+Instead of compressing all the tuples on a page in one batch, store a
+small "dictionary", e.g. in page header or meta page or separate
+dedicated page, and use it to compress tuple by tuple. That could make
+random reads and updates of individual tuples faster. Need to find how
+to create the dictionary first.
+
+Only cached compressed pages in the page cache. If we want to cache
+uncompressed pages instead, or in addition to that, we need to invent
+a whole new kind of a buffer cache that can deal with the
+variable-size blocks. For a first version, I think we can live without
+it.
+
+Rewrite the way TOAST works, could fairly easily allocate blocks for
+toasted data in the same file, as needed. Each oversized tuple (or
+datum) can be compressed separately, chopped into 8k chunks, and the
+chunks are stored in a chain of blocks. In place of the original
+tuple, the B-tree leaf page stores just the block number pointing to
+the head of the chain.
+
+Instead of storing all columns in the same file, we could store them in
+separate files (separate forks?). That would allow immediate reuse of
+space, after dropping a column. It's not clear how to use an FSM in that
+case, though. Might have to implement an integrated FSM, too. (Which
+might not be a bad idea, anyway).
+
+Design allows for hybrid row-column store, where some columns are
+stored together, and others have a dedicated B-tree. Need to have user
+facing syntax to allow specifying how to group the columns.
