@@ -27,6 +27,7 @@
 #include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/zedstore_internal.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
 #include "catalog/pg_am_d.h"
@@ -42,7 +43,7 @@ typedef struct ZedStoreDescData
 	/* scan parameters */
 	TableScanDescData rs_scan;  /* */
 	int *proj_atts;
-	FILE **fds;
+	ZSBtreeScan *btree_scans;
 	int num_proj_atts;
 } ZedStoreDescData;
 
@@ -62,34 +63,6 @@ zedstoream_fetch_row_version(Relation relation,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("function not implemented yet")));
 	return false;
-}
-
-static void
-write_datum_to_file(Relation relation, Datum d, int att_num, Form_pg_attribute attr)
-{
-	char	   *path;
-	char *path_col;
-	FILE *fd;
-
-	path = relpathperm(relation->rd_node, MAIN_FORKNUM);
-	path_col = psprintf("%s.%d", path, att_num+1);
-	fd = fopen(path_col, "a");
-
-	if (fd < 0)
-	{
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\": %m", path)));
-	}
-
-	if (!attr->attbyval)
-		fwrite(DatumGetPointer(d), 1, attr->attlen, fd);
-	else
-		fwrite(&d, 1, attr->attlen, fd);
-	fflush(fd);
-	fclose(fd);
-	pfree(path);
-	pfree(path_col);
 }
 
 /*
@@ -118,7 +91,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 		if (isnull[i])
 			elog(ERROR, "you are going too fast. zedstore can't handle NULLs currently.");
 
-		write_datum_to_file(relation, d[i], i, attr);
+		zsbt_insert(relation, i + 1, d[i]);
 	}
 }
 
@@ -195,8 +168,6 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 {
 	int i;
 	ZedStoreDesc scan;
-	char       *path;
-	char *path_col;
 
 	/*
 	 * allocate and initialize scan descriptor
@@ -228,10 +199,10 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 		scan->rs_scan.rs_key = NULL;
 
 	scan->proj_atts = palloc(relation->rd_att->natts * sizeof(int));
-	scan->fds = palloc(relation->rd_att->natts * sizeof(FILE*));
+
+	scan->btree_scans = palloc(relation->rd_att->natts * sizeof(ZSBtreeScan));
 	scan->num_proj_atts = 0;
 
-	path = relpathperm(relation->rd_node, MAIN_FORKNUM);
 	/*
 	 * convert booleans array into an array of the attribute numbers of the
 	 * required columns.
@@ -242,17 +213,10 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 		if (project_columns == NULL || project_columns[i])
 		{
 			scan->proj_atts[scan->num_proj_atts++] = i;
-			path_col = psprintf("%s.%d", path, i+1);
-			scan->fds[i] = fopen(path_col, "r");
-			if (scan->fds[i] < 0)
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not open file \"%s\": %m", path)));
-			pfree(path_col);
+			zsbt_begin_scan(relation, i + 1, NULL, &scan->btree_scans[i]);
 		}
 	}
 
-	pfree(path);
 	return (TableScanDesc) scan;
 }
 
@@ -282,11 +246,10 @@ zedstoream_endscan(TableScanDesc sscan)
 
 	for (i = 0; i < sscan->rs_rd->rd_att->natts; i++)
 	{
-		if (scan->fds[i])
-			fclose(scan->fds[i]);
+		zsbt_end_scan(&scan->btree_scans[i]);
 	}
 
-	pfree(scan->fds);
+	pfree(scan->btree_scans);
 	pfree(scan);
 }
 
@@ -303,17 +266,15 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	for (int i = 0; i < scan->num_proj_atts; i++)
 	{
 		int natt = scan->proj_atts[i];
+		Datum	datum;
+		ItemPointerData tid;
 
-		fread(&slot->tts_values[natt], 1,
-			  slot->tts_tupleDescriptor->attrs[i].attlen, scan->fds[natt]);
-
-		if (ferror(scan->fds[natt]))
-			elog(ERROR, "file read failed.");
-		if (feof(scan->fds[natt]))
+		if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &tid))
 		{
 			ExecClearTuple(slot);
 			return false;
 		}
+		slot->tts_values[natt] = datum;
 		slot->tts_isnull[natt] = false;
 	}
 
