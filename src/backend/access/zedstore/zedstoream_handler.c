@@ -200,7 +200,7 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 
 	scan->proj_atts = palloc(relation->rd_att->natts * sizeof(int));
 
-	scan->btree_scans = palloc(relation->rd_att->natts * sizeof(ZSBtreeScan));
+	scan->btree_scans = palloc0(relation->rd_att->natts * sizeof(ZSBtreeScan));
 	scan->num_proj_atts = 0;
 
 	/*
@@ -269,7 +269,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		Datum	datum;
 		ItemPointerData tid;
 
-		if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &tid))
+		if (!zsbt_scan_next(&scan->btree_scans[natt], &datum, &tid))
 		{
 			ExecClearTuple(slot);
 			return false;
