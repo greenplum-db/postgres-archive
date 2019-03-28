@@ -184,7 +184,7 @@ typedef struct TableAmRoutine
 
 	TableScanDesc (*scan_begin_with_column_projection)(Relation relation,
 													   Snapshot snapshot,
-													   int nkeys, ScanKey key,
+													   int nkeys, struct ScanKeyData *key,
 													   ParallelTableScanDesc parallel_scan,
 													   bool *project_column,
 													   bool allow_strat,
@@ -481,7 +481,8 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 
 static inline TableScanDesc
 table_beginscan_with_column_projection(Relation relation, Snapshot snapshot,
-									   int nkeys, ScanKey key, bool *project_column)
+									   int nkeys, struct ScanKeyData *key,
+									   bool *project_column)
 {
 	Assert(relation->rd_tableam->scans_leverage_column_projection);
 

@@ -54,10 +54,9 @@ typedef struct ZedStoreDescData *ZedStoreDesc;
 
 static bool
 zedstoream_fetch_row_version(Relation relation,
-						 ItemPointer tid,
-						 Snapshot snapshot,
-						 TupleTableSlot *slot,
-						 Relation stats_relation)
+							 ItemPointer tid,
+							 Snapshot snapshot,
+							 TupleTableSlot *slot)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -142,10 +141,10 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 }
 
 
-static HTSU_Result
+static TM_Result
 zedstoream_delete(Relation relation, ItemPointer tid, CommandId cid,
 				   Snapshot snapshot, Snapshot crosscheck, bool wait,
-				   HeapUpdateFailureData *hufd, bool changingPart)
+				   TM_FailureData *hufd, bool changingPart)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -153,11 +152,11 @@ zedstoream_delete(Relation relation, ItemPointer tid, CommandId cid,
 }
 
 
-static HTSU_Result
+static TM_Result
 zedstoream_lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 				TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
 				LockWaitPolicy wait_policy, uint8 flags,
-				HeapUpdateFailureData *hufd)
+				TM_FailureData *hufd)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -165,19 +164,11 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 }
 
 
-static HTSU_Result
+static TM_Result
 zedstoream_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 				   CommandId cid, Snapshot snapshot, Snapshot crosscheck,
-				   bool wait, HeapUpdateFailureData *hufd,
+				   bool wait, TM_FailureData *hufd,
 				   LockTupleMode *lockmode, bool *update_indexes)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
-}
-
-static void
-zedstoream_finish_bulk_insert(Relation relation, int options)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -282,12 +273,6 @@ zedstoream_beginscan(Relation relation, Snapshot snapshot,
 }
 
 static void
-zedstoream_setscanlimits(TableScanDesc sscan, BlockNumber startBlk, BlockNumber numBlks)
-{
-//	heap_setscanlimits((TableScanDesc)((ZedStoreDesc)sscan)->heapscandesc, startBlk, numBlks);
-}
-
-static void
 zedstoream_endscan(TableScanDesc sscan)
 {
 	int i;
@@ -305,7 +290,7 @@ zedstoream_endscan(TableScanDesc sscan)
 	pfree(scan);
 }
 
-static TupleTableSlot *
+static bool
 zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
@@ -327,14 +312,14 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		if (feof(scan->fds[natt]))
 		{
 			ExecClearTuple(slot);
-			return slot;
+			return false;
 		}
 		slot->tts_isnull[natt] = false;
 	}
 
 	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
 	slot->tts_flags &= ~TTS_FLAG_EMPTY;
-	return slot;
+	return true;
 }
 
 static bool
@@ -371,44 +356,11 @@ zedstoream_end_index_fetch(IndexFetchTableData* scan)
 }
 
 static bool
-zedstoream_fetch_follow(struct IndexFetchTableData *scan,
-					ItemPointer tid,
-					Snapshot snapshot,
-					TupleTableSlot *slot,
-					bool *call_again, bool *all_dead)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
-}
-
-static bool
-zedstoream_scan_bitmap_pagescan(TableScanDesc sscan,
-							TBMIterateResult *tbmres)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
-}
-
-static bool
-zedstoream_scan_bitmap_pagescan_next(TableScanDesc sscan, TupleTableSlot *slot)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
-}
-
-static bool
-zedstoream_scan_sample_next_block(TableScanDesc sscan, struct SampleScanState *scanstate)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
-}
-
-static bool
-zedstoream_scan_sample_next_tuple(TableScanDesc sscan, struct SampleScanState *scanstate, TupleTableSlot *slot)
+zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
+						 ItemPointer tid,
+						 Snapshot snapshot,
+						 TupleTableSlot *slot,
+						 bool *call_again, bool *all_dead)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -416,185 +368,33 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, struct SampleScanState *s
 }
 
 static void
-zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno, BufferAccessStrategy bstrategy)
+zedstoream_index_validate_scan(Relation heapRelation,
+						   Relation indexRelation,
+						   IndexInfo *indexInfo,
+						   Snapshot snapshot,
+						   ValidateIndexState * state)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("function not implemented yet")));
 }
 
-static bool
-zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin, double *liverows, double *deadrows, TupleTableSlot *slot)
+static double
+zedstoream_index_build_range_scan(Relation heapRelation,
+							  Relation indexRelation,
+							  IndexInfo *indexInfo,
+							  bool allow_sync,
+							  bool anyvisible,
+							  BlockNumber start_blockno,
+							  BlockNumber numblocks,
+							  IndexBuildCallback callback,
+							  void *callback_state,
+							  TableScanDesc scan)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("function not implemented yet")));
-}
-
-static void
-zedstoream_relation_nontransactional_truncate(Relation rel)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
-}
-
-static void
-zedstoream_set_new_filenode(Relation rel, char persistence,
-						TransactionId *freezeXid, MultiXactId *minmulti)
-{
-	/*
-	 * Initialize to the minimum XID that could put tuples in the table.
-	 * We know that no xacts older than RecentXmin are still running, so
-	 * that will do.
-	 */
-	*freezeXid = RecentXmin;
-
-	/*
-	 * Similarly, initialize the minimum Multixact to the first value that
-	 * could possibly be stored in tuples in the table.  Running
-	 * transactions could reuse values from their local cache, so we are
-	 * careful to consider all currently running multis.
-	 *
-	 * XXX this could be refined further, but is it worth the hassle?
-	 */
-	*minmulti = GetOldestMultiXactId();
-
-	RelationCreateStorage(rel->rd_node, persistence);
-
-	/*
-	 * If required, set up an init fork for an unlogged table so that it can
-	 * be correctly reinitialized on restart.  An immediate sync is required
-	 * even if the page has been logged, because the write did not go through
-	 * shared_buffers and therefore a concurrent checkpoint may have moved the
-	 * redo pointer past our xlog record.  Recovery may as well remove it
-	 * while replaying, for example, XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE
-	 * record. Therefore, logging is necessary even if wal_level=minimal.
-	 */
-	if (rel->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED)
-	{
-		Assert(rel->rd_rel->relkind == RELKIND_RELATION ||
-			   rel->rd_rel->relkind == RELKIND_MATVIEW ||
-			   rel->rd_rel->relkind == RELKIND_TOASTVALUE);
-		RelationOpenSmgr(rel);
-		smgrcreate(rel->rd_smgr, INIT_FORKNUM, false);
-		log_smgrcreate(&rel->rd_smgr->smgr_rnode.node, INIT_FORKNUM);
-		smgrimmedsync(rel->rd_smgr, INIT_FORKNUM);
-	}
-}
-
-static void
-zedstoream_relation_copy_data(Relation rel, RelFileNode newrnode)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
-}
-
-static void
-zedstoream_estimate_rel_size(Relation rel, int32 *attr_widths,
-						 BlockNumber *pages, double *tuples,
-						 double *allvisfrac)
-{
-	BlockNumber curpages;
-	BlockNumber relpages;
-	double		reltuples;
-	BlockNumber relallvisible;
-	double		density;
-
-	/* it has storage, ok to call the smgr */
-	curpages = RelationGetNumberOfBlocks(rel);
-
-	/* coerce values in pg_class to more desirable types */
-	relpages = (BlockNumber) rel->rd_rel->relpages;
-	reltuples = (double) rel->rd_rel->reltuples;
-	relallvisible = (BlockNumber) rel->rd_rel->relallvisible;
-
-	/*
-	 * HACK: if the relation has never yet been vacuumed, use a
-	 * minimum size estimate of 10 pages.  The idea here is to avoid
-	 * assuming a newly-created table is really small, even if it
-	 * currently is, because that may not be true once some data gets
-	 * loaded into it.  Once a vacuum or analyze cycle has been done
-	 * on it, it's more reasonable to believe the size is somewhat
-	 * stable.
-	 *
-	 * (Note that this is only an issue if the plan gets cached and
-	 * used again after the table has been filled.  What we're trying
-	 * to avoid is using a nestloop-type plan on a table that has
-	 * grown substantially since the plan was made.  Normally,
-	 * autovacuum/autoanalyze will occur once enough inserts have
-	 * happened and cause cached-plan invalidation; but that doesn't
-	 * happen instantaneously, and it won't happen at all for cases
-	 * such as temporary tables.)
-	 *
-	 * We approximate "never vacuumed" by "has relpages = 0", which
-	 * means this will also fire on genuinely empty relations.  Not
-	 * great, but fortunately that's a seldom-seen case in the real
-	 * world, and it shouldn't degrade the quality of the plan too
-	 * much anyway to err in this direction.
-	 *
-	 * If the table has inheritance children, we don't apply this
-	 * heuristic. Totally empty parent tables are quite common, so we should
-	 * be willing to believe that they are empty.
-	 */
-	if (curpages < 10 &&
-		relpages == 0 &&
-		!rel->rd_rel->relhassubclass)
-		curpages = 10;
-
-	/* report estimated # pages */
-	*pages = curpages;
-	/* quick exit if rel is clearly empty */
-	if (curpages == 0)
-	{
-		*tuples = 0;
-		*allvisfrac = 0;
-		return;
-	}
-
-	/* estimate number of tuples from previous tuple density */
-	if (relpages > 0)
-		density = reltuples / (double) relpages;
-	else
-	{
-		/*
-		 * When we have no data because the relation was truncated,
-		 * estimate tuple width from attribute datatypes.  We assume
-		 * here that the pages are completely full, which is OK for
-		 * tables (since they've presumably not been VACUUMed yet) but
-		 * is probably an overestimate for indexes.  Fortunately
-		 * get_relation_info() can clamp the overestimate to the
-		 * parent table's size.
-		 *
-		 * Note: this code intentionally disregards alignment
-		 * considerations, because (a) that would be gilding the lily
-		 * considering how crude the estimate is, and (b) it creates
-		 * platform dependencies in the default plans which are kind
-		 * of a headache for regression testing.
-		 */
-		int32		tuple_width;
-
-		tuple_width = get_rel_data_width(rel, attr_widths);
-		tuple_width += MAXALIGN(SizeofHeapTupleHeader);
-		tuple_width += sizeof(ItemIdData);
-		/* note: integer division is intentional here */
-		density = (BLCKSZ - SizeOfPageHeaderData) / tuple_width;
-	}
-	*tuples = rint(density * (double) curpages);
-
-	/*
-	 * We use relallvisible as-is, rather than scaling it up like we
-	 * do for the pages and tuples counts, on the theory that any
-	 * pages added since the last VACUUM are most likely not marked
-	 * all-visible.  But costsize.c wants it converted to a fraction.
-	 */
-	if (relallvisible == 0 || curpages <= 0)
-		*allvisfrac = 0;
-	else if ((double) relallvisible >= curpages)
-		*allvisfrac = 1;
-	else
-		*allvisfrac = (double) relallvisible / curpages;
+	
 }
 
 static const TableAmRoutine zedstoream_methods = {
@@ -603,54 +403,57 @@ static const TableAmRoutine zedstoream_methods = {
 
 	.slot_callbacks = zedstoream_slot_callbacks,
 
-	.tuple_satisfies_snapshot = zedstoream_tuple_satisfies_snapshot,
-
 	.scan_begin = zedstoream_beginscan,
 	.scan_begin_with_column_projection = zedstoream_beginscan_with_column_projection,
-	.scansetlimits = zedstoream_setscanlimits,
-	.scan_getnextslot = zedstoream_getnextslot,
 	.scan_end = zedstoream_endscan,
-//	.scan_rescan = heap_rescan,
+	.scan_rescan = heap_rescan,
+	.scan_getnextslot = zedstoream_getnextslot,
+
+	.parallelscan_estimate = table_block_parallelscan_estimate,
+	.parallelscan_initialize = table_block_parallelscan_initialize,
+	.parallelscan_reinitialize = table_block_parallelscan_reinitialize,
+
+	.index_fetch_begin = zedstoream_begin_index_fetch,
+	.index_fetch_reset = zedstoream_reset_index_fetch,
+	.index_fetch_end = zedstoream_end_index_fetch,
+	.index_fetch_tuple = zedstoream_index_fetch_tuple,
+
+//	.scansetlimits = zedstoream_setscanlimits,
 //	.scan_update_snapshot = heap_update_snapshot,
 
-	.scan_bitmap_pagescan = zedstoream_scan_bitmap_pagescan,
-	.scan_bitmap_pagescan_next = zedstoream_scan_bitmap_pagescan_next,
+//	.scan_bitmap_pagescan = zedstoream_scan_bitmap_pagescan,
+//	.scan_bitmap_pagescan_next = zedstoream_scan_bitmap_pagescan_next,
 
-	.scan_sample_next_block = zedstoream_scan_sample_next_block,
-	.scan_sample_next_tuple = zedstoream_scan_sample_next_tuple,
+//	.scan_sample_next_block = zedstoream_scan_sample_next_block,
+//	.scan_sample_next_tuple = zedstoream_scan_sample_next_tuple,
 
-	.tuple_fetch_row_version = zedstoream_fetch_row_version,
-	.tuple_fetch_follow = zedstoream_fetch_follow,
+//	.tuple_fetch_follow = zedstoream_fetch_follow,
 	.tuple_insert = zedstoream_insert,
 	.tuple_insert_speculative = zedstoream_insert_speculative,
 	.tuple_complete_speculative = zedstoream_complete_speculative,
 	.tuple_delete = zedstoream_delete,
 	.tuple_update = zedstoream_update,
 	.tuple_lock = zedstoream_lock_tuple,
+
+	.tuple_fetch_row_version = zedstoream_fetch_row_version,
+	.tuple_get_latest_tid = heap_get_latest_tid,
+	.tuple_satisfies_snapshot = zedstoream_tuple_satisfies_snapshot,
+	.compute_xid_horizon_for_tuples = heap_compute_xid_horizon_for_tuples,
+
+	.index_build_range_scan = zedstoream_index_build_range_scan,
+	.index_validate_scan = zedstoream_index_validate_scan,
+
 //	.multi_insert = heap_multi_insert,
-	.finish_bulk_insert = zedstoream_finish_bulk_insert,
-
-//	.tuple_get_latest_tid = heap_get_latest_tid,
-
+//	.finish_bulk_insert = zedstoream_finish_bulk_insert,
 //	.relation_vacuum = heap_vacuum_rel,
-	.scan_analyze_next_block = zedstoream_scan_analyze_next_block,
-	.scan_analyze_next_tuple = zedstoream_scan_analyze_next_tuple,
-	.relation_nontransactional_truncate = zedstoream_relation_nontransactional_truncate,
+//	.scan_analyze_next_block = zedstoream_scan_analyze_next_block,
+//	.scan_analyze_next_tuple = zedstoream_scan_analyze_next_tuple,
+//	.relation_nontransactional_truncate = zedstoream_relation_nontransactional_truncate,
 //	.relation_copy_for_cluster = heap_copy_for_cluster,
-	.relation_set_new_filenode = zedstoream_set_new_filenode,
-	.relation_copy_data = zedstoream_relation_copy_data,
+//	.relation_set_new_filenode = zedstoream_set_new_filenode,
+//	.relation_copy_data = zedstoream_relation_copy_data,
 //	.relation_sync = heap_sync,
-	.relation_estimate_size = zedstoream_estimate_rel_size,
-
-	.begin_index_fetch = zedstoream_begin_index_fetch,
-	.reset_index_fetch = zedstoream_reset_index_fetch,
-	.end_index_fetch = zedstoream_end_index_fetch,
-
-//	.compute_xid_horizon_for_tuples = heap_compute_xid_horizon_for_tuples,
-
-//	.index_build_range_scan = IndexBuildHeapRangeScan,
-
-//	.index_validate_scan = validate_index_heapscan
+//	.relation_estimate_size = zedstoream_estimate_rel_size,
 };
 
 Datum
