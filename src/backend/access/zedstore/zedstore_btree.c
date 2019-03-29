@@ -29,6 +29,7 @@
 #include "postgres.h"
 
 #include "access/itup.h"
+#include "access/zedstore_compression.h"
 #include "access/zedstore_internal.h"
 #include "storage/bufmgr.h"
 #include "utils/datum.h"
@@ -47,6 +48,7 @@ static Buffer zsbt_descend(Relation rel, BlockNumber rootblk, ItemPointerData ke
 static Buffer zsbt_find_downlink(Relation rel, AttrNumber attno, ItemPointerData key, BlockNumber childblk, int level, int *itemno);
 static Buffer zsbt_find_insertion_target(ZSInsertState *state, BlockNumber rootblk);
 static ItemPointerData zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state);
+static bool zsbt_compress_leaf(Buffer buf);
 static void zsbt_split_leaf(Buffer buf, OffsetNumber lastleftoff, ZSInsertState *state,
 				ZSBtreeItem *newitem, bool newitemonleft, OffsetNumber newitemoff);
 static void zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf, ItemPointerData rightlokey, BlockNumber rightblkno);
@@ -303,11 +305,18 @@ zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
 	 * If there's enough space on the page, insert. Otherwise, have to
 	 * split the page.
 	 */
-	if (PageGetFreeSpace(page) >= itemsz)
+	if (PageGetFreeSpace(page) < MAXALIGN(itemsz))
 	{
-		if (!PageAddItemExtended(page, (Item) item, itemsz, maxoff + 1, PAI_OVERWRITE))
-			elog(ERROR, "didn't fit, after all?");
+		(void) zsbt_compress_leaf(buf);
+		maxoff = PageGetMaxOffsetNumber(page);
+	}
 
+	if (PageGetFreeSpace(page) >= MAXALIGN(itemsz))
+	{
+		OffsetNumber off;
+		off = PageAddItemExtended(page, (Item) item, itemsz, maxoff + 1, PAI_OVERWRITE);
+		if (off == InvalidOffsetNumber)
+			elog(ERROR, "didn't fit, after all?");
 		MarkBufferDirty(buf);
 		/* TODO: WAL-log */
 
@@ -321,6 +330,139 @@ zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
 		zsbt_split_leaf(buf, maxoff, state, item, false, maxoff + 1);
 		return tid;
 	}
+}
+
+/*
+ * Try to compress all tuples on a page, if not compressed already.
+ *
+ * Returns true on success. Can fail, if the tuples didn't fit on the page after
+ * compressing anymore. The page is left unchanged in that case.
+ */
+static bool
+zsbt_compress_leaf(Buffer buf)
+{
+	Page		origpage = BufferGetPage(buf);
+	Page		page;
+	OffsetNumber maxoff;
+	ZSCompressContext compressor;
+	int			compressed_items = 0;
+	bool		success = true;
+	int			already_compressed = 0;
+	int			total_compressed = 0;
+	int			total = 0;
+
+	zs_compress_init(&compressor);
+
+	page = PageGetTempPageCopySpecial(origpage);
+
+	maxoff = PageGetMaxOffsetNumber(origpage);
+	for (int i = FirstOffsetNumber; i <= maxoff; i++)
+	{
+		ItemId		iid = PageGetItemId(origpage, i);
+		ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(origpage, iid);
+		ZSBtreeItem *newitem1 = NULL;
+		ZSBtreeItem *newitem2 = NULL;
+
+		total++;
+
+		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+		{
+			already_compressed++;
+			/*
+			 * Add compressed items as is. It might be worthwhile to uncompress
+			 * and recompress them, together with any new items, but currently
+			 * we don't bother.
+			 */
+			if (compressed_items > 0)
+			{
+				newitem1 = (ZSBtreeItem *) zs_compress_finish(&compressor);
+				compressed_items = 0;
+				total_compressed++;
+			}
+			newitem2 = item;
+		}
+		else
+		{
+			/* try to add this item to the compressor */
+			if (compressed_items == 0)
+				zs_compress_begin(&compressor, PageGetFreeSpace(page));
+
+			if (zs_compress_add(&compressor, item))
+			{
+				compressed_items++;
+			}
+			else
+			{
+				if (compressed_items > 0)
+				{
+					newitem1 = (ZSBtreeItem *) zs_compress_finish(&compressor);
+					compressed_items = 0;
+					total_compressed++;
+					i--;
+				}
+				else
+				{
+					/* could not compress, even on its own. Store it uncompressed, then */
+					newitem1 = item;
+				}
+			}
+		}
+
+		if (newitem1)
+		{
+			if (PageGetFreeSpace(page) < MAXALIGN(newitem1->t_size))
+			{
+				success = false;
+				break;
+			}
+			if (PageAddItemExtended(page,
+									(Item) newitem1, newitem1->t_size,
+									PageGetMaxOffsetNumber(page) + 1,
+									PAI_OVERWRITE) == InvalidOffsetNumber)
+				elog(ERROR, "could not add item to page while repacking");
+		}
+
+		if (newitem2)
+		{
+			if (PageGetFreeSpace(page) < MAXALIGN(newitem2->t_size))
+			{
+				success = false;
+				break;
+			}
+			if (PageAddItemExtended(page,
+									(Item) newitem2, newitem2->t_size,
+									PageGetMaxOffsetNumber(page) + 1,
+									PAI_OVERWRITE) == InvalidOffsetNumber)
+				elog(ERROR, "could not add item to page while repacking");
+		}
+	}
+
+	if (success && compressed_items > 0)
+	{
+		ZSBtreeItem *item = zs_compress_finish(&compressor);
+		total_compressed++;
+
+		if (PageGetFreeSpace(page) < MAXALIGN(item->t_size))
+			success = false;
+		else if (PageAddItemExtended(page,
+									 (Item) item, item->t_size,
+									 PageGetMaxOffsetNumber(page) + 1,
+									 PAI_OVERWRITE) == InvalidOffsetNumber)
+			elog(ERROR, "could not add item to page while repacking");
+	}
+
+	//elog(NOTICE, "compresleaf success: %d already %d total %d, total_comp %d, free after compression %d", success, already_compressed, total, total_compressed, (int) PageGetFreeSpace(page));
+
+	zs_compress_free(&compressor);
+
+	if (success)
+	{
+		/* TODO: WAL-log */
+		PageRestoreTempPage(page, origpage);
+		MarkBufferDirty(buf);
+	}
+
+	return success;
 }
 
 /*
@@ -713,6 +855,8 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, ZSBtre
 	scan->lastbuf = buf;
 	scan->lastoff = InvalidOffsetNumber;
 	scan->nexttid = starttid;
+
+	scan->has_decompressed = false;
 }
 
 void
@@ -734,6 +878,7 @@ bool
 zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
 {
 	TupleDesc	desc;
+	Form_pg_attribute attr;
 	Buffer		buf;
 	Page		page;
 	ZSBtreePageOpaque *opaque;
@@ -745,37 +890,28 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
 		return false;
 
 	desc = RelationGetDescr(scan->rel);
+	attr = &desc->attrs[scan->attno - 1];
+
 	for (;;)
 	{
-		buf = scan->lastbuf;
-		page = BufferGetPage(buf);
-		opaque = ZSBtreePageGetOpaque(page);
-
-		LockBuffer(buf, BUFFER_LOCK_SHARE);
-
-		/* TODO: check that the page is a valid zs btree page */
-
-		/* TODO: check the last offset first, as an optimization */
-		maxoff = PageGetMaxOffsetNumber(page);
-		for (off = FirstOffsetNumber; off <= maxoff; off++)
+loop:
+		while (scan->has_decompressed)
 		{
-			ItemId		iid = PageGetItemId(page, off);
-			ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
-			char	   *ptr;
+			ZSBtreeItem *item = zs_decompress_read_item(&scan->decompressor);
 
+			if (item == NULL)
+			{
+				scan->has_decompressed = false;
+				break;
+			}
 			if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
 			{
-				Form_pg_attribute attr = &desc->attrs[scan->attno - 1];
-
-				ptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
+				char		*ptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
 
 				*datum = fetchatt(attr, ptr);
 				*datum = datumCopy(*datum, attr->attbyval, attr->attlen);
 				*tid = item->t_tid;
-				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
-				scan->lastbuf = buf;
-				scan->lastoff = off;
 				scan->nexttid = *tid;
 				ItemPointerIncrement(&scan->nexttid);
 
@@ -783,21 +919,70 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
 			}
 		}
 
-		/* No more items on this page. Walk right, if possible */
-		next = opaque->zs_next;
-		if (next == BufferGetBlockNumber(buf))
-			elog(ERROR, "btree page %u next-pointer points to itself", next);
-		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-		if (next == InvalidBlockNumber)
+		for (;;)
 		{
-			scan->active = false;
-			ReleaseBuffer(scan->lastbuf);
-			scan->lastbuf = InvalidBuffer;
-			return false;
-		}
+			buf = scan->lastbuf;
+			page = BufferGetPage(buf);
+			opaque = ZSBtreePageGetOpaque(page);
 
-		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+
+			/* TODO: check that the page is a valid zs btree page */
+
+			/* TODO: check the last offset first, as an optimization */
+			maxoff = PageGetMaxOffsetNumber(page);
+			for (off = FirstOffsetNumber; off <= maxoff; off++)
+			{
+				ItemId		iid = PageGetItemId(page, off);
+				ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+
+				if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+				{
+					if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
+					{
+						zs_decompress_chunk(&scan->decompressor, item);
+						scan->has_decompressed = true;
+						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+						goto loop;
+					}
+				}
+				else
+				{
+					if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
+					{
+						char		*ptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
+
+						*datum = fetchatt(attr, ptr);
+						*datum = datumCopy(*datum, attr->attbyval, attr->attlen);
+						*tid = item->t_tid;
+						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+						scan->lastbuf = buf;
+						scan->lastoff = off;
+						scan->nexttid = *tid;
+						ItemPointerIncrement(&scan->nexttid);
+
+						return true;
+					}
+				}
+			}
+
+			/* No more items on this page. Walk right, if possible */
+			next = opaque->zs_next;
+			if (next == BufferGetBlockNumber(buf))
+				elog(ERROR, "btree page %u next-pointer points to itself", next);
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			if (next == InvalidBlockNumber)
+			{
+				scan->active = false;
+				ReleaseBuffer(scan->lastbuf);
+				scan->lastbuf = InvalidBuffer;
+				return false;
+			}
+
+			scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
+		}
 	}
 }
 
@@ -839,7 +1024,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 		tid = opaque->zs_lokey;
 	}
 	UnlockReleaseBuffer(buf);
-	
+
 	return tid;
 }
 

@@ -10,6 +10,7 @@
 #ifndef ZEDSTORE_INTERNAL_H
 #define ZEDSTORE_INTERNAL_H
 
+#include "access/zedstore_compression.h"
 #include "storage/bufmgr.h"
 
 /*
@@ -96,6 +97,10 @@ typedef struct ZSBtreeItem
 	uint16		t_flags;
 	ItemPointerData t_tid;
 
+	/* these are only used on compressed items */
+	ItemPointerData t_lasttid;	/* inclusive */
+	uint16		t_uncompressedsize;
+
 	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
 } ZSBtreeItem;
 
@@ -139,6 +144,13 @@ typedef struct ZSBtreeScan
 	Buffer		lastbuf;
 	OffsetNumber lastoff;
 	ItemPointerData nexttid;
+
+	/*
+	 * if we have remaining items from a compressed "container" tuple, they
+	 * are kept in the decompressor context, and 'has_decompressed' is true.
+	 */
+	ZSDecompressContext decompressor;
+	bool		has_decompressed;
 } ZSBtreeScan;
 
 /*
