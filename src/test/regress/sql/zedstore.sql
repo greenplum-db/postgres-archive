@@ -10,3 +10,16 @@ select * from t_zedstore;
 select c1, c3 from t_zedstore;
 -- only few columns in output and where clause work
 select c3 from t_zedstore where c2 > 5;
+
+--
+-- Test indexing
+--
+create index on t_zedstore (c1);
+set enable_seqscan=off;
+set enable_indexscan=on;
+
+-- index scan
+select * from t_zedstore where c1 = 5;
+
+-- index-only scan
+select c1 from t_zedstore where c1 = 5;
