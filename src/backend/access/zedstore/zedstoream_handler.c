@@ -27,6 +27,7 @@
 #include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/xact.h"
 #include "access/zedstore_internal.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
@@ -97,6 +98,8 @@ static void
 zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 				   int options, BulkInsertState bistate)
 {
+	HeapTupleHeaderData hdr;
+	HeapTupleHeader ptr_hdr;
 	int i;
 	Datum *d;
 	bool *isnull;
@@ -104,6 +107,9 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 	d = slot->tts_values;
 	isnull = slot->tts_isnull;
+
+	zs_prepare_insert(relation, &hdr, GetCurrentTransactionId(), cid, options);
+	ptr_hdr = &hdr;
 
 	for(i=0; i < relation->rd_att->natts; i++)
 	{
@@ -115,7 +121,9 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 		if (isnull[i])
 			elog(ERROR, "you are going too fast. zedstore can't handle NULLs currently.");
 
-		zsbt_insert(relation, i + 1, d[i]);
+		/* store MVCC info along with first column */
+		zsbt_insert(relation, i + 1, d[i], ptr_hdr);
+		ptr_hdr = NULL;
 	}
 }
 
@@ -284,6 +292,7 @@ zedstoream_endscan(TableScanDesc sscan)
 static bool
 zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
+	bool visible;
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 
 	Assert(scan->num_proj_atts <= slot->tts_tupleDescriptor->natts);
@@ -324,6 +333,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 				zsbt_begin_scan(scan->rs_scan.rs_rd, natt + 1,
 								scan->cur_range_start,
+								scan->rs_scan.rs_snapshot,
 								&scan->btree_scans[i]);
 			}
 			scan->state = ZSSCAN_STATE_SCANNING;
@@ -337,7 +347,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			Datum		datum;
 			ItemPointerData tid;
 
-			if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &tid))
+			if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &tid, &visible))
 			{
 				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
 				break;
@@ -348,10 +358,18 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				break;
 			}
 
+			if (!visible)
+			{
+				for (int i = 1; i < scan->num_proj_atts; i++)
+					scan->btree_scans[i].nexttid = scan->btree_scans[0].nexttid;
+				break;
+			}
+
 			slot->tts_tid = tid;
 			slot->tts_values[natt] = datum;
 			slot->tts_isnull[natt] = false;
 		}
+
 		if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
 		{
 			for (int i = 0; i < scan->num_proj_atts; i++)
@@ -363,10 +381,13 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		}
 		else
 		{
-			Assert(scan->state == ZSSCAN_STATE_SCANNING);
-			slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
-			slot->tts_flags &= ~TTS_FLAG_EMPTY;
-			return true;
+			if (visible)
+			{
+				Assert(scan->state == ZSSCAN_STATE_SCANNING);
+				slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
+				slot->tts_flags &= ~TTS_FLAG_EMPTY;
+				return true;
+			}
 		}
 	}
 
@@ -420,15 +441,16 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 		ZSBtreeScan btree_scan;
 		Datum		datum;
 		ItemPointerData	curtid;
+		bool visible;
 
 		if (att->attisdropped)
 			continue;
 
-		zsbt_begin_scan(rel, i + 1, *tid, &btree_scan);
+		zsbt_begin_scan(rel, i + 1, *tid, snapshot, &btree_scan);
 
-		if (zsbt_scan_next(&btree_scan, &datum, &curtid))
+		if (zsbt_scan_next(&btree_scan, &datum, &curtid, &visible))
 		{
-			if (!ItemPointerEquals(&curtid, tid))
+			if (!visible || !ItemPointerEquals(&curtid, tid))
 				found = false;
 			else
 			{

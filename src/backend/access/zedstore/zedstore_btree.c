@@ -28,6 +28,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/itup.h"
 #include "access/zedstore_compression.h"
 #include "access/zedstore_internal.h"
@@ -41,6 +42,7 @@ typedef struct ZSInsertState
 	Relation	rel;
 	AttrNumber	attno;
 	Datum		datum;
+	HeapTupleHeader tuple_header;
 } ZSInsertState;
 
 /* prototypes for local functions */
@@ -70,7 +72,7 @@ static int zsbt_binsrch_internal(ItemPointerData key, ZSBtreeInternalPageItem *a
  * optional TID argument for that.
  */
 ItemPointerData
-zsbt_insert(Relation rel, AttrNumber attno, Datum datum)
+zsbt_insert(Relation rel, AttrNumber attno, Datum datum, HeapTupleHeader tupleheader)
 {
 	ZSInsertState state;
 	Buffer		buf;
@@ -83,6 +85,7 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum)
 	state.rel = rel;
 	state.attno = attno;
 	state.datum = datum;
+	state.tuple_header = tupleheader;
 
 	buf = zsbt_find_insertion_target(&state, rootblk);
 
@@ -284,6 +287,13 @@ zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
 	datumsz = datumGetSize(state->datum, attr->attbyval, attr->attlen);
 	itemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
 
+	/* for first column header needs to be stored as well */
+	if (state->attno == 1)
+	{
+		Assert(state->tuple_header);
+		itemsz += SizeofHeapTupleHeader;
+	}
+
 	/* TODO: should we detoast or deal with "expanded" datums here? */
 
 	/*
@@ -295,6 +305,12 @@ zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
 	item->t_size = itemsz;
 
 	dataptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
+
+	if (state->attno == 1)
+	{
+		memcpy(dataptr, state->tuple_header, SizeofHeapTupleHeader);
+		dataptr += SizeofHeapTupleHeader;
+	}
 
 	if (attr->attbyval)
 		store_att_byval(dataptr, state->datum, attr->attlen);
@@ -826,7 +842,7 @@ zsbt_split_internal(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer child
  * Begin a scan of the btree.
  */
 void
-zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, ZSBtreeScan *scan)
+zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, Snapshot snapshot, ZSBtreeScan *scan)
 {
 	BlockNumber	rootblk;
 	Buffer		buf;
@@ -841,6 +857,7 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, ZSBtre
 		scan->active = false;
 		scan->lastbuf = InvalidBuffer;
 		scan->lastoff = InvalidOffsetNumber;
+		scan->snapshot = NULL;
 		ItemPointerSetInvalid(&scan->nexttid);
 		return;
 	}
@@ -850,6 +867,7 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, ZSBtre
 
 	scan->rel = rel;
 	scan->attno = attno;
+	scan->snapshot = snapshot;
 
 	scan->active = true;
 	scan->lastbuf = buf;
@@ -875,7 +893,7 @@ zsbt_end_scan(ZSBtreeScan *scan)
  * and its TID in *tid. For a pass-by-ref datum, it's a palloc'd copy.
  */
 bool
-zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
+zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid, bool *visible)
 {
 	TupleDesc	desc;
 	Form_pg_attribute attr;
@@ -907,6 +925,18 @@ loop:
 			if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
 			{
 				char		*ptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
+
+				/* first column stores the MVCC information */
+				if (scan->attno == 1)
+				{
+					*visible = zs_tuple_satisfies_visibility((HeapTupleHeader)ptr,
+															 &item->t_tid,
+															 scan->snapshot,
+															 buf);
+					ptr += SizeofHeapTupleHeader;
+				}
+				else
+					*visible = true;
 
 				*datum = fetchatt(attr, ptr);
 				*datum = datumCopy(*datum, attr->attbyval, attr->attlen);
@@ -951,6 +981,18 @@ loop:
 					if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
 					{
 						char		*ptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
+
+						/* first column stores the MVCC information */
+						if (scan->attno == 1)
+						{
+							*visible = zs_tuple_satisfies_visibility((HeapTupleHeader)ptr,
+																	   &item->t_tid,
+																	   scan->snapshot,
+																	   buf);
+							ptr += SizeofHeapTupleHeader;
+						}
+						else
+							*visible = true;
 
 						*datum = fetchatt(attr, ptr);
 						*datum = datumCopy(*datum, attr->attbyval, attr->attlen);

@@ -11,6 +11,13 @@ select c1, c3 from t_zedstore;
 -- only few columns in output and where clause work
 select c3 from t_zedstore where c2 > 5;
 
+-- Test abort works
+begin;
+insert into t_zedstore select i,i+1,i+2 from generate_series(21, 25)i;
+abort;
+insert into t_zedstore select i,i+1,i+2 from generate_series(31, 35)i;
+select * from t_zedstore;
+
 --
 -- Test indexing
 --
@@ -23,3 +30,5 @@ select * from t_zedstore where c1 = 5;
 
 -- index-only scan
 select c1 from t_zedstore where c1 = 5;
+
+

@@ -144,6 +144,7 @@ typedef struct ZSBtreeScan
 	Buffer		lastbuf;
 	OffsetNumber lastoff;
 	ItemPointerData nexttid;
+	Snapshot snapshot;
 
 	/*
 	 * if we have remaining items from a compressed "container" tuple, they
@@ -166,10 +167,10 @@ ItemPointerIncrement(ItemPointer itemptr)
 }
 
 /* prototypes for functions in zstore_btree.c */
-extern ItemPointerData zsbt_insert(Relation rel, AttrNumber attno, Datum datum);
+extern ItemPointerData zsbt_insert(Relation rel, AttrNumber attno, Datum datum, HeapTupleHeader tupleheader);
 
-extern void zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, ZSBtreeScan *scan);
-extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid);
+extern void zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, Snapshot snapshot, ZSBtreeScan *scan);
+extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid, bool *visible);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern ItemPointerData zsbt_get_last_tid(Relation rel, AttrNumber attno);
 
@@ -177,5 +178,9 @@ extern ItemPointerData zsbt_get_last_tid(Relation rel, AttrNumber attno);
 extern Buffer zs_getnewbuf(Relation rel);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
+
+extern void zs_prepare_insert(Relation relation, HeapTupleHeader hdr, TransactionId xid, CommandId cid, int options);
+
+extern bool zs_tuple_satisfies_visibility(HeapTupleHeader tuple, ItemPointer tid, Snapshot snapshot, Buffer buffer);
 
 #endif							/* ZEDSTORE_INTERNAL_H */
