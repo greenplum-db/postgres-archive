@@ -938,7 +938,7 @@ loop:
 
 				if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 				{
-					if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
+					if (ItemPointerCompare(&item->t_lasttid, &scan->nexttid) >= 0)
 					{
 						zs_decompress_chunk(&scan->decompressor, item);
 						scan->has_decompressed = true;
