@@ -33,19 +33,43 @@
 #include "catalog/pg_am_d.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
+#include "executor/executor.h"
 #include "optimizer/plancat.h"
+#include "storage/procarray.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
-#include "storage/bufmgr.h"
+
+typedef enum
+{
+	ZSSCAN_STATE_UNSTARTED,
+	ZSSCAN_STATE_SCANNING,
+	ZSSCAN_STATE_FINISHED_RANGE,
+	ZSSCAN_STATE_FINISHED
+} zs_scan_state;
 
 typedef struct ZedStoreDescData
 {
 	/* scan parameters */
 	TableScanDescData rs_scan;  /* */
-	int *proj_atts;
+	int		   *proj_atts;
 	ZSBtreeScan *btree_scans;
-	int num_proj_atts;
+	int			num_proj_atts;
+
+	zs_scan_state state;
+	ItemPointerData cur_range_start;
+	ItemPointerData cur_range_end;
+	bool		finished;
 } ZedStoreDescData;
+
+typedef struct ParallelZSScanDescData *ParallelZSScanDesc;
+
+static Size zs_parallelscan_estimate(Relation rel);
+static Size zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan);
+static void zs_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan);
+static bool zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
+						  ItemPointer start, ItemPointer end);
+
+
 
 typedef struct ZedStoreDescData *ZedStoreDesc;
 /* ----------------------------------------------------------------
@@ -189,6 +213,8 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	 */
 	scan->rs_scan.rs_pageatatime = allow_pagemode && snapshot && IsMVCCSnapshot(snapshot);
 
+	scan->state = ZSSCAN_STATE_UNSTARTED;
+
 	/*
 	 * we do this here instead of in initscan() because heap_rescan also calls
 	 * initscan() and we don't want to allocate memory again
@@ -213,7 +239,6 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 		if (project_columns == NULL || project_columns[i])
 		{
 			scan->proj_atts[scan->num_proj_atts++] = i;
-			zsbt_begin_scan(relation, i + 1, NULL, &scan->btree_scans[i]);
 		}
 	}
 
@@ -249,6 +274,9 @@ zedstoream_endscan(TableScanDesc sscan)
 		zsbt_end_scan(&scan->btree_scans[i]);
 	}
 
+	if (scan->rs_scan.rs_temp_snap)
+		UnregisterSnapshot(scan->rs_scan.rs_snapshot);
+
 	pfree(scan->btree_scans);
 	pfree(scan);
 }
@@ -263,24 +291,84 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	slot->tts_nvalid = 0;
 	slot->tts_flags |= TTS_FLAG_EMPTY;
 
-	for (int i = 0; i < scan->num_proj_atts; i++)
+	while (scan->state != ZSSCAN_STATE_FINISHED)
 	{
-		int natt = scan->proj_atts[i];
-		Datum	datum;
-		ItemPointerData tid;
-
-		if (!zsbt_scan_next(&scan->btree_scans[natt], &datum, &tid))
+		if (scan->state == ZSSCAN_STATE_UNSTARTED ||
+			scan->state == ZSSCAN_STATE_FINISHED_RANGE)
 		{
-			ExecClearTuple(slot);
-			return false;
+			if (scan->rs_scan.rs_parallel)
+			{
+				/* Allocate next range of TIDs to scan */
+				if (!zs_parallelscan_nextrange(scan->rs_scan.rs_rd,
+											   (ParallelZSScanDesc) scan->rs_scan.rs_parallel,
+											   &scan->cur_range_start, &scan->cur_range_end))
+				{
+					scan->state = ZSSCAN_STATE_FINISHED;
+					break;
+				}
+			}
+			else
+			{
+				if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
+				{
+					scan->state = ZSSCAN_STATE_FINISHED;
+					break;
+				}
+				ItemPointerSet(&scan->cur_range_start, 0, 1);
+				ItemPointerSet(&scan->cur_range_end, MaxBlockNumber, 0xffff);
+			}
+
+			for (int i = 0; i < scan->num_proj_atts; i++)
+			{
+				zsbt_begin_scan(scan->rs_scan.rs_rd, i + 1,
+								scan->cur_range_start,
+								&scan->btree_scans[i]);
+			}
+			scan->state = ZSSCAN_STATE_SCANNING;
 		}
-		slot->tts_values[natt] = datum;
-		slot->tts_isnull[natt] = false;
+
+		/* We now have a range to scan */
+		Assert(scan->state == ZSSCAN_STATE_SCANNING);
+		for (int i = 0; i < scan->num_proj_atts; i++)
+		{
+			int			natt = scan->proj_atts[i];
+			Datum		datum;
+			ItemPointerData tid;
+
+			if (!zsbt_scan_next(&scan->btree_scans[natt], &datum, &tid))
+			{
+				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
+				break;
+			}
+			if (ItemPointerCompare(&tid, &scan->cur_range_end) >= 0)
+			{
+				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
+				break;
+			}
+
+			slot->tts_values[natt] = datum;
+			slot->tts_isnull[natt] = false;
+		}
+		if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
+		{
+			for (int i = 0; i < scan->num_proj_atts; i++)
+			{
+				int			natt = scan->proj_atts[i];
+
+				zsbt_end_scan(&scan->btree_scans[natt]);
+			}
+		}
+		else
+		{
+			Assert(scan->state == ZSSCAN_STATE_SCANNING);
+			slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
+			slot->tts_flags &= ~TTS_FLAG_EMPTY;
+			return true;
+		}
 	}
 
-	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
-	slot->tts_flags &= ~TTS_FLAG_EMPTY;
-	return true;
+	ExecClearTuple(slot);
+	return false;
 }
 
 static bool
@@ -370,9 +458,9 @@ static const TableAmRoutine zedstoream_methods = {
 	.scan_rescan = heap_rescan,
 	.scan_getnextslot = zedstoream_getnextslot,
 
-	.parallelscan_estimate = table_block_parallelscan_estimate,
-	.parallelscan_initialize = table_block_parallelscan_initialize,
-	.parallelscan_reinitialize = table_block_parallelscan_reinitialize,
+	.parallelscan_estimate = zs_parallelscan_estimate,
+	.parallelscan_initialize = zs_parallelscan_initialize,
+	.parallelscan_reinitialize = zs_parallelscan_reinitialize,
 
 	.index_fetch_begin = zedstoream_begin_index_fetch,
 	.index_fetch_reset = zedstoream_reset_index_fetch,
@@ -421,4 +509,88 @@ Datum
 zedstore_tableam_handler(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_POINTER(&zedstoream_methods);
+}
+
+
+
+
+/*
+ * Routines for dividing up the TID range for parallel seq scans
+ */
+
+typedef struct ParallelZSScanDescData
+{
+	ParallelTableScanDescData base;
+
+	ItemPointerData pzs_endtid;		/* last tid + 1 in relation at start of scan */
+	pg_atomic_uint64 pzs_allocatedtid_blk;	/* TID space allocated to workers so far. (in  65536 increments) */
+} ParallelZSScanDescData;
+typedef struct ParallelZSScanDescData *ParallelZSScanDesc;
+
+static Size
+zs_parallelscan_estimate(Relation rel)
+{
+	return sizeof(ParallelZSScanDescData);
+}
+
+static Size
+zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
+{
+	ParallelZSScanDesc zpscan = (ParallelZSScanDesc) pscan;
+
+	zpscan->base.phs_relid = RelationGetRelid(rel);
+	/* FIXME: if attribue 1 is dropped, should use another attribute */
+	zpscan->pzs_endtid = zsbt_get_last_tid(rel, 1);
+	pg_atomic_init_u64(&zpscan->pzs_allocatedtid_blk, 0);
+
+	return sizeof(ParallelZSScanDescData);
+}
+
+static void
+zs_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
+{
+	ParallelZSScanDesc bpscan = (ParallelZSScanDesc) pscan;
+
+	pg_atomic_write_u64(&bpscan->pzs_allocatedtid_blk, 0);
+}
+
+/*
+ * get the next TID range to scan
+ *
+ * Returns true if there is more to scan, false otherwise.
+ *
+ * Get the next TID range to scan.  Even if there are no TIDs left to scan,
+ * another backend could have grabbed a range to scan and not yet finished
+ * looking at it, so it doesn't follow that the scan is done when the first
+ * backend gets 'false' return.
+ */
+static bool
+zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
+						  ItemPointer start, ItemPointer end)
+{
+	uint64		allocatedtid_blk;
+
+	/*
+	 * zhs_allocatedtid tracks how much has been allocated to workers
+	 * already.  When phs_allocatedtid >= rs_lasttid, all TIDs have been
+	 * allocated.
+	 *
+	 * Because we use an atomic fetch-and-add to fetch the current value, the
+	 * phs_allocatedtid counter will exceed rs_lasttid, because workers will
+	 * still increment the value, when they try to allocate the next block but
+	 * all blocks have been allocated already. The counter must be 64 bits
+	 * wide because of that, to avoid wrapping around when rs_lasttid is close
+	 * to 2^32.  That's also one reason we do this at granularity of 2^16 TIDs,
+	 * even though zedstore isn't block-oriented.
+	 *
+	 * TODO: we divide the TID space into chunks of 2^16 TIDs each. That's
+	 * pretty inefficient, there's a fair amount of overhead in re-starting
+	 * the B-tree scans between each range. We probably should use much larger
+	 * ranges. But this is good for testing.
+	 */
+	allocatedtid_blk = pg_atomic_fetch_add_u64(&pzscan->pzs_allocatedtid_blk, 1);
+	ItemPointerSet(start, allocatedtid_blk, 1);
+	ItemPointerSet(end, allocatedtid_blk + 1, 1);
+
+	return ItemPointerCompare(start, &pzscan->pzs_endtid) < 0;
 }

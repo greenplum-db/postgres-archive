@@ -688,11 +688,10 @@ zsbt_split_internal(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer child
  * Begin a scan of the btree.
  */
 void
-zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointer starttid, ZSBtreeScan *scan)
+zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, ZSBtreeScan *scan)
 {
 	BlockNumber	rootblk;
 	Buffer		buf;
-	ItemPointerData leftmostkey;
 
 	rootblk = zsmeta_get_root_for_attribute(rel, attno, false);
 
@@ -708,13 +707,7 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointer starttid, ZSBtreeSca
 		return;
 	}
 
-	if (!starttid)
-	{
-		ItemPointerSet(&leftmostkey, 0, 1);
-		starttid = &leftmostkey;
-	}
-
-	buf = zsbt_descend(rel, rootblk, *starttid);
+	buf = zsbt_descend(rel, rootblk, starttid);
 	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
 	scan->rel = rel;
@@ -723,12 +716,15 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointer starttid, ZSBtreeSca
 	scan->active = true;
 	scan->lastbuf = buf;
 	scan->lastoff = InvalidOffsetNumber;
-	scan->nexttid = *starttid;
+	scan->nexttid = starttid;
 }
 
 void
 zsbt_end_scan(ZSBtreeScan *scan)
 {
+	if (!scan->active)
+		return;
+
 	if (scan->lastbuf)
 		ReleaseBuffer(scan->lastbuf);
 	scan->active = false;
@@ -808,6 +804,46 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
 		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 	}
 }
+
+ItemPointerData
+zsbt_get_last_tid(Relation rel, AttrNumber attno)
+{
+	BlockNumber	rootblk;
+	ItemPointerData rightmostkey;
+	ItemPointerData	tid;
+	Buffer		buf;
+	Page		page;
+	ZSBtreePageOpaque *opaque;
+	OffsetNumber maxoff;
+
+	/* Find the rightmost leaf */
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
+	ItemPointerSet(&rightmostkey, MaxBlockNumber, 0xfffe);
+	buf = zsbt_descend(rel, rootblk, rightmostkey);
+	page = BufferGetPage(buf);
+	opaque = ZSBtreePageGetOpaque(page);
+
+	/*
+	 * Look at the last item, for its tid.
+	 */
+	maxoff = PageGetMaxOffsetNumber(page);
+	if (maxoff >= FirstOffsetNumber)
+	{
+		ItemId		iid = PageGetItemId(page, maxoff);
+		IndexTuple	hitup = (IndexTuple) PageGetItem(page, iid);
+
+		tid = hitup->t_tid;
+		ItemPointerIncrement(&tid);
+	}
+	else
+	{
+		tid = opaque->zs_lokey;
+	}
+	UnlockReleaseBuffer(buf);
+	
+	return tid;
+}
+
 
 static int
 zsbt_binsrch_internal(ItemPointerData key, ZSBtreeInternalPageItem *arr, int arr_elems)

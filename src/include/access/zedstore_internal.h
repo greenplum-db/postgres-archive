@@ -142,9 +142,10 @@ ItemPointerIncrement(ItemPointer itemptr)
 /* prototypes for functions in zstore_btree.c */
 extern ItemPointerData zsbt_insert(Relation rel, AttrNumber attno, Datum datum);
 
-extern void zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointer starttid, ZSBtreeScan *scan);
+extern void zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, ZSBtreeScan *scan);
 extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
+extern ItemPointerData zsbt_get_last_tid(Relation rel, AttrNumber attno);
 
 /* prototypes for functions in zstore_meta.c */
 extern Buffer zs_getnewbuf(Relation rel);
