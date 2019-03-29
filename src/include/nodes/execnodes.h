@@ -1414,6 +1414,7 @@ typedef struct IndexOnlyScanState
 	struct IndexScanDescData *ioss_ScanDesc;
 	Buffer		ioss_VMBuffer;
 	Size		ioss_PscanLen;
+	TupleTableSlot *ioss_TableSlot;
 } IndexOnlyScanState;
 
 /* ----------------
