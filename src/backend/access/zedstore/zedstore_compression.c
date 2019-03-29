@@ -87,7 +87,7 @@ zs_compress_begin(ZSCompressContext *context, int maxCompressedSize)
 	maxUncompressedSize -= MAX_COMPRESS_EXPANSION_BYTES;
 	if (maxUncompressedSize < 0)
 		maxUncompressedSize = 0;
-	context->maxUncompressedSize = maxCompressedSize;
+	context->maxUncompressedSize = maxUncompressedSize;
 	context->nitems = 0;
 	context->rawsize = 0;
 }
