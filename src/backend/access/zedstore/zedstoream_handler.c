@@ -103,6 +103,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	int i;
 	Datum *d;
 	bool *isnull;
+	ItemPointerData tid;
 	slot_getallattrs(slot);
 
 	d = slot->tts_values;
@@ -122,9 +123,12 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 			elog(ERROR, "you are going too fast. zedstore can't handle NULLs currently.");
 
 		/* store MVCC info along with first column */
-		zsbt_insert(relation, i + 1, d[i], ptr_hdr);
+		tid = zsbt_insert(relation, i + 1, d[i], ptr_hdr);
 		ptr_hdr = NULL;
 	}
+
+	slot->tts_tableOid = RelationGetRelid(relation);
+	ItemPointerCopy(&tid, &slot->tts_tid);
 }
 
 static void
