@@ -84,8 +84,22 @@ ZSBtreeInternalPageIsFull(Page page)
 /*
  * Leaf page layout
  *
- * currently, "normal" page layout, storing IndexTuples.
+ * Leaf pages are packed with ZSBtreeItems. There are two kinds of items:
+ *
+ * 1. plain item, holds one tuple (or rather, one datum).
+ *
+ * 2. A "container item", which holds multiple plain items, compressed.
  */
+typedef struct ZSBtreeItem
+{
+	uint16		t_size;
+	uint16		t_flags;
+	ItemPointerData t_tid;
+
+	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
+} ZSBtreeItem;
+
+#define		ZSBT_COMPRESSED		0x0001
 
 /*
  * Block 0 on every ZedStore table is a metapage.

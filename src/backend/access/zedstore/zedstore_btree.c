@@ -16,7 +16,6 @@
  * - range scans by TID (for bitmap index scan)
  *
  * TODO:
- * - internal pages
  * - compression
  *
  * NOTES:
@@ -49,7 +48,7 @@ static Buffer zsbt_find_downlink(Relation rel, AttrNumber attno, ItemPointerData
 static Buffer zsbt_find_insertion_target(ZSInsertState *state, BlockNumber rootblk);
 static ItemPointerData zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state);
 static void zsbt_split_leaf(Buffer buf, OffsetNumber lastleftoff, ZSInsertState *state,
-				IndexTuple newitem, bool newitemonleft, OffsetNumber newitemoff);
+				ZSBtreeItem *newitem, bool newitemonleft, OffsetNumber newitemoff);
 static void zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf, ItemPointerData rightlokey, BlockNumber rightblkno);
 static void zsbt_split_internal(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer childbuf,
 					OffsetNumber newoff, ItemPointerData newkey, BlockNumber childblk);
@@ -258,7 +257,7 @@ zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
 	ZSBtreePageOpaque *opaque = ZSBtreePageGetOpaque(page);
 	Size		datumsz;
 	Size		itemsz;
-	IndexTuple	itup;
+	ZSBtreeItem	*item;
 	char	   *dataptr;
 	ItemPointerData tid;
 	OffsetNumber maxoff;
@@ -270,7 +269,7 @@ zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
 	if (maxoff >= FirstOffsetNumber)
 	{
 		ItemId		iid = PageGetItemId(page, maxoff);
-		IndexTuple	hitup = (IndexTuple) PageGetItem(page, iid);
+		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
 
 		tid = hitup->t_tid;
 		ItemPointerIncrement(&tid);
@@ -281,22 +280,19 @@ zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
 	}
 
 	datumsz = datumGetSize(state->datum, attr->attbyval, attr->attlen);
-	itemsz = sizeof(IndexTupleData) + datumsz;
+	itemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
 
 	/* TODO: should we detoast or deal with "expanded" datums here? */
 
 	/*
-	 * Form an IndexTuple to insert.
-	 *
-	 * TODO: we probably don't want to use IndexTuples in the future, but it's
-	 * handy right now.
+	 * Form a ZSBtreeItem to insert.
 	 */
-	itup = palloc(itemsz);
-	itup->t_tid = tid;
-	itup->t_info = 0;
-	itup->t_info |= itemsz;
+	item = palloc(itemsz);
+	item->t_tid = tid;
+	item->t_flags = 0;
+	item->t_size = itemsz;
 
-	dataptr = ((char *) itup) + sizeof(IndexTupleData);
+	dataptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
 
 	if (attr->attbyval)
 		store_att_byval(dataptr, state->datum, attr->attlen);
@@ -309,7 +305,7 @@ zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
 	 */
 	if (PageGetFreeSpace(page) >= itemsz)
 	{
-		if (!PageAddItemExtended(page, (Item) itup, itemsz, maxoff + 1, PAI_OVERWRITE))
+		if (!PageAddItemExtended(page, (Item) item, itemsz, maxoff + 1, PAI_OVERWRITE))
 			elog(ERROR, "didn't fit, after all?");
 
 		MarkBufferDirty(buf);
@@ -322,7 +318,7 @@ zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
 	else
 	{
 		maxoff = PageGetMaxOffsetNumber(page);
-		zsbt_split_leaf(buf, maxoff, state, itup, false, maxoff + 1);
+		zsbt_split_leaf(buf, maxoff, state, item, false, maxoff + 1);
 		return tid;
 	}
 }
@@ -332,7 +328,7 @@ zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
  */
 static void
 zsbt_split_leaf(Buffer buf, OffsetNumber lastleftoff, ZSInsertState *state,
-				IndexTuple newitem, bool newitemonleft, OffsetNumber newitemoff)
+				ZSBtreeItem *newitem, bool newitemonleft, OffsetNumber newitemoff)
 {
 	Buffer		leftbuf = buf;
 	Buffer		rightbuf;
@@ -396,14 +392,14 @@ zsbt_split_leaf(Buffer buf, OffsetNumber lastleftoff, ZSInsertState *state,
 	for (i = FirstOffsetNumber; i <= maxoff; i++)
 	{
 		ItemId		iid = PageGetItemId(origpage, i);
-		IndexTuple	itup = (IndexTuple) PageGetItem(origpage, iid);
+		ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(origpage, iid);
 		Page		targetpage;
 
 		if (i == newitemoff)
 		{
 			targetpage = newitemonleft ? leftpage : rightpage;
 			if (PageAddItemExtended(targetpage,
-									(Item) newitem, IndexTupleSize(newitem),
+									(Item) newitem, newitem->t_size,
 									PageGetMaxOffsetNumber(targetpage) + 1,
 									PAI_OVERWRITE) == InvalidOffsetNumber)
 				elog(ERROR, "could not add new item to page on split");
@@ -411,7 +407,7 @@ zsbt_split_leaf(Buffer buf, OffsetNumber lastleftoff, ZSInsertState *state,
 
 		targetpage = (i <= lastleftoff) ? leftpage : rightpage;
 		if (PageAddItemExtended(targetpage,
-								(Item) itup, IndexTupleSize(itup),
+								(Item) item, item->t_size,
 								PageGetMaxOffsetNumber(targetpage) + 1,
 								PAI_OVERWRITE) == InvalidOffsetNumber)
 			elog(ERROR, "could not add item to page on split");
@@ -420,7 +416,7 @@ zsbt_split_leaf(Buffer buf, OffsetNumber lastleftoff, ZSInsertState *state,
 	{
 		Assert(!newitemonleft);
 		if (PageAddItemExtended(rightpage,
-								(Item) newitem, IndexTupleSize(newitem),
+								(Item) newitem, newitem->t_size,
 								FirstOffsetNumber,
 								PAI_OVERWRITE) == InvalidOffsetNumber)
 			elog(ERROR, "could not add new item to page on split");
@@ -764,18 +760,18 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
 		for (off = FirstOffsetNumber; off <= maxoff; off++)
 		{
 			ItemId		iid = PageGetItemId(page, off);
-			IndexTuple	itup = (IndexTuple) PageGetItem(page, iid);
+			ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
 			char	   *ptr;
 
-			if (ItemPointerCompare(&itup->t_tid, &scan->nexttid) >= 0)
+			if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
 			{
 				Form_pg_attribute attr = &desc->attrs[scan->attno - 1];
 
-				ptr = ((char *) itup) + sizeof(IndexTupleData);
+				ptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
 
 				*datum = fetchatt(attr, ptr);
 				*datum = datumCopy(*datum, attr->attbyval, attr->attlen);
-				*tid = itup->t_tid;
+				*tid = item->t_tid;
 				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
 				scan->lastbuf = buf;
@@ -805,6 +801,9 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
 	}
 }
 
+/*
+ * Get the last tid (plus one) in the tree.
+ */
 ItemPointerData
 zsbt_get_last_tid(Relation rel, AttrNumber attno)
 {
@@ -830,7 +829,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 	if (maxoff >= FirstOffsetNumber)
 	{
 		ItemId		iid = PageGetItemId(page, maxoff);
-		IndexTuple	hitup = (IndexTuple) PageGetItem(page, iid);
+		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
 
 		tid = hitup->t_tid;
 		ItemPointerIncrement(&tid);
