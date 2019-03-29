@@ -320,7 +320,9 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 			for (int i = 0; i < scan->num_proj_atts; i++)
 			{
-				zsbt_begin_scan(scan->rs_scan.rs_rd, i + 1,
+				int			natt = scan->proj_atts[i];
+
+				zsbt_begin_scan(scan->rs_scan.rs_rd, natt + 1,
 								scan->cur_range_start,
 								&scan->btree_scans[i]);
 			}
@@ -335,7 +337,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			Datum		datum;
 			ItemPointerData tid;
 
-			if (!zsbt_scan_next(&scan->btree_scans[natt], &datum, &tid))
+			if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &tid))
 			{
 				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
 				break;

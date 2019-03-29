@@ -48,3 +48,23 @@ select c3 from t_zedstore where c2 > 5;
  12
 (6 rows)
 
+--
+-- Test indexing
+--
+create index on t_zedstore (c1);
+set enable_seqscan=off;
+set enable_indexscan=on;
+-- index scan
+select * from t_zedstore where c1 = 5;
+ c1 | c2 | c3 
+----+----+----
+  5 |  6 |  7
+(1 row)
+
+-- index-only scan
+select c1 from t_zedstore where c1 = 5;
+ c1 
+----
+  5
+(1 row)
+
