@@ -929,6 +929,7 @@ loop:
 				/* first column stores the MVCC information */
 				if (scan->attno == 1)
 				{
+					/* TODO: How to handle hintbit setting for uncompressed items? */
 					*visible = zs_tuple_satisfies_visibility((HeapTupleHeader)ptr,
 															 &item->t_tid,
 															 scan->snapshot,
@@ -1026,6 +1027,95 @@ loop:
 			scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 		}
 	}
+}
+
+
+/*
+ * Return true if there was another tuple. The datum is returned in *datum,
+ * and its TID in *tid. For a pass-by-ref datum, it's a palloc'd copy.
+ */
+bool
+zsbt_scan_for_tuple_delete(ZSBtreeScanForTupleDelete *deldesc, ItemPointerData tid)
+{
+	Page		page;
+	ZSBtreePageOpaque *opaque;
+	OffsetNumber off;
+	OffsetNumber maxoff;
+	BlockNumber	next;
+
+	BlockNumber	rootblk;
+	Buffer		buf;
+	AttrNumber attno = 1; /* for delete scan only first column */
+	Relation rel = deldesc->rel;
+
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, false);
+
+	if (rootblk == InvalidBlockNumber)
+		return false;
+
+	buf = zsbt_descend(rel, rootblk, tid);
+	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+	for (;;)
+	{
+loop:
+		for (;;)
+		{
+			page = BufferGetPage(buf);
+			opaque = ZSBtreePageGetOpaque(page);
+
+			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+			/* TODO: check that the page is a valid zs btree page */
+
+			/* TODO: check the last offset first, as an optimization */
+			maxoff = PageGetMaxOffsetNumber(page);
+			for (off = FirstOffsetNumber; off <= maxoff; off++)
+			{
+				ItemId		iid = PageGetItemId(page, off);
+				ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+
+				if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+				{
+					if (ItemPointerCompare(&item->t_lasttid, &tid) >= 0)
+					{
+						/* TODO: lets deal with compressed items for delete later */
+//						zs_decompress_chunk(&scan->decompressor, item);
+						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+						goto loop;
+					}
+				}
+				else
+				{
+					if (ItemPointerCompare(&item->t_tid, &tid) >= 0)
+					{
+						char		*ptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
+						zs_tuple_delete(deldesc, (HeapTupleHeader)ptr, &tid, buf);
+						Assert(ItemPointerEquals(&tid, &item->t_tid));
+						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+						ReleaseBuffer(buf);
+						return true;
+					}
+				}
+			}
+
+			/* No more items on this page. Walk right, if possible */
+			next = opaque->zs_next;
+			if (next == BufferGetBlockNumber(buf))
+				elog(ERROR, "btree page %u next-pointer points to itself", next);
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			if (next == InvalidBlockNumber)
+			{
+				ReleaseBuffer(buf);
+				return false;
+			}
+			buf = ReleaseAndReadBuffer(buf, rel, next);
+		}
+	}
+
+	if (buf)
+		ReleaseBuffer(buf);
 }
 
 /*

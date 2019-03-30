@@ -10,6 +10,7 @@
 #ifndef ZEDSTORE_INTERNAL_H
 #define ZEDSTORE_INTERNAL_H
 
+#include "access/tableam.h"
 #include "access/zedstore_compression.h"
 #include "storage/bufmgr.h"
 
@@ -154,6 +155,16 @@ typedef struct ZSBtreeScan
 	bool		has_decompressed;
 } ZSBtreeScan;
 
+typedef struct ZSBtreeScanForTupleDelete
+{
+	Relation rel;
+	Snapshot snapshot;
+	CommandId cid;
+	bool wait;
+	TM_FailureData *tmfd;
+	TM_Result result;
+} ZSBtreeScanForTupleDelete;
+
 /*
  * Helper function to "increment" a TID by one.
  */
@@ -174,6 +185,8 @@ extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid
 extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern ItemPointerData zsbt_get_last_tid(Relation rel, AttrNumber attno);
 
+extern bool zsbt_scan_for_tuple_delete(ZSBtreeScanForTupleDelete *deldesc, ItemPointerData tid);
+
 /* prototypes for functions in zstore_meta.c */
 extern Buffer zs_getnewbuf(Relation rel);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
@@ -182,5 +195,6 @@ extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buf
 extern void zs_prepare_insert(Relation relation, HeapTupleHeader hdr, TransactionId xid, CommandId cid, int options);
 
 extern bool zs_tuple_satisfies_visibility(HeapTupleHeader tuple, ItemPointer tid, Snapshot snapshot, Buffer buffer);
+extern void zs_tuple_delete(ZSBtreeScanForTupleDelete *deldesc, HeapTupleHeader hdr, ItemPointer tid, Buffer buffer);
 
 #endif							/* ZEDSTORE_INTERNAL_H */

@@ -149,17 +149,51 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 			 errmsg("function not implemented yet")));
 }
 
-
 static TM_Result
 zedstoream_delete(Relation relation, ItemPointer tid, CommandId cid,
 				   Snapshot snapshot, Snapshot crosscheck, bool wait,
 				   TM_FailureData *hufd, bool changingPart)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
-}
+	Form_pg_attribute att = &relation->rd_att->attrs[0];
+	ZSBtreeScanForTupleDelete deletedesc;
 
+	Assert(ItemPointerIsValid(tid));
+
+	/* TODO: need to think if first attribute is dropped how to handle */
+	Assert(!att->attisdropped);
+
+	/*
+	 * Forbid this during a parallel operation, lets it allocate a combocid.
+	 * Other workers might need that combocid for visibility checks, and we
+	 * have no provision for broadcasting it to them.
+	 */
+	if (IsInParallelMode())
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
+				 errmsg("cannot delete tuples during a parallel operation")));
+
+	deletedesc.rel = relation;
+	deletedesc.snapshot = snapshot;
+	deletedesc.cid = cid;
+	deletedesc.wait = wait;
+	deletedesc.tmfd = hufd;
+
+	if (!zsbt_scan_for_tuple_delete(&deletedesc, *tid))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("attempted to delete non-existent tuple")));
+	}
+
+	if (deletedesc.result == TM_Invisible)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("attempted to delete invisible tuple")));
+	}
+
+	return deletedesc.result;
+}
 
 static TM_Result
 zedstoream_lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,

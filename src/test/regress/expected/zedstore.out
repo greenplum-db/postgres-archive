@@ -93,3 +93,43 @@ select c1 from t_zedstore where c1 = 5;
   5
 (1 row)
 
+set enable_seqscan=on;
+set enable_indexscan=off;
+-- test delete works
+delete from t_zedstore where c2 = 5;
+select * from t_zedstore;
+ c1 | c2 | c3 
+----+----+----
+  1 |  2 |  3
+  2 |  3 |  4
+  3 |  4 |  5
+  5 |  6 |  7
+  6 |  7 |  8
+  7 |  8 |  9
+  8 |  9 | 10
+  9 | 10 | 11
+ 10 | 11 | 12
+ 31 | 32 | 33
+ 32 | 33 | 34
+ 33 | 34 | 35
+ 34 | 35 | 36
+ 35 | 36 | 37
+(14 rows)
+
+delete from t_zedstore where c2 < 5;
+select * from t_zedstore;
+ c1 | c2 | c3 
+----+----+----
+  5 |  6 |  7
+  6 |  7 |  8
+  7 |  8 |  9
+  8 |  9 | 10
+  9 | 10 | 11
+ 10 | 11 | 12
+ 31 | 32 | 33
+ 32 | 33 | 34
+ 33 | 34 | 35
+ 34 | 35 | 36
+ 35 | 36 | 37
+(11 rows)
+

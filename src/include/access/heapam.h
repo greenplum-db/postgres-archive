@@ -20,10 +20,12 @@
 #include "access/skey.h"
 #include "access/table.h"		/* for backward compatibility */
 #include "access/tableam.h"
+#include "access/multixact.h"
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 #include "storage/bufpage.h"
 #include "storage/lockdefs.h"
+#include "storage/lmgr.h"
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
 
@@ -223,5 +225,39 @@ extern bool ResolveCminCmaxDuringDecoding(struct HTAB *tuplecid_data,
 							  HeapTuple htup,
 							  Buffer buffer,
 							  CommandId *cmin, CommandId *cmax);
+
+extern bool DoesMultiXactIdConflict(MultiXactId multi, uint16 infomask, LockTupleMode lockmode);
+
+extern bool heap_acquire_tuplock(Relation relation, ItemPointer tid, LockTupleMode mode, LockWaitPolicy wait_policy, bool *have_tuple_lock);
+
+extern void MultiXactIdWait(MultiXactId multi, MultiXactStatus status, uint16 infomask, Relation rel, ItemPointer ctid, XLTW_Oper oper, int *remaining);
+
+extern void UpdateXmaxHintBits(HeapTupleHeader tuple, Buffer buffer, TransactionId xid);
+
+/*
+ * Each tuple lock mode has a corresponding heavyweight lock, and one or two
+ * corresponding MultiXactStatuses (one to merely lock tuples, another one to
+ * update them).  This table (and the macros below) helps us determine the
+ * heavyweight lock mode and MultiXactStatus values to use for any particular
+ * tuple lock strength.
+ *
+ * Don't look at lockstatus/updstatus directly!  Use get_mxact_status_for_lock
+ * instead.
+ */
+typedef struct tuplelock
+{
+	LOCKMODE	hwlock;
+	int			lockstatus;
+	int			updstatus;
+} tuplelock;
+
+extern tuplelock tupleLockExtraInfo[];
+
+#define UnlockTupleTuplock(rel, tup, mode)						\
+	UnlockTuple((rel), (tup), tupleLockExtraInfo[mode].hwlock)
+
+extern void UpdateXmaxHintBits(HeapTupleHeader tuple, Buffer buffer, TransactionId xid);
+
+extern void compute_new_xmax_infomask(TransactionId xmax, uint16 old_infomask, uint16 old_infomask2, TransactionId add_to_xmax, LockTupleMode mode, bool is_update, TransactionId *result_xmax, uint16 *result_infomask, uint16 *result_infomask2);
 
 #endif							/* HEAPAM_H */

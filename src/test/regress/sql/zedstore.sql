@@ -31,4 +31,11 @@ select * from t_zedstore where c1 = 5;
 -- index-only scan
 select c1 from t_zedstore where c1 = 5;
 
+set enable_seqscan=on;
+set enable_indexscan=off;
 
+-- test delete works
+delete from t_zedstore where c2 = 5;
+select * from t_zedstore;
+delete from t_zedstore where c2 < 5;
+select * from t_zedstore;
