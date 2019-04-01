@@ -117,7 +117,7 @@ typedef struct ZSBtreeItem
 #define		ZSBT_COMPRESSED		0x0001
 #define		ZSBT_DELETED		0x0002
 #define		ZSBT_UPDATED		0x0004
-
+#define     ZSBT_NULL           0x0008
 
 /*
  * Maximum size of an individual untoasted Datum stored in ZedStore. Datums
@@ -271,17 +271,18 @@ ItemPointerBetween(ItemPointer a, ItemPointer x, ItemPointer b)
 }
 
 /* prototypes for functions in zstore_btree.c */
-extern ItemPointerData zsbt_insert(Relation rel, AttrNumber attno, Datum datum, TransactionId xmin, CommandId cmin, ItemPointerData tid);
+extern ItemPointerData zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull, TransactionId xmin, CommandId cmin, ItemPointerData tid);
 extern TM_Result zsbt_delete(Relation rel, AttrNumber attno, ItemPointerData tid,
 							 TransactionId xid, CommandId cid,
 			Snapshot snapshot, Snapshot crosscheck, bool wait,
 			TM_FailureData *hufd, bool changingPart);
-extern TM_Result zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum,
-							 TransactionId xid, CommandId cid, Snapshot snapshot, Snapshot crosscheck,
+extern TM_Result zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid,
+							 Datum newdatum, bool newisnull, TransactionId xid,
+							 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 							 bool wait, TM_FailureData *hufd, ItemPointerData *newtid_p);
 
 extern void zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, Snapshot snapshot, ZSBtreeScan *scan);
-extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid);
+extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, ItemPointerData *tid);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern ItemPointerData zsbt_get_last_tid(Relation rel, AttrNumber attno);
 

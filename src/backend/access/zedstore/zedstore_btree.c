@@ -128,7 +128,7 @@ zsbt_end_scan(ZSBtreeScan *scan)
  * and its TID in *tid. For a pass-by-ref datum, it's a palloc'd copy.
  */
 bool
-zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
+zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, ItemPointerData *tid)
 {
 	TupleDesc	desc;
 	Form_pg_attribute attr;
@@ -146,9 +146,15 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
 		{
 			char		*ptr = item->t_payload;
 
-			*datum = fetchatt(attr, ptr);
-			*datum = zs_datumCopy(*datum, attr->attbyval, attr->attlen);
 			*tid = item->t_tid;
+			if (item->t_flags & ZSBT_NULL)
+				*isnull = true;
+			else
+			{
+				*isnull = false;
+				*datum = fetchatt(attr, ptr);
+				*datum = zs_datumCopy(*datum, attr->attbyval, attr->attlen);
+			}
 
 			if (scan->lastbuf_is_locked)
 			{
@@ -215,8 +221,8 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
  * you got for the first column.)
  */
 ItemPointerData
-zsbt_insert(Relation rel, AttrNumber attno, Datum datum, TransactionId xid, CommandId cid,
-			ItemPointerData tid)
+zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
+			TransactionId xid, CommandId cid, ItemPointerData tid)
 {
 	TupleDesc	desc = RelationGetDescr(rel);
 	Form_pg_attribute attr = &desc->attrs[attno - 1];
@@ -294,7 +300,10 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, TransactionId xid, Comm
 	/*
 	 * Form a ZSBtreeItem to insert.
 	 */
-	datumsz = zs_datumGetSize(datum, attr->attbyval, attr->attlen);
+	if (isnull)
+		datumsz = 0;
+	else
+		datumsz = zs_datumGetSize(datum, attr->attbyval, attr->attlen);
 	itemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
 
 	newitem = palloc(itemsz);
@@ -303,11 +312,16 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, TransactionId xid, Comm
 	newitem->t_size = itemsz;
 	newitem->t_undo_ptr = undorecptr;
 
-	dataptr = ((char *) newitem) + offsetof(ZSBtreeItem, t_payload);
-	if (attr->attbyval)
-		store_att_byval(dataptr, datum, attr->attlen);
+	if (isnull)
+		newitem->t_flags |= ZSBT_NULL;
 	else
-		memcpy(dataptr, DatumGetPointer(datum), datumsz);
+	{
+		dataptr = ((char *) newitem) + offsetof(ZSBtreeItem, t_payload);
+		if (attr->attbyval)
+			store_att_byval(dataptr, datum, attr->attlen);
+		else
+			memcpy(dataptr, DatumGetPointer(datum), datumsz);
+	}
 
 	/*
 	 * If there's enough space on the page, insert it directly. Otherwise, try to
@@ -414,8 +428,9 @@ zsbt_delete(Relation rel, AttrNumber attno, ItemPointerData tid,
  */
 TM_Result
 zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum,
-			TransactionId xid, CommandId cid, Snapshot snapshot, Snapshot crosscheck,
-			bool wait, TM_FailureData *hufd, ItemPointerData *newtid_p)
+			bool newisnull, TransactionId xid, CommandId cid, Snapshot snapshot,
+			Snapshot crosscheck, bool wait, TM_FailureData *hufd,
+			ItemPointerData *newtid_p)
 {
 	TupleDesc	desc = RelationGetDescr(rel);
 	Form_pg_attribute attr = &desc->attrs[attno - 1];
@@ -521,7 +536,10 @@ zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum
 	/*
 	 * Form a ZSBtreeItem to insert.
 	 */
-	datumsz = zs_datumGetSize(newdatum, attr->attbyval, attr->attlen);
+	if (newisnull)
+		datumsz = 0;
+	else
+		datumsz = zs_datumGetSize(newdatum, attr->attbyval, attr->attlen);
 	newitemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
 
 	newitem = palloc(newitemsz);
@@ -530,11 +548,16 @@ zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum
 	newitem->t_size = newitemsz;
 	newitem->t_undo_ptr = undorecptr;
 
-	dataptr = ((char *) newitem) + offsetof(ZSBtreeItem, t_payload);
-	if (attr->attbyval)
-		store_att_byval(dataptr, newdatum, attr->attlen);
+	if (newisnull)
+		newitem->t_flags |= ZSBT_NULL;
 	else
-		memcpy(dataptr, DatumGetPointer(newdatum), datumsz);
+	{
+		dataptr = ((char *) newitem) + offsetof(ZSBtreeItem, t_payload);
+		if (attr->attbyval)
+			store_att_byval(dataptr, newdatum, attr->attlen);
+		else
+			memcpy(dataptr, DatumGetPointer(newdatum), datumsz);
+	}
 
 	zsbt_replace_item(rel, attno, scan.lastbuf, olditem, deleteditem, newitem);
 	scan.lastbuf_is_locked = false;	/* zsbt_recompress_replace released */

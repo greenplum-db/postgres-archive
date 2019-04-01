@@ -116,12 +116,6 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 		bool		isnull = isnulls[attno - 1];
 		Datum		toastptr = (Datum) 0;
 
-		if (attr->attlen < 0)
-			elog(LOG, "over ambitious. zedstore is only few weeks old, yet to learn handling variable lengths");
-
-		if (isnull)
-			elog(ERROR, "you are going too fast. zedstore can't handle NULLs currently.");
-
 		/* If this datum is too large, toast it */
 		if (!isnull && attr->attlen < 0 &&
 			VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
@@ -129,7 +123,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 			toastptr = datum = zedstore_toast_datum(relation, attno, datum);
 		}
 
-		tid = zsbt_insert(relation, attno, datum, xid, cid, tid);
+		tid = zsbt_insert(relation, attno, datum, isnull, xid, cid, tid);
 
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, tid);
@@ -238,9 +232,6 @@ zedstoream_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 		Datum		toastptr = (Datum) 0;
 		TM_Result this_result;
 
-		if (newisnull)
-			elog(ERROR, "you are going too fast. zedstore can't handle NULLs currently.");
-
 		/* If this datum is too large, toast it */
 		if (!newisnull && attr->attlen < 0 &&
 			VARSIZE_ANY_EXHDR(newdatum) > MaxZedStoreDatumSize)
@@ -248,7 +239,7 @@ zedstoream_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 			toastptr = newdatum = zedstore_toast_datum(relation, attno, newdatum);
 		}
 
-		this_result = zsbt_update(relation, attno, *otid, newdatum,
+		this_result = zsbt_update(relation, attno, *otid, newdatum, newisnull,
 								  xid, cid, snapshot, crosscheck,
 								  wait, hufd, &newtid);
 
@@ -440,9 +431,10 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[i];
 			int			natt = scan->proj_atts[i];
 			Datum		datum;
+			bool        isnull;
 			ItemPointerData tid;
 
-			if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &tid))
+			if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &isnull, &tid))
 			{
 				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
 				break;
@@ -464,14 +456,14 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			 * flatten any ZS-TOASTed values, becaue the rest of the system
 			 * doesn't know how to deal with them.
 			 */
-			if (att->attlen == -1 &&
+			if (!isnull && att->attlen == -1 &&
 				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 			{
 				datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt + 1, tid, datum);
 			}
 
 			slot->tts_values[natt] = datum;
-			slot->tts_isnull[natt] = false;
+			slot->tts_isnull[natt] = isnull;
 		}
 
 		if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
@@ -542,6 +534,7 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 		Form_pg_attribute att = &rel->rd_att->attrs[i];
 		ZSBtreeScan btree_scan;
 		Datum		datum;
+		bool        isnull;
 		ItemPointerData	curtid;
 
 		if (att->attisdropped)
@@ -549,14 +542,14 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 
 		zsbt_begin_scan(rel, i + 1, *tid, snapshot, &btree_scan);
 
-		if (zsbt_scan_next(&btree_scan, &datum, &curtid))
+		if (zsbt_scan_next(&btree_scan, &datum, &isnull, &curtid))
 		{
 			if (!ItemPointerEquals(&curtid, tid))
 				found = false;
 			else
 			{
 				slot->tts_values[i] = datum;
-				slot->tts_isnull[i] = false;
+				slot->tts_isnull[i] = isnull;
 			}
 		}
 		else

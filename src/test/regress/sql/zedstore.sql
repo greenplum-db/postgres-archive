@@ -54,3 +54,13 @@ create table t_zedtoast(c1 int, t text) USING zedstore;
 insert into t_zedtoast select i, repeat('x', 10000) from generate_series(1, 10) i;
 
 select c1, length(t) from t_zedtoast;
+
+--
+-- Test NULL values
+--
+create table t_zednullvalues(c1 int, c2 int) USING zedstore;
+insert into t_zednullvalues values(1, NULL), (NULL, 2);
+select * from t_zednullvalues;
+select c2 from t_zednullvalues;
+update t_zednullvalues set c1 = 1, c2 = NULL;
+select * from t_zednullvalues;
