@@ -100,27 +100,39 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 {
 	AttrNumber	attno;
 	Datum	   *d;
-	bool	   *isnull;
+	bool	   *isnulls;
 	ItemPointerData tid;
 	TransactionId xid = GetCurrentTransactionId();
 
 	slot_getallattrs(slot);
-
 	d = slot->tts_values;
-	isnull = slot->tts_isnull;
+	isnulls = slot->tts_isnull;
 
 	ItemPointerSetInvalid(&tid);
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
 		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
+		Datum		datum = d[attno - 1];
+		bool		isnull = isnulls[attno - 1];
+		Datum		toastptr = (Datum) 0;
 
 		if (attr->attlen < 0)
 			elog(LOG, "over ambitious. zedstore is only few weeks old, yet to learn handling variable lengths");
 
-		if (isnull[attno - 1])
+		if (isnull)
 			elog(ERROR, "you are going too fast. zedstore can't handle NULLs currently.");
 
-		tid = zsbt_insert(relation, attno, d[attno - 1], xid, cid, tid);
+		/* If this datum is too large, toast it */
+		if (!isnull && attr->attlen < 0 &&
+			VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
+		{
+			toastptr = datum = zedstore_toast_datum(relation, attno, datum);
+		}
+
+		tid = zsbt_insert(relation, attno, datum, xid, cid, tid);
+
+		if (toastptr != (Datum) 0)
+			zedstore_toast_finish(relation, attno, toastptr, tid);
 	}
 
 	slot->tts_tableOid = RelationGetRelid(relation);
@@ -220,12 +232,21 @@ zedstoream_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 	ItemPointerSetInvalid(&newtid);
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
+		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
 		Datum		newdatum = d[attno - 1];
 		bool		newisnull = isnulls[attno - 1];
+		Datum		toastptr = (Datum) 0;
 		TM_Result this_result;
 
 		if (newisnull)
 			elog(ERROR, "you are going too fast. zedstore can't handle NULLs currently.");
+
+		/* If this datum is too large, toast it */
+		if (!newisnull && attr->attlen < 0 &&
+			VARSIZE_ANY_EXHDR(newdatum) > MaxZedStoreDatumSize)
+		{
+			toastptr = newdatum = zedstore_toast_datum(relation, attno, newdatum);
+		}
 
 		this_result = zsbt_update(relation, attno, *otid, newdatum,
 								  xid, cid, snapshot, crosscheck,
@@ -235,9 +256,13 @@ zedstoream_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 		{
 			/* FIXME: hmm, failed to delete this attribute, but we might already have
 			 * deleted other attributes. Error? */
+			/* FIXME: this leaks the toast chain on failure */
 			result = this_result;
 			break;
 		}
+
+		if (toastptr != (Datum) 0)
+			zedstore_toast_finish(relation, attno, toastptr, newtid);
 	}
 	slot->tts_tid = newtid;
 
@@ -414,6 +439,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		ItemPointerSetInvalid(&this_tid);
 		for (int i = 0; i < scan->num_proj_atts; i++)
 		{
+			Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[i];
 			int			natt = scan->proj_atts[i];
 			Datum		datum;
 			ItemPointerData tid;
@@ -434,6 +460,16 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			else if (!ItemPointerEquals(&this_tid, &tid))
 			{
 				elog(ERROR, "scans on different attributes out of sync");
+			}
+
+			/*
+			 * flatten any ZS-TOASTed values, becaue the rest of the system
+			 * doesn't know how to deal with them.
+			 */
+			if (att->attlen == -1 &&
+				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+			{
+				datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt + 1, tid, datum);
 			}
 
 			slot->tts_values[natt] = datum;

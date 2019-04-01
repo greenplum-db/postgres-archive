@@ -45,3 +45,12 @@ select * from t_zedstore;
 
 update t_zedstore set c2 = 100 where c1 = 8;
 select * from t_zedstore;
+
+
+--
+-- Test toasting
+--
+create table t_zedtoast(c1 int, t text) USING zedstore;
+insert into t_zedtoast select i, repeat('x', 10000) from generate_series(1, 10) i;
+
+select c1, length(t) from t_zedtoast;

@@ -14,6 +14,7 @@
 #include "access/zedstore_compression.h"
 #include "access/zedstore_undo.h"
 #include "storage/bufmgr.h"
+#include "utils/datum.h"
 
 /*
  * Different page types:
@@ -28,6 +29,7 @@
 #define	ZS_META_PAGE_ID		0xF083
 #define	ZS_BTREE_PAGE_ID	0xF084
 #define	ZS_UNDO_PAGE_ID		0xF085
+#define	ZS_TOAST_PAGE_ID	0xF086
 
 /* like nbtree/gist FOLLOW_RIGHT flag, used to detect concurrent page splits */
 #define ZS_FOLLOW_RIGHT		0x0002
@@ -115,6 +117,78 @@ typedef struct ZSBtreeItem
 #define		ZSBT_COMPRESSED		0x0001
 #define		ZSBT_DELETED		0x0002
 #define		ZSBT_UPDATED		0x0004
+
+
+/*
+ * Maximum size of an individual untoasted Datum stored in ZedStore. Datums
+ * larger than this need to be toasted.
+ *
+ * A datum needs to fit on a B-tree page, with page and item headers.
+ *
+ * XXX: 500 accounts for all the headers. Need to compute this correctly...
+ */
+#define		MaxZedStoreDatumSize		(BLCKSZ - 500)
+
+typedef struct ZSToastPageOpaque
+{
+	AttrNumber	zs_attno;
+
+	/* these are only set on the first page. */
+	ItemPointerData zs_tid;
+	uint32		zs_total_size;
+
+	uint32		zs_slice_offset;
+	BlockNumber	zs_prev;
+	BlockNumber	zs_next;
+	uint16		zs_flags;
+	uint16		zs_page_id;
+} ZSToastPageOpaque;
+
+/*
+ * This must look like varattrib_1b_e!
+ */
+typedef struct varatt_zs_toastptr
+{
+	/* varattrib_1b_e */
+	uint8		va_header;
+	uint8		va_tag;
+
+	/* first block */
+	BlockNumber	zst_block;
+} varatt_zs_toastptr;
+
+/*
+ * va_tag value. this should be distinguishable from the values in
+ * vartag_external
+ */
+#define		VARTAG_ZEDSTORE		10
+
+/*
+ * Versions of datumGetSize and datumCopy that know about ZedStore-toasted
+ * datums.
+ */
+static inline Size
+zs_datumGetSize(Datum value, bool typByVal, int typLen)
+{
+	if (typLen < 0 && VARATT_IS_EXTERNAL(value) && VARTAG_EXTERNAL(value) == VARTAG_ZEDSTORE)
+		return sizeof(varatt_zs_toastptr);
+	return datumGetSize(value, typByVal, typLen);
+}
+
+static inline Datum
+zs_datumCopy(Datum value, bool typByVal, int typLen)
+{
+	if (typLen < 0 && VARATT_IS_EXTERNAL(value) && VARTAG_EXTERNAL(value) == VARTAG_ZEDSTORE)
+	{
+		char	   *result = palloc(sizeof(varatt_zs_toastptr));
+
+		memcpy(result, DatumGetPointer(value), sizeof(varatt_zs_toastptr));
+
+		return PointerGetDatum(result);
+	}
+	else
+		return datumCopy(value, typByVal, typLen);
+}
 
 /*
  * Block 0 on every ZedStore table is a metapage.
@@ -221,5 +295,10 @@ extern void zs_prepare_insert(Relation relation, HeapTupleHeader hdr, Transactio
 /* prototypes for functions in zstore_visibility.c */
 extern TM_Result zs_SatisfiesUpdate(Relation rel, ZSBtreeItem *item, Snapshot snapshot);
 extern bool zs_SatisfiesVisibility(Relation rel, ZSBtreeItem *item, Snapshot snapshot);
+
+/* prototypes for functions in zstore_toast.c */
+extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);
+extern void zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, ItemPointerData tid);
+extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, ItemPointerData tid, Datum toasted);
 
 #endif							/* ZEDSTORE_INTERNAL_H */

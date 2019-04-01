@@ -147,7 +147,7 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
 			char		*ptr = item->t_payload;
 
 			*datum = fetchatt(attr, ptr);
-			*datum = datumCopy(*datum, attr->attbyval, attr->attlen);
+			*datum = zs_datumCopy(*datum, attr->attbyval, attr->attlen);
 			*tid = item->t_tid;
 
 			if (scan->lastbuf_is_locked)
@@ -294,7 +294,7 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, TransactionId xid, Comm
 	/*
 	 * Form a ZSBtreeItem to insert.
 	 */
-	datumsz = datumGetSize(datum, attr->attbyval, attr->attlen);
+	datumsz = zs_datumGetSize(datum, attr->attbyval, attr->attlen);
 	itemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
 
 	newitem = palloc(itemsz);
@@ -521,7 +521,7 @@ zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum
 	/*
 	 * Form a ZSBtreeItem to insert.
 	 */
-	datumsz = datumGetSize(newdatum, attr->attbyval, attr->attlen);
+	datumsz = zs_datumGetSize(newdatum, attr->attbyval, attr->attlen);
 	newitemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
 
 	newitem = palloc(newitemsz);
