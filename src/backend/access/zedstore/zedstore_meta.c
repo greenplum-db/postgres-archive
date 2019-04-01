@@ -92,6 +92,8 @@ zs_initmetapage(Relation rel, int nattributes)
 	opaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(page);
 	opaque->zs_flags = 0;
 	opaque->zs_page_id = ZS_META_PAGE_ID;
+	opaque->zs_undo_head = InvalidBlockNumber;
+	opaque->zs_undo_tail = InvalidBlockNumber;
 
 	MarkBufferDirty(buf);
 	/* TODO: WAL-log */

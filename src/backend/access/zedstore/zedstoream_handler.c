@@ -98,33 +98,29 @@ static void
 zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 				   int options, BulkInsertState bistate)
 {
-	HeapTupleHeaderData hdr;
-	HeapTupleHeader ptr_hdr;
-	int i;
-	Datum *d;
-	bool *isnull;
+	AttrNumber	attno;
+	Datum	   *d;
+	bool	   *isnull;
 	ItemPointerData tid;
+	TransactionId xid = GetCurrentTransactionId();
+
 	slot_getallattrs(slot);
 
 	d = slot->tts_values;
 	isnull = slot->tts_isnull;
 
-	zs_prepare_insert(relation, &hdr, GetCurrentTransactionId(), cid, options);
-	ptr_hdr = &hdr;
-
-	for(i=0; i < relation->rd_att->natts; i++)
+	ItemPointerSetInvalid(&tid);
+	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
-		Form_pg_attribute attr = &relation->rd_att->attrs[i];
+		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
 
 		if (attr->attlen < 0)
 			elog(LOG, "over ambitious. zedstore is only few weeks old, yet to learn handling variable lengths");
 
-		if (isnull[i])
+		if (isnull[attno - 1])
 			elog(ERROR, "you are going too fast. zedstore can't handle NULLs currently.");
 
-		/* store MVCC info along with first column */
-		tid = zsbt_insert(relation, i + 1, d[i], ptr_hdr);
-		ptr_hdr = NULL;
+		tid = zsbt_insert(relation, attno, d[attno - 1], xid, cid, tid);
 	}
 
 	slot->tts_tableOid = RelationGetRelid(relation);
@@ -149,51 +145,42 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 			 errmsg("function not implemented yet")));
 }
 
+
 static TM_Result
 zedstoream_delete(Relation relation, ItemPointer tid, CommandId cid,
 				   Snapshot snapshot, Snapshot crosscheck, bool wait,
 				   TM_FailureData *hufd, bool changingPart)
 {
-	Form_pg_attribute att = &relation->rd_att->attrs[0];
-	ZSBtreeScanForTupleDelete deletedesc;
+	TransactionId xid = GetCurrentTransactionId();
+	AttrNumber	attno;
 
-	Assert(ItemPointerIsValid(tid));
-
-	/* TODO: need to think if first attribute is dropped how to handle */
-	Assert(!att->attisdropped);
-
-	/*
-	 * Forbid this during a parallel operation, lets it allocate a combocid.
-	 * Other workers might need that combocid for visibility checks, and we
-	 * have no provision for broadcasting it to them.
-	 */
-	if (IsInParallelMode())
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-				 errmsg("cannot delete tuples during a parallel operation")));
-
-	deletedesc.rel = relation;
-	deletedesc.snapshot = snapshot;
-	deletedesc.cid = cid;
-	deletedesc.wait = wait;
-	deletedesc.tmfd = hufd;
-
-	if (!zsbt_scan_for_tuple_delete(&deletedesc, *tid))
+	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("attempted to delete non-existent tuple")));
+		TM_Result result;
+
+		result = zsbt_delete(relation, attno, *tid, xid, cid,
+							 snapshot, crosscheck, wait, hufd, changingPart);
+
+		/*
+		 * TODO: Here, we should check for TM_BeingModified, like heap_delete()
+		 * does
+		 */
+
+		if (result != TM_Ok)
+		{
+			if (attno != 1)
+			{
+				/* failed to delete this attribute, but we might already have
+				 * deleted other attributes. */
+				elog(ERROR, "could not delete all columns of row");
+			}
+			return result;
+		}
 	}
 
-	if (deletedesc.result == TM_Invisible)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("attempted to delete invisible tuple")));
-	}
-
-	return deletedesc.result;
+	return TM_Ok;
 }
+
 
 static TM_Result
 zedstoream_lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
@@ -213,9 +200,51 @@ zedstoream_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 				   bool wait, TM_FailureData *hufd,
 				   LockTupleMode *lockmode, bool *update_indexes)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function not implemented yet")));
+	TransactionId xid = GetCurrentTransactionId();
+	AttrNumber	attno;
+	Datum		*d;
+	bool		*isnulls;
+	TM_Result	result;
+	ItemPointerData newtid;
+
+	slot_getallattrs(slot);
+	d = slot->tts_values;
+	isnulls = slot->tts_isnull;
+
+	/*
+	 * TODO: Since we have visibility information on each column, we could skip
+	 * updating columns whose value didn't change.
+	 */
+
+	result = TM_Ok;
+	ItemPointerSetInvalid(&newtid);
+	for (attno = 1; attno <= relation->rd_att->natts; attno++)
+	{
+		Datum		newdatum = d[attno - 1];
+		bool		newisnull = isnulls[attno - 1];
+		TM_Result this_result;
+
+		if (newisnull)
+			elog(ERROR, "you are going too fast. zedstore can't handle NULLs currently.");
+
+		this_result = zsbt_update(relation, attno, *otid, newdatum,
+								  xid, cid, snapshot, crosscheck,
+								  wait, hufd, &newtid);
+
+		if (this_result != TM_Ok)
+		{
+			/* FIXME: hmm, failed to delete this attribute, but we might already have
+			 * deleted other attributes. Error? */
+			result = this_result;
+			break;
+		}
+	}
+	slot->tts_tid = newtid;
+
+	/* TODO: could we do HOT udates? */
+	/* TODO: What should we set lockmode to? */
+
+	return result;
 }
 
 static const TupleTableSlotOps *
@@ -332,7 +361,6 @@ zedstoream_endscan(TableScanDesc sscan)
 static bool
 zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
-	bool visible;
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 
 	Assert(scan->num_proj_atts <= slot->tts_tupleDescriptor->natts);
@@ -342,6 +370,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 	while (scan->state != ZSSCAN_STATE_FINISHED)
 	{
+		ItemPointerData this_tid;
+
 		if (scan->state == ZSSCAN_STATE_UNSTARTED ||
 			scan->state == ZSSCAN_STATE_FINISHED_RANGE)
 		{
@@ -381,13 +411,14 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 		/* We now have a range to scan */
 		Assert(scan->state == ZSSCAN_STATE_SCANNING);
+		ItemPointerSetInvalid(&this_tid);
 		for (int i = 0; i < scan->num_proj_atts; i++)
 		{
 			int			natt = scan->proj_atts[i];
 			Datum		datum;
 			ItemPointerData tid;
 
-			if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &tid, &visible))
+			if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &tid))
 			{
 				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
 				break;
@@ -398,14 +429,13 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				break;
 			}
 
-			if (!visible)
+			if (i == 0)
+				this_tid = tid;
+			else if (!ItemPointerEquals(&this_tid, &tid))
 			{
-				for (int i = 1; i < scan->num_proj_atts; i++)
-					scan->btree_scans[i].nexttid = scan->btree_scans[0].nexttid;
-				break;
+				elog(ERROR, "scans on different attributes out of sync");
 			}
 
-			slot->tts_tid = tid;
 			slot->tts_values[natt] = datum;
 			slot->tts_isnull[natt] = false;
 		}
@@ -421,13 +451,11 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		}
 		else
 		{
-			if (visible)
-			{
-				Assert(scan->state == ZSSCAN_STATE_SCANNING);
-				slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
-				slot->tts_flags &= ~TTS_FLAG_EMPTY;
-				return true;
-			}
+			Assert(scan->state == ZSSCAN_STATE_SCANNING);
+			slot->tts_tid = this_tid;
+			slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
+			slot->tts_flags &= ~TTS_FLAG_EMPTY;
+			return true;
 		}
 	}
 
@@ -481,16 +509,15 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 		ZSBtreeScan btree_scan;
 		Datum		datum;
 		ItemPointerData	curtid;
-		bool visible;
 
 		if (att->attisdropped)
 			continue;
 
 		zsbt_begin_scan(rel, i + 1, *tid, snapshot, &btree_scan);
 
-		if (zsbt_scan_next(&btree_scan, &datum, &curtid, &visible))
+		if (zsbt_scan_next(&btree_scan, &datum, &curtid))
 		{
-			if (!visible || !ItemPointerEquals(&curtid, tid))
+			if (!ItemPointerEquals(&curtid, tid))
 				found = false;
 			else
 			{

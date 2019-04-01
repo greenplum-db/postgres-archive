@@ -25,17 +25,23 @@ create index on t_zedstore (c1);
 set enable_seqscan=off;
 set enable_indexscan=on;
 
+-- TODO:Bitmap scans are currently not working
+set enable_bitmapscan=off;
+
 -- index scan
 select * from t_zedstore where c1 = 5;
 
 -- index-only scan
 select c1 from t_zedstore where c1 = 5;
 
-set enable_seqscan=on;
-set enable_indexscan=off;
 
--- test delete works
+--
+-- Test DELETE and UPDATE
+--
 delete from t_zedstore where c2 = 5;
 select * from t_zedstore;
 delete from t_zedstore where c2 < 5;
+select * from t_zedstore;
+
+update t_zedstore set c2 = 100 where c1 = 8;
 select * from t_zedstore;

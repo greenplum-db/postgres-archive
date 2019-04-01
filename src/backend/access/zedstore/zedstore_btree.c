@@ -29,68 +29,525 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
-#include "access/itup.h"
+#include "access/tableam.h"
+#include "access/xact.h"
 #include "access/zedstore_compression.h"
 #include "access/zedstore_internal.h"
+#include "access/zedstore_undo.h"
+#include "miscadmin.h"
 #include "storage/bufmgr.h"
+#include "storage/procarray.h"
 #include "utils/datum.h"
 #include "utils/rel.h"
 
-/* This used to pass around context information, when inserting a new tuple */
-typedef struct ZSInsertState
-{
-	Relation	rel;
-	AttrNumber	attno;
-	Datum		datum;
-	HeapTupleHeader tuple_header;
-} ZSInsertState;
-
 /* prototypes for local functions */
 static Buffer zsbt_descend(Relation rel, BlockNumber rootblk, ItemPointerData key);
-static Buffer zsbt_find_downlink(Relation rel, AttrNumber attno, ItemPointerData key, BlockNumber childblk, int level, int *itemno);
-static Buffer zsbt_find_insertion_target(ZSInsertState *state, BlockNumber rootblk);
-static ItemPointerData zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state);
-static bool zsbt_compress_leaf(Buffer buf);
-static void zsbt_split_leaf(Buffer buf, OffsetNumber lastleftoff, ZSInsertState *state,
-				ZSBtreeItem *newitem, bool newitemonleft, OffsetNumber newitemoff);
-static void zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf, ItemPointerData rightlokey, BlockNumber rightblkno);
-static void zsbt_split_internal(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer childbuf,
+static Buffer zsbt_find_downlink(Relation rel, AttrNumber attno,
+				   ItemPointerData key, BlockNumber childblk, int level,
+				   int *itemno);
+static void zsbt_recompress_replace(Relation rel, AttrNumber attno,
+									Buffer oldbuf, List *items);
+static void zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
+					 ItemPointerData rightlokey, BlockNumber rightblkno);
+static void zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer childbuf,
 					OffsetNumber newoff, ItemPointerData newkey, BlockNumber childblk);
 static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
 			 ItemPointerData key1, BlockNumber blk1,
 			 ItemPointerData key2, BlockNumber blk2,
 			 Buffer leftchildbuf);
+static ZSBtreeItem *zsbt_scan_next_internal(ZSBtreeScan *scan);
+static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
+				  ZSBtreeItem *olditem, ZSBtreeItem *replacementitem, ZSBtreeItem *newitem);
+
 static int zsbt_binsrch_internal(ItemPointerData key, ZSBtreeInternalPageItem *arr, int arr_elems);
+
+/* ----------------------------------------------------------------
+ *						 Public interface
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * Begin a scan of the btree.
+ */
+void
+zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, Snapshot snapshot, ZSBtreeScan *scan)
+{
+	BlockNumber	rootblk;
+	Buffer		buf;
+
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, false);
+
+	if (rootblk == InvalidBlockNumber)
+	{
+		/* completely empty tree */
+		scan->rel = NULL;
+		scan->attno = InvalidAttrNumber;
+		scan->active = false;
+		scan->lastbuf = InvalidBuffer;
+		scan->lastbuf_is_locked = false;
+		scan->lastoff = InvalidOffsetNumber;
+		scan->snapshot = NULL;
+		ItemPointerSetInvalid(&scan->nexttid);
+		return;
+	}
+
+	buf = zsbt_descend(rel, rootblk, starttid);
+	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+	scan->rel = rel;
+	scan->attno = attno;
+	scan->snapshot = snapshot;
+	scan->for_update = false;		/* caller can change this */
+
+	scan->active = true;
+	scan->lastbuf = buf;
+	scan->lastbuf_is_locked = false;
+	scan->lastoff = InvalidOffsetNumber;
+	scan->nexttid = starttid;
+
+	scan->has_decompressed = false;
+}
+
+void
+zsbt_end_scan(ZSBtreeScan *scan)
+{
+	if (!scan->active)
+		return;
+
+	if (scan->lastbuf != InvalidBuffer)
+	{
+		if (scan->lastbuf_is_locked)
+			LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
+		ReleaseBuffer(scan->lastbuf);
+	}
+	scan->active = false;
+}
+
+/*
+ * Return true if there was another tuple. The datum is returned in *datum,
+ * and its TID in *tid. For a pass-by-ref datum, it's a palloc'd copy.
+ */
+bool
+zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid)
+{
+	TupleDesc	desc;
+	Form_pg_attribute attr;
+	ZSBtreeItem *item;
+
+	if (!scan->active)
+		return false;
+
+	desc = RelationGetDescr(scan->rel);
+	attr = &desc->attrs[scan->attno - 1];
+
+	while ((item = zsbt_scan_next_internal(scan)) != NULL)
+	{
+		if (zs_SatisfiesVisibility(scan->rel, item, scan->snapshot))
+		{
+			char		*ptr = item->t_payload;
+
+			*datum = fetchatt(attr, ptr);
+			*datum = datumCopy(*datum, attr->attbyval, attr->attlen);
+			*tid = item->t_tid;
+
+			if (scan->lastbuf_is_locked)
+			{
+				LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
+				scan->lastbuf_is_locked = false;
+			}
+
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * Get the last tid (plus one) in the tree.
+ */
+ItemPointerData
+zsbt_get_last_tid(Relation rel, AttrNumber attno)
+{
+	BlockNumber	rootblk;
+	ItemPointerData rightmostkey;
+	ItemPointerData	tid;
+	Buffer		buf;
+	Page		page;
+	ZSBtreePageOpaque *opaque;
+	OffsetNumber maxoff;
+
+	/* Find the rightmost leaf */
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
+	ItemPointerSet(&rightmostkey, MaxBlockNumber, 0xfffe);
+	buf = zsbt_descend(rel, rootblk, rightmostkey);
+	page = BufferGetPage(buf);
+	opaque = ZSBtreePageGetOpaque(page);
+
+	/*
+	 * Look at the last item, for its tid.
+	 */
+	maxoff = PageGetMaxOffsetNumber(page);
+	if (maxoff >= FirstOffsetNumber)
+	{
+		ItemId		iid = PageGetItemId(page, maxoff);
+		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
+
+		tid = hitup->t_tid;
+		ItemPointerIncrement(&tid);
+	}
+	else
+	{
+		tid = opaque->zs_lokey;
+	}
+	UnlockReleaseBuffer(buf);
+
+	return tid;
+}
 
 /*
  * Insert a new datum to the given attribute's btree.
  *
  * Returns the TID of the new tuple.
  *
- * TODO: When inserting the first attribute of a row, this OK. But subsequent
- * attributes need to be inserted with the same TID. This should take an
- * optional TID argument for that.
+ * If 'tid' is valid, then that TID is used. It better not be in use already. If
+ * it's invalid, then a new TID is allocated, as we see best. (When inserting the
+ * first column of the row, pass invalid, and for other columns, pass the TID
+ * you got for the first column.)
  */
 ItemPointerData
-zsbt_insert(Relation rel, AttrNumber attno, Datum datum, HeapTupleHeader tupleheader)
+zsbt_insert(Relation rel, AttrNumber attno, Datum datum, TransactionId xid, CommandId cid,
+			ItemPointerData tid)
 {
-	ZSInsertState state;
-	Buffer		buf;
+	TupleDesc	desc = RelationGetDescr(rel);
+	Form_pg_attribute attr = &desc->attrs[attno - 1];
 	BlockNumber	rootblk;
-
-	/* TODO: deal with oversized datums that don't fit on a page */
+	Buffer		buf;
+	Page		page;
+	ZSBtreePageOpaque *opaque;
+	OffsetNumber maxoff;
+	ItemPointerData lasttid;
+	Size		datumsz;
+	Size		itemsz;
+	ZSBtreeItem	*newitem;
+	char	   *dataptr;
+	ZSUndoRecPtr undorecptr;
+	ItemPointerData insert_target_key;
 
 	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
 
-	state.rel = rel;
-	state.attno = attno;
-	state.datum = datum;
-	state.tuple_header = tupleheader;
+	/*
+	 * If TID was given, find the right place for it. Otherwise, insert to
+	 * the rightmost leaf.
+	 *
+	 * TODO: use a Free Space Map to find suitable target.
+	 */
+	if (ItemPointerIsValid(&tid))
+		insert_target_key = tid;
+	else
+		ItemPointerSet(&insert_target_key, MaxBlockNumber, 0xfffe);
 
-	buf = zsbt_find_insertion_target(&state, rootblk);
+	buf = zsbt_descend(rel, rootblk, insert_target_key);
+	page = BufferGetPage(buf);
+	opaque = ZSBtreePageGetOpaque(page);
 
-	return zsbt_insert_to_leaf(buf, &state);
+	/*
+	 * Look at the last item, for its tid.
+	 */
+	maxoff = PageGetMaxOffsetNumber(page);
+	if (maxoff >= FirstOffsetNumber)
+	{
+		ItemId		iid = PageGetItemId(page, maxoff);
+		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
+
+		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
+			lasttid = hitup->t_lasttid;
+		else
+			lasttid = hitup->t_tid;
+
+		if (!ItemPointerIsValid(&tid))
+		{
+			tid = lasttid;
+			ItemPointerIncrement(&tid);
+		}
+	}
+	else
+	{
+		lasttid = opaque->zs_lokey;
+		if (!ItemPointerIsValid(&tid))
+			tid = lasttid;
+	}
+
+	/* Form an undo record */
+	{
+		ZSUndoRec_Insert undorec;
+
+		undorec.rec.size = sizeof(ZSUndoRec_Insert);
+		undorec.rec.type = ZSUNDO_TYPE_INSERT;
+		undorec.rec.attno = attno;
+		undorec.rec.xid = xid;
+		undorec.rec.cid = cid;
+		undorec.rec.tid = tid;
+
+		undorecptr = zsundo_insert(rel, &undorec.rec);
+	}
+
+	/*
+	 * Form a ZSBtreeItem to insert.
+	 */
+	datumsz = datumGetSize(datum, attr->attbyval, attr->attlen);
+	itemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
+
+	newitem = palloc(itemsz);
+	newitem->t_tid = tid;
+	newitem->t_flags = 0;
+	newitem->t_size = itemsz;
+	newitem->t_undo_ptr = undorecptr;
+
+	dataptr = ((char *) newitem) + offsetof(ZSBtreeItem, t_payload);
+	if (attr->attbyval)
+		store_att_byval(dataptr, datum, attr->attlen);
+	else
+		memcpy(dataptr, DatumGetPointer(datum), datumsz);
+
+	/*
+	 * If there's enough space on the page, insert it directly. Otherwise, try to
+	 * compress all existing items. If that still doesn't create enough space, we
+	 * have to split the page.
+	 *
+	 * TODO: We also resort to the slow way, if the new TID is not at the end of
+	 * the page. Things get difficult, if the new TID is covered by the range of
+	 * an existing compressed item.
+	 */
+	if (PageGetFreeSpace(page) >= MAXALIGN(itemsz) &&
+		(maxoff > FirstOffsetNumber || ItemPointerCompare(&tid, &lasttid) > 0))
+	{
+		OffsetNumber off;
+
+		off = PageAddItemExtended(page, (Item) newitem, itemsz, maxoff + 1, PAI_OVERWRITE);
+		if (off == InvalidOffsetNumber)
+			elog(ERROR, "didn't fit, after all?");
+		MarkBufferDirty(buf);
+		/* TODO: WAL-log */
+
+		UnlockReleaseBuffer(buf);
+
+		return tid;
+	}
+	else
+	{
+		/* recompress and possibly split the page */
+		zsbt_replace_item(rel, attno, buf, NULL, NULL, newitem);
+		/* zsbt_replace_item unlocked 'buf' */
+		ReleaseBuffer(buf);
+
+		return tid;
+	}
 }
+
+TM_Result
+zsbt_delete(Relation rel, AttrNumber attno, ItemPointerData tid,
+			TransactionId xid, CommandId cid,
+			Snapshot snapshot, Snapshot crosscheck, bool wait,
+			TM_FailureData *hufd, bool changingPart)
+{
+	ZSBtreeScan scan;
+	ZSBtreeItem *item;
+	TM_Result	result;
+	ZSUndoRecPtr undorecptr;
+	ZSBtreeItem *deleteditem;
+
+	zsbt_begin_scan(rel, attno, tid, snapshot, &scan);
+	scan.for_update = true;
+
+	/* Find the item to delete. (It could be compressed) */
+	item = zsbt_scan_next_internal(&scan);
+	if (!ItemPointerEquals(&item->t_tid, &tid))
+	{
+		/*
+		 * or should this be TM_Invisible? The heapam at least just throws
+		 * an error, I think..
+		 */
+		elog(ERROR, "could not find tuple to delete with TID (%u, %u)",
+			 ItemPointerGetBlockNumber(&tid),
+			 ItemPointerGetOffsetNumber(&tid));
+	}
+	result = zs_SatisfiesUpdate(rel, item, snapshot);
+	if (result != TM_Ok)
+	{
+		zsbt_end_scan(&scan);
+		return result;
+	}
+
+	/* Create UNDO record. */
+	{
+		ZSUndoRec_Delete undorec;
+
+		undorec.rec.size = sizeof(ZSUndoRec_Delete);
+		undorec.rec.type = ZSUNDO_TYPE_DELETE;
+		undorec.rec.attno = attno;
+		undorec.rec.xid = xid;
+		undorec.rec.cid = cid;
+		undorec.rec.tid = tid;
+
+		undorecptr = zsundo_insert(rel, &undorec.rec);
+	}
+
+	/* Replace the ZSBreeItem with a DELETED item. */
+	deleteditem = palloc(item->t_size);
+	memcpy(deleteditem, item, item->t_size);
+	deleteditem->t_flags |= ZSBT_DELETED;
+	deleteditem->t_undo_ptr = undorecptr;
+
+	zsbt_replace_item(rel, attno, scan.lastbuf, item, deleteditem, NULL);
+	scan.lastbuf_is_locked = false;	/* zsbt_replace_item released */
+	zsbt_end_scan(&scan);
+
+	return TM_Ok;
+}
+
+
+/*
+ * If 'newtid' is valid, then that TID is used for the new item. It better not
+ * be in use already. If it's invalid, then a new TID is allocated, as we see
+ * best. (When inserting the first column of the row, pass invalid, and for
+ * other columns, pass the TID you got for the first column.)
+ */
+TM_Result
+zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum,
+			TransactionId xid, CommandId cid, Snapshot snapshot, Snapshot crosscheck,
+			bool wait, TM_FailureData *hufd, ItemPointerData *newtid_p)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	Form_pg_attribute attr = &desc->attrs[attno - 1];
+	ZSBtreeScan scan;
+	ZSBtreeItem *olditem;
+	TM_Result	result;
+	ZSUndoRecPtr undorecptr;
+	ZSBtreeItem *deleteditem;
+	ZSBtreeItem *newitem;
+	OffsetNumber maxoff;
+	Buffer		buf;
+	Page		page;
+	ZSBtreePageOpaque *opaque;
+	ItemPointerData newtid = *newtid_p;
+	Size		datumsz;
+	Size		newitemsz;
+	char	   *dataptr;
+
+	/*
+	 * Find the item to delete.  It could be part of a compressed item,
+	 * we let zsbt_scan_next_internal() handle that.
+	 */
+	zsbt_begin_scan(rel, attno, otid, snapshot, &scan);
+	scan.for_update = true;
+
+	olditem = zsbt_scan_next_internal(&scan);
+	if (!ItemPointerEquals(&olditem->t_tid, &otid))
+	{
+		/*
+		 * or should this be TM_Invisible? The heapam at least just throws
+		 * an error, I think..
+		 */
+		elog(ERROR, "could not find tuple to delete with TID (%u, %u)",
+			 ItemPointerGetBlockNumber(&otid),
+			 ItemPointerGetOffsetNumber(&otid));
+	}
+
+	/*
+	 * Is it visible to us?
+	 */
+	result = zs_SatisfiesUpdate(rel, olditem, snapshot);
+	if (result != TM_Ok)
+	{
+		zsbt_end_scan(&scan);
+		return result;
+	}
+
+	/*
+	 * Look at the last item, for its tid. We will use that + 1, as the TID of
+	 * the new item.
+	 */
+	buf = scan.lastbuf;
+	page = BufferGetPage(buf);
+	opaque = ZSBtreePageGetOpaque(page);
+	maxoff = PageGetMaxOffsetNumber(page);
+	if (maxoff >= FirstOffsetNumber)
+	{
+		ItemId		iid = PageGetItemId(page, maxoff);
+		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
+
+		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
+			newtid = hitup->t_lasttid;
+		else
+			newtid = hitup->t_tid;
+		ItemPointerIncrement(&newtid);
+	}
+	else
+	{
+		newtid = opaque->zs_lokey;
+	}
+
+	if (ItemPointerCompare(&newtid, &opaque->zs_hikey) >= 0)
+	{
+		/* no more free TIDs on the page. Bail out */
+		/*
+		 * TODO: what we should do, is to find another target page for the
+		 * new tuple.
+		 */
+		elog(ERROR, "out of TID space on page");
+	}
+
+	/* Create UNDO record. */
+	{
+		ZSUndoRec_Update undorec;
+
+		undorec.rec.size = sizeof(ZSUndoRec_Update);
+		undorec.rec.type = ZSUNDO_TYPE_UPDATE;
+		undorec.rec.attno = attno;
+		undorec.rec.xid = xid;
+		undorec.rec.cid = cid;
+		undorec.rec.tid = newtid;
+		undorec.otid = otid;
+
+		undorecptr = zsundo_insert(rel, &undorec.rec);
+	}
+
+	/* Replace the ZSBreeItem with an UPDATED item. */
+	deleteditem = palloc(olditem->t_size);
+	memcpy(deleteditem, olditem, olditem->t_size);
+	deleteditem->t_flags |= ZSBT_UPDATED;
+	deleteditem->t_undo_ptr = undorecptr;
+
+	/*
+	 * Form a ZSBtreeItem to insert.
+	 */
+	datumsz = datumGetSize(newdatum, attr->attbyval, attr->attlen);
+	newitemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
+
+	newitem = palloc(newitemsz);
+	newitem->t_tid = newtid;
+	newitem->t_flags = 0;
+	newitem->t_size = newitemsz;
+	newitem->t_undo_ptr = undorecptr;
+
+	dataptr = ((char *) newitem) + offsetof(ZSBtreeItem, t_payload);
+	if (attr->attbyval)
+		store_att_byval(dataptr, newdatum, attr->attlen);
+	else
+		memcpy(dataptr, DatumGetPointer(newdatum), datumsz);
+
+	zsbt_replace_item(rel, attno, scan.lastbuf, olditem, deleteditem, newitem);
+	scan.lastbuf_is_locked = false;	/* zsbt_recompress_replace released */
+	zsbt_end_scan(&scan);
+
+	*newtid_p = newtid;
+	return TM_Ok;
+}
+
+/* ----------------------------------------------------------------
+ *						 Internal routines
+ * ----------------------------------------------------------------
+ */
 
 /*
  * Find the leaf buffer containing the given key TID.
@@ -232,366 +689,6 @@ zsbt_find_downlink(Relation rel, AttrNumber attno,
 }
 
 /*
- * Find a target leaf page to insert new row to.
- *
- * This is used when we're free to pick any TID for the new tuple.
- *
- * TODO: Currently, we just descend to rightmost leaf. Should use a free space
- * map or something to find a suitable target.
- */
-static Buffer
-zsbt_find_insertion_target(ZSInsertState *state, BlockNumber rootblk)
-{
-	ItemPointerData rightmostkey;
-
-	ItemPointerSet(&rightmostkey, MaxBlockNumber, 0xfffe);
-
-	return zsbt_descend(state->rel, rootblk, rightmostkey);
-}
-
-/*
- * Insert tuple to given leaf page. Return TID of the new item.
- */
-static ItemPointerData
-zsbt_insert_to_leaf(Buffer buf, ZSInsertState *state)
-{
-	/* If there's space, add here */
-	TupleDesc	desc = RelationGetDescr(state->rel);
-	Form_pg_attribute attr = &desc->attrs[state->attno - 1];
-	Page		page = BufferGetPage(buf);
-	ZSBtreePageOpaque *opaque = ZSBtreePageGetOpaque(page);
-	Size		datumsz;
-	Size		itemsz;
-	ZSBtreeItem	*item;
-	char	   *dataptr;
-	ItemPointerData tid;
-	OffsetNumber maxoff;
-
-	/*
-	 * Look at the last item, for its tid.
-	 */
-	maxoff = PageGetMaxOffsetNumber(page);
-	if (maxoff >= FirstOffsetNumber)
-	{
-		ItemId		iid = PageGetItemId(page, maxoff);
-		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
-
-		tid = hitup->t_tid;
-		ItemPointerIncrement(&tid);
-	}
-	else
-	{
-		tid = opaque->zs_lokey;
-	}
-
-	datumsz = datumGetSize(state->datum, attr->attbyval, attr->attlen);
-	itemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
-
-	/* for first column header needs to be stored as well */
-	if (state->attno == 1)
-	{
-		Assert(state->tuple_header);
-		itemsz += SizeofHeapTupleHeader;
-	}
-
-	/* TODO: should we detoast or deal with "expanded" datums here? */
-
-	/*
-	 * Form a ZSBtreeItem to insert.
-	 */
-	item = palloc(itemsz);
-	item->t_tid = tid;
-	item->t_flags = 0;
-	item->t_size = itemsz;
-
-	dataptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
-
-	if (state->attno == 1)
-	{
-		memcpy(dataptr, state->tuple_header, SizeofHeapTupleHeader);
-		dataptr += SizeofHeapTupleHeader;
-	}
-
-	if (attr->attbyval)
-		store_att_byval(dataptr, state->datum, attr->attlen);
-	else
-		memcpy(dataptr, DatumGetPointer(state->datum), datumsz);
-
-	/*
-	 * If there's enough space on the page, insert. Otherwise, have to
-	 * split the page.
-	 */
-	if (PageGetFreeSpace(page) < MAXALIGN(itemsz))
-	{
-		(void) zsbt_compress_leaf(buf);
-		maxoff = PageGetMaxOffsetNumber(page);
-	}
-
-	if (PageGetFreeSpace(page) >= MAXALIGN(itemsz))
-	{
-		OffsetNumber off;
-		off = PageAddItemExtended(page, (Item) item, itemsz, maxoff + 1, PAI_OVERWRITE);
-		if (off == InvalidOffsetNumber)
-			elog(ERROR, "didn't fit, after all?");
-		MarkBufferDirty(buf);
-		/* TODO: WAL-log */
-
-		UnlockReleaseBuffer(buf);
-
-		return tid;
-	}
-	else
-	{
-		maxoff = PageGetMaxOffsetNumber(page);
-		zsbt_split_leaf(buf, maxoff, state, item, false, maxoff + 1);
-		return tid;
-	}
-}
-
-/*
- * Try to compress all tuples on a page, if not compressed already.
- *
- * Returns true on success. Can fail, if the tuples didn't fit on the page after
- * compressing anymore. The page is left unchanged in that case.
- */
-static bool
-zsbt_compress_leaf(Buffer buf)
-{
-	Page		origpage = BufferGetPage(buf);
-	Page		page;
-	OffsetNumber maxoff;
-	ZSCompressContext compressor;
-	int			compressed_items = 0;
-	bool		success = true;
-	int			already_compressed = 0;
-	int			total_compressed = 0;
-	int			total = 0;
-
-	zs_compress_init(&compressor);
-
-	page = PageGetTempPageCopySpecial(origpage);
-
-	maxoff = PageGetMaxOffsetNumber(origpage);
-	for (int i = FirstOffsetNumber; i <= maxoff; i++)
-	{
-		ItemId		iid = PageGetItemId(origpage, i);
-		ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(origpage, iid);
-		ZSBtreeItem *newitem1 = NULL;
-		ZSBtreeItem *newitem2 = NULL;
-
-		total++;
-
-		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
-		{
-			already_compressed++;
-			/*
-			 * Add compressed items as is. It might be worthwhile to uncompress
-			 * and recompress them, together with any new items, but currently
-			 * we don't bother.
-			 */
-			if (compressed_items > 0)
-			{
-				newitem1 = (ZSBtreeItem *) zs_compress_finish(&compressor);
-				compressed_items = 0;
-				total_compressed++;
-			}
-			newitem2 = item;
-		}
-		else
-		{
-			/* try to add this item to the compressor */
-			if (compressed_items == 0)
-				zs_compress_begin(&compressor, PageGetFreeSpace(page));
-
-			if (zs_compress_add(&compressor, item))
-			{
-				compressed_items++;
-			}
-			else
-			{
-				if (compressed_items > 0)
-				{
-					newitem1 = (ZSBtreeItem *) zs_compress_finish(&compressor);
-					compressed_items = 0;
-					total_compressed++;
-					i--;
-				}
-				else
-				{
-					/* could not compress, even on its own. Store it uncompressed, then */
-					newitem1 = item;
-				}
-			}
-		}
-
-		if (newitem1)
-		{
-			if (PageGetFreeSpace(page) < MAXALIGN(newitem1->t_size))
-			{
-				success = false;
-				break;
-			}
-			if (PageAddItemExtended(page,
-									(Item) newitem1, newitem1->t_size,
-									PageGetMaxOffsetNumber(page) + 1,
-									PAI_OVERWRITE) == InvalidOffsetNumber)
-				elog(ERROR, "could not add item to page while repacking");
-		}
-
-		if (newitem2)
-		{
-			if (PageGetFreeSpace(page) < MAXALIGN(newitem2->t_size))
-			{
-				success = false;
-				break;
-			}
-			if (PageAddItemExtended(page,
-									(Item) newitem2, newitem2->t_size,
-									PageGetMaxOffsetNumber(page) + 1,
-									PAI_OVERWRITE) == InvalidOffsetNumber)
-				elog(ERROR, "could not add item to page while repacking");
-		}
-	}
-
-	if (success && compressed_items > 0)
-	{
-		ZSBtreeItem *item = zs_compress_finish(&compressor);
-		total_compressed++;
-
-		if (PageGetFreeSpace(page) < MAXALIGN(item->t_size))
-			success = false;
-		else if (PageAddItemExtended(page,
-									 (Item) item, item->t_size,
-									 PageGetMaxOffsetNumber(page) + 1,
-									 PAI_OVERWRITE) == InvalidOffsetNumber)
-			elog(ERROR, "could not add item to page while repacking");
-	}
-
-	//elog(NOTICE, "compresleaf success: %d already %d total %d, total_comp %d, free after compression %d", success, already_compressed, total, total_compressed, (int) PageGetFreeSpace(page));
-
-	zs_compress_free(&compressor);
-
-	if (success)
-	{
-		/* TODO: WAL-log */
-		PageRestoreTempPage(page, origpage);
-		MarkBufferDirty(buf);
-	}
-
-	return success;
-}
-
-/*
- * Split a leaf page for insertion of 'newitem'.
- */
-static void
-zsbt_split_leaf(Buffer buf, OffsetNumber lastleftoff, ZSInsertState *state,
-				ZSBtreeItem *newitem, bool newitemonleft, OffsetNumber newitemoff)
-{
-	Buffer		leftbuf = buf;
-	Buffer		rightbuf;
-	BlockNumber rightblkno;
-	Page		origpage = BufferGetPage(buf);
-	Page		leftpage;
-	Page		rightpage;
-	ZSBtreePageOpaque *leftopaque;
-	ZSBtreePageOpaque *rightopaque;
-	ItemPointerData splittid;
-	OffsetNumber i,
-				maxoff;
-
-	/*
-	 * The original page becomes the left half, but we use a temporary copy of it
-	 * to operate on. Allocate a new page for the right half.
-	 *
-	 * TODO: it'd be good to not hold a lock on the original page while we
-	 * allocate a new one.
-	 */
-	leftpage = PageGetTempPageCopySpecial(origpage);
-	leftopaque = ZSBtreePageGetOpaque(leftpage);
-	Assert(leftopaque->zs_level == 0);
-	/* any previous incomplete split must be finished first */
-	Assert((leftopaque->zs_flags & ZS_FOLLOW_RIGHT) == 0);
-
-	rightbuf = zs_getnewbuf(state->rel);
-	rightpage = BufferGetPage(rightbuf);
-	rightblkno = BufferGetBlockNumber(rightbuf);
-	PageInit(rightpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
-	rightopaque = ZSBtreePageGetOpaque(rightpage);
-
-	/*
-	 * Figure out the split point TID.
-	 *
-	 * TODO: currently, we only append to end, i.e. we only ever split the rightmost leaf.
-	 * that makes it easier to figure out the split tid: just take the old page's lokey,
-	 * and increment the blocknumber component of it.
-	 */
-	ItemPointerSet(&splittid, ItemPointerGetBlockNumber(&leftopaque->zs_lokey) + 1, 1);
-
-	/* Set up the page headers */
-
-	rightopaque->zs_next = leftopaque->zs_next;
-	rightopaque->zs_lokey = splittid;
-	rightopaque->zs_hikey = leftopaque->zs_hikey;
-	rightopaque->zs_level = 0;
-	rightopaque->zs_flags = 0;
-	rightopaque->zs_page_id = ZS_BTREE_PAGE_ID;
-
-	leftopaque->zs_next = rightblkno;
-	leftopaque->zs_hikey = splittid;
-	leftopaque->zs_flags |= ZS_FOLLOW_RIGHT;
-
-	//elog(NOTICE, "split leaf %u to %u", BufferGetBlockNumber(leftbuf), rightblkno);
-
-	/*
-	 * Copy all the tuples
-	 */
-	maxoff = PageGetMaxOffsetNumber(origpage);
-	for (i = FirstOffsetNumber; i <= maxoff; i++)
-	{
-		ItemId		iid = PageGetItemId(origpage, i);
-		ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(origpage, iid);
-		Page		targetpage;
-
-		if (i == newitemoff)
-		{
-			targetpage = newitemonleft ? leftpage : rightpage;
-			if (PageAddItemExtended(targetpage,
-									(Item) newitem, newitem->t_size,
-									PageGetMaxOffsetNumber(targetpage) + 1,
-									PAI_OVERWRITE) == InvalidOffsetNumber)
-				elog(ERROR, "could not add new item to page on split");
-		}
-
-		targetpage = (i <= lastleftoff) ? leftpage : rightpage;
-		if (PageAddItemExtended(targetpage,
-								(Item) item, item->t_size,
-								PageGetMaxOffsetNumber(targetpage) + 1,
-								PAI_OVERWRITE) == InvalidOffsetNumber)
-			elog(ERROR, "could not add item to page on split");
-	}
-	if (i == newitemoff)
-	{
-		Assert(!newitemonleft);
-		if (PageAddItemExtended(rightpage,
-								(Item) newitem, newitem->t_size,
-								FirstOffsetNumber,
-								PAI_OVERWRITE) == InvalidOffsetNumber)
-			elog(ERROR, "could not add new item to page on split");
-	}
-
-	PageRestoreTempPage(leftpage, origpage);
-
-	/* TODO: WAL-log */
-	MarkBufferDirty(leftbuf);
-	MarkBufferDirty(rightbuf);
-
-	UnlockReleaseBuffer(rightbuf);
-
-	zsbt_insert_downlink(state->rel, state->attno, leftbuf, splittid, rightblkno);
-}
-
-/*
  * Create a new btree root page, containing two downlinks.
  *
  * NOTE: the very first root page of a btree, which is also the leaf, is created
@@ -655,6 +752,8 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level,
 
 /*
  * After page split, insert the downlink of 'rightbuf' to the parent.
+ *
+ * On entry, 'leftbuf' must be pinned exclusive-locked. It is released on exit.
  */
 static void
 zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
@@ -702,7 +801,7 @@ zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
 	if (ZSBtreeInternalPageIsFull(parentpage))
 	{
 		/* split internal page */
-		zsbt_split_internal(rel, attno, parentbuf, leftbuf, itemno, rightlokey, rightblkno);
+		zsbt_split_internal_page(rel, attno, parentbuf, leftbuf, itemno, rightlokey, rightblkno);
 	}
 	else
 	{
@@ -725,9 +824,15 @@ zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
 	}
 }
 
+/*
+ * Split an internal page.
+ *
+ * The new downlink specified by 'newkey' and 'childblk' is inserted to
+ * position 'newoff', on 'leftbuf'. The page is split.
+ */
 static void
-zsbt_split_internal(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer childbuf,
-					OffsetNumber newoff, ItemPointerData newkey, BlockNumber childblk)
+zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer childbuf,
+						 OffsetNumber newoff, ItemPointerData newkey, BlockNumber childblk)
 {
 	Buffer		rightbuf;
 	Page		origpage = BufferGetPage(leftbuf);
@@ -832,71 +937,20 @@ zsbt_split_internal(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer child
 
 	UnlockReleaseBuffer(rightbuf);
 
-	/* recurse to insert downlink */
+	/* recurse to insert downlink. (this releases 'leftbuf') */
 	zsbt_insert_downlink(rel, attno, leftbuf, splittid, rightblkno);
-
-	/* Release buffers */
 }
 
 /*
- * Begin a scan of the btree.
+ * Returns the next item in the scan. This doesn't pay attention to visibility.
+ *
+ * The returned pointer might point directly to a btree-buffer, or it might be
+ * palloc'd copy. If it points to a buffer, scan->lastbuf_is_locked is true,
+ * otherwise false.
  */
-void
-zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, Snapshot snapshot, ZSBtreeScan *scan)
+static ZSBtreeItem *
+zsbt_scan_next_internal(ZSBtreeScan *scan)
 {
-	BlockNumber	rootblk;
-	Buffer		buf;
-
-	rootblk = zsmeta_get_root_for_attribute(rel, attno, false);
-
-	if (rootblk == InvalidBlockNumber)
-	{
-		/* completely empty tree */
-		scan->rel = NULL;
-		scan->attno = InvalidAttrNumber;
-		scan->active = false;
-		scan->lastbuf = InvalidBuffer;
-		scan->lastoff = InvalidOffsetNumber;
-		scan->snapshot = NULL;
-		ItemPointerSetInvalid(&scan->nexttid);
-		return;
-	}
-
-	buf = zsbt_descend(rel, rootblk, starttid);
-	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-	scan->rel = rel;
-	scan->attno = attno;
-	scan->snapshot = snapshot;
-
-	scan->active = true;
-	scan->lastbuf = buf;
-	scan->lastoff = InvalidOffsetNumber;
-	scan->nexttid = starttid;
-
-	scan->has_decompressed = false;
-}
-
-void
-zsbt_end_scan(ZSBtreeScan *scan)
-{
-	if (!scan->active)
-		return;
-
-	if (scan->lastbuf)
-		ReleaseBuffer(scan->lastbuf);
-	scan->active = false;
-}
-
-/*
- * Return true if there was another tuple. The datum is returned in *datum,
- * and its TID in *tid. For a pass-by-ref datum, it's a palloc'd copy.
- */
-bool
-zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid, bool *visible)
-{
-	TupleDesc	desc;
-	Form_pg_attribute attr;
 	Buffer		buf;
 	Page		page;
 	ZSBtreePageOpaque *opaque;
@@ -907,12 +961,8 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, ItemPointerData *tid, bool *visi
 	if (!scan->active)
 		return false;
 
-	desc = RelationGetDescr(scan->rel);
-	attr = &desc->attrs[scan->attno - 1];
-
 	for (;;)
 	{
-loop:
 		while (scan->has_decompressed)
 		{
 			ZSBtreeItem *item = zs_decompress_read_item(&scan->decompressor);
@@ -924,242 +974,410 @@ loop:
 			}
 			if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
 			{
-				char		*ptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
-
-				/* first column stores the MVCC information */
-				if (scan->attno == 1)
-				{
-					/* TODO: How to handle hintbit setting for uncompressed items? */
-					*visible = zs_tuple_satisfies_visibility((HeapTupleHeader)ptr,
-															 &item->t_tid,
-															 scan->snapshot,
-															 buf);
-					ptr += SizeofHeapTupleHeader;
-				}
-				else
-					*visible = true;
-
-				*datum = fetchatt(attr, ptr);
-				*datum = datumCopy(*datum, attr->attbyval, attr->attlen);
-				*tid = item->t_tid;
-
-				scan->nexttid = *tid;
+				scan->nexttid = item->t_tid;
 				ItemPointerIncrement(&scan->nexttid);
-
-				return true;
+				return item;
 			}
 		}
 
-		for (;;)
+		buf = scan->lastbuf;
+		page = BufferGetPage(buf);
+		opaque = ZSBtreePageGetOpaque(page);
+
+		if (!scan->lastbuf_is_locked)
+			LockBuffer(buf, scan->for_update ? BUFFER_LOCK_EXCLUSIVE : BUFFER_LOCK_SHARE);
+		scan->lastbuf_is_locked = true;
+
+		/* TODO: check that the page is a valid zs btree page */
+
+		/* TODO: check the last offset first, as an optimization */
+		maxoff = PageGetMaxOffsetNumber(page);
+		for (off = FirstOffsetNumber; off <= maxoff; off++)
 		{
-			buf = scan->lastbuf;
-			page = BufferGetPage(buf);
-			opaque = ZSBtreePageGetOpaque(page);
+			ItemId		iid = PageGetItemId(page, off);
+			ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
 
-			LockBuffer(buf, BUFFER_LOCK_SHARE);
-
-			/* TODO: check that the page is a valid zs btree page */
-
-			/* TODO: check the last offset first, as an optimization */
-			maxoff = PageGetMaxOffsetNumber(page);
-			for (off = FirstOffsetNumber; off <= maxoff; off++)
+			if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 			{
-				ItemId		iid = PageGetItemId(page, off);
-				ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
-
-				if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+				if (ItemPointerCompare(&item->t_lasttid, &scan->nexttid) >= 0)
 				{
-					if (ItemPointerCompare(&item->t_lasttid, &scan->nexttid) >= 0)
+					zs_decompress_chunk(&scan->decompressor, item);
+					scan->has_decompressed = true;
+					if (!scan->for_update)
 					{
-						zs_decompress_chunk(&scan->decompressor, item);
-						scan->has_decompressed = true;
 						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-						goto loop;
+						scan->lastbuf_is_locked = false;
 					}
-				}
-				else
-				{
-					if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
-					{
-						char		*ptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
-
-						/* first column stores the MVCC information */
-						if (scan->attno == 1)
-						{
-							*visible = zs_tuple_satisfies_visibility((HeapTupleHeader)ptr,
-																	   &item->t_tid,
-																	   scan->snapshot,
-																	   buf);
-							ptr += SizeofHeapTupleHeader;
-						}
-						else
-							*visible = true;
-
-						*datum = fetchatt(attr, ptr);
-						*datum = datumCopy(*datum, attr->attbyval, attr->attlen);
-						*tid = item->t_tid;
-						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-						scan->lastbuf = buf;
-						scan->lastoff = off;
-						scan->nexttid = *tid;
-						ItemPointerIncrement(&scan->nexttid);
-
-						return true;
-					}
+					break;
 				}
 			}
-
-			/* No more items on this page. Walk right, if possible */
-			next = opaque->zs_next;
-			if (next == BufferGetBlockNumber(buf))
-				elog(ERROR, "btree page %u next-pointer points to itself", next);
-			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-			if (next == InvalidBlockNumber)
+			else
 			{
-				scan->active = false;
-				ReleaseBuffer(scan->lastbuf);
-				scan->lastbuf = InvalidBuffer;
-				return false;
+				if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
+				{
+					scan->nexttid = item->t_tid;
+					ItemPointerIncrement(&scan->nexttid);
+					return item;
+				}
 			}
-
-			scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 		}
+
+		if (scan->has_decompressed)
+			continue;
+
+		/* No more items on this page. Walk right, if possible */
+		next = opaque->zs_next;
+		if (next == BufferGetBlockNumber(buf))
+			elog(ERROR, "btree page %u next-pointer points to itself", next);
+		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+		scan->lastbuf_is_locked = false;
+
+		if (next == InvalidBlockNumber)
+		{
+			scan->active = false;
+			ReleaseBuffer(scan->lastbuf);
+			scan->lastbuf = InvalidBuffer;
+			return false;
+		}
+
+		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 	}
 }
 
-
 /*
- * Return true if there was another tuple. The datum is returned in *datum,
- * and its TID in *tid. For a pass-by-ref datum, it's a palloc'd copy.
+ * This helper function is used to implement INSERT, UPDATE and DELETE.
+ *
+ * If 'olditem' is not NULL, then 'olditem' on the page is replaced with
+ * 'replacementitem'.
+ *
+ * If 'newitem' is not NULL, it is added to the page, to the correct position.
+ *
+ * This function handles decompressing and recompressing items, and splitting
+ * the page if needed.
  */
-bool
-zsbt_scan_for_tuple_delete(ZSBtreeScanForTupleDelete *deldesc, ItemPointerData tid)
+static void
+zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
+				  ZSBtreeItem *olditem,
+				  ZSBtreeItem *replacementitem,
+				  ZSBtreeItem *newitem)
 {
-	Page		page;
-	ZSBtreePageOpaque *opaque;
+	Page		page = BufferGetPage(buf);
 	OffsetNumber off;
 	OffsetNumber maxoff;
-	BlockNumber	next;
+	List	   *items;
+	bool		found_old_item = false;
 
-	BlockNumber	rootblk;
-	Buffer		buf;
-	AttrNumber attno = 1; /* for delete scan only first column */
-	Relation rel = deldesc->rel;
+	/*
+	 * Helper routine, to append the given old item 'x' to the list.
+	 * If the 'x' matches the old item, then append 'replacementitem' instead.
+	 * And if thew 'newitem' shoudl go before 'x', then append that first.
+	 *
+	 * TODO: We could also leave out any old, deleted, items that are no longer
+	 * visible to anyone.
+	 */
+#define PROCESS_ITEM(x) \
+	do { \
+		if (newitem && ItemPointerCompare(&(x)->t_tid, &newitem->t_tid) >= 0) \
+		{ \
+			Assert(!ItemPointerEquals(&(x)->t_tid, &newitem->t_tid)); \
+			items = lappend(items, newitem); \
+			newitem = NULL; \
+		} \
+		if (olditem && ItemPointerEquals(&(x)->t_tid, &olditem->t_tid)) \
+		{ \
+			Assert(!found_old_item); \
+			found_old_item = true; \
+			items = lappend(items, replacementitem); \
+		} \
+		else \
+			items = lappend(items, x); \
+	} while(0)
 
-	rootblk = zsmeta_get_root_for_attribute(rel, attno, false);
-
-	if (rootblk == InvalidBlockNumber)
-		return false;
-
-	buf = zsbt_descend(rel, rootblk, tid);
-	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-	for (;;)
+	/* Loop through all old items on the page */
+	items = NIL;
+	maxoff = PageGetMaxOffsetNumber(page);
+	for (off = FirstOffsetNumber; off <= maxoff; off++)
 	{
-loop:
-		for (;;)
+		ItemId		iid = PageGetItemId(page, off);
+		ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+
+		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 		{
-			page = BufferGetPage(buf);
-			opaque = ZSBtreePageGetOpaque(page);
+			ZSDecompressContext decompressor;
 
-			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-
-			/* TODO: check that the page is a valid zs btree page */
-
-			/* TODO: check the last offset first, as an optimization */
-			maxoff = PageGetMaxOffsetNumber(page);
-			for (off = FirstOffsetNumber; off <= maxoff; off++)
+			if ((olditem && ItemPointerBetween(&item->t_tid, &olditem->t_tid, &item->t_lasttid)) ||
+				(newitem && ItemPointerBetween(&item->t_tid, &newitem->t_tid, &item->t_lasttid)))
 			{
-				ItemId		iid = PageGetItemId(page, off);
-				ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+				/* Found it, this compressed item covers the target or the new TID. */
+				/* We have to decompress it, and recompress */
+				zs_decompress_chunk(&decompressor, item);
 
-				if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+				while ((item = zs_decompress_read_item(&decompressor)) != NULL)
+					PROCESS_ITEM(item);
+			}
+			else
+			{
+				/* this item does not cover the target, nor the newitem. Add as it is. */
+				items = lappend(items, item);
+				continue;
+			}
+		}
+		else
+			PROCESS_ITEM(item);
+	}
+
+	if (olditem && !found_old_item)
+		elog(ERROR, "could not find old item to replace");
+
+	/* if the new item was not added in the loop, it goes to the end */
+	if (newitem)
+		items = lappend(items, newitem);
+
+	/* Now pass the list to the recompressor. */
+	IncrBufferRefCount(buf);
+	zsbt_recompress_replace(rel, attno, buf, items);
+}
+
+/*
+ * Recompressor routines
+ */
+typedef struct
+{
+	ZSBtreeItem *newitem;
+
+	Page		currpage;
+	ZSCompressContext compressor;
+	int			compressed_items;
+	List	   *pages;		/* first page writes over the old buffer,
+							 * subsequent pages get newly-allocated buffers */
+
+	int			total_items;
+	int			total_compressed_items;
+	int			total_already_compressed_items;
+
+	ItemPointerData hikey;
+} zsbt_recompress_context;
+
+static void
+zsbt_recompress_newpage(zsbt_recompress_context *cxt, ItemPointerData nexttid)
+{
+	Page		newpage;
+	ZSBtreePageOpaque *newopaque;
+
+	if (cxt->currpage)
+	{
+		/* set the last tid on previous page */
+		ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(cxt->currpage);
+
+		oldopaque->zs_hikey = nexttid;
+	}
+
+	newpage = (Page) palloc(BLCKSZ);
+	PageInit(newpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
+	cxt->pages = lappend(cxt->pages, newpage);
+	cxt->currpage = newpage;
+
+	newopaque = ZSBtreePageGetOpaque(newpage);
+	newopaque->zs_next = InvalidBlockNumber; /* filled in later */
+	newopaque->zs_lokey = nexttid;
+	newopaque->zs_hikey = cxt->hikey;		/* overwritten later, if this is not last page */
+	newopaque->zs_level = 0;
+	newopaque->zs_flags = 0;
+	newopaque->zs_page_id = ZS_BTREE_PAGE_ID;
+}
+
+static void
+zsbt_recompress_add_to_page(zsbt_recompress_context *cxt, ZSBtreeItem *item)
+{
+	if (PageGetFreeSpace(cxt->currpage) < MAXALIGN(item->t_size))
+		zsbt_recompress_newpage(cxt, item->t_tid);
+
+	if (PageAddItemExtended(cxt->currpage,
+							(Item) item, item->t_size,
+							PageGetMaxOffsetNumber(cxt->currpage) + 1,
+							PAI_OVERWRITE) == InvalidOffsetNumber)
+		elog(ERROR, "could not add item to page while recompressing");
+
+	cxt->total_items++;
+}
+
+static bool
+zsbt_recompress_add_to_compressor(zsbt_recompress_context *cxt, ZSBtreeItem *item)
+{
+	bool		result;
+
+	if (cxt->compressed_items == 0)
+		zs_compress_begin(&cxt->compressor, PageGetFreeSpace(cxt->currpage));
+
+	result = zs_compress_add(&cxt->compressor, item);
+	if (result)
+	{
+		cxt->compressed_items++;
+
+		cxt->total_compressed_items++;
+	}
+
+	return result;
+}
+
+static void
+zsbt_recompress_flush(zsbt_recompress_context *cxt)
+{
+	ZSBtreeItem *item;
+
+	if (cxt->compressed_items == 0)
+		return;
+
+	item = zs_compress_finish(&cxt->compressor);
+
+	zsbt_recompress_add_to_page(cxt, item);
+	cxt->compressed_items = 0;
+}
+
+/*
+ * Rewrite a leaf page, with given 'items' as the new content.
+ *
+ * If there are any uncompressed items in the list, we try to compress them.
+ * Any already-compressed items are added as is.
+ *
+ * If the items no longer fit on the page, then the page is split. It is
+ * entirely possible that they don't fit even on two pages; we split the page
+ * into as many pages as needed. Hopefully not more than a few pages, though,
+ * because otherwise you might hit limits on the number of buffer pins (with
+ * tiny shared_buffers).
+ *
+ * On entry, 'oldbuf' must be pinned and exclusive-locked. On exit, the lock
+ * is released, but it's still pinned.
+ */
+static void
+zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *items)
+{
+	ListCell   *lc;
+	ListCell   *lc2;
+	zsbt_recompress_context cxt;
+	ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(BufferGetPage(oldbuf));
+
+	cxt.currpage = NULL;
+	zs_compress_init(&cxt.compressor);
+	cxt.compressed_items = 0;
+	cxt.pages = NIL;
+
+	cxt.total_items = 0;
+	cxt.total_compressed_items = 0;
+	cxt.total_already_compressed_items = 0;
+
+	zsbt_recompress_newpage(&cxt, oldopaque->zs_lokey);
+
+	foreach(lc, items)
+	{
+		ZSBtreeItem *item = (ZSBtreeItem *) lfirst(lc);
+
+		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+		{
+			/* already compressed, add as it is. */
+			zsbt_recompress_flush(&cxt);
+			cxt.total_already_compressed_items++;
+			zsbt_recompress_add_to_page(&cxt, item);
+		}
+		else
+		{
+			/* try to add this item to the compressor */
+			if (!zsbt_recompress_add_to_compressor(&cxt, item))
+			{
+				if (cxt.compressed_items > 0)
 				{
-					if (ItemPointerCompare(&item->t_lasttid, &tid) >= 0)
+					/* flush, and retry */
+					zsbt_recompress_flush(&cxt);
+
+					if (!zsbt_recompress_add_to_compressor(&cxt, item))
 					{
-						/* TODO: lets deal with compressed items for delete later */
-//						zs_decompress_chunk(&scan->decompressor, item);
-						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-						goto loop;
+						/* could not compress, even on its own. Store it uncompressed, then */
+						zsbt_recompress_add_to_page(&cxt, item);
 					}
 				}
 				else
 				{
-					if (ItemPointerCompare(&item->t_tid, &tid) >= 0)
-					{
-						char		*ptr = ((char *) item) + offsetof(ZSBtreeItem, t_payload);
-						zs_tuple_delete(deldesc, (HeapTupleHeader)ptr, &tid, buf);
-						Assert(ItemPointerEquals(&tid, &item->t_tid));
-						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-						ReleaseBuffer(buf);
-						return true;
-					}
+					/* could not compress, even on its own. Store it uncompressed, then */
+					zsbt_recompress_add_to_page(&cxt, item);
 				}
 			}
-
-			/* No more items on this page. Walk right, if possible */
-			next = opaque->zs_next;
-			if (next == BufferGetBlockNumber(buf))
-				elog(ERROR, "btree page %u next-pointer points to itself", next);
-			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-			if (next == InvalidBlockNumber)
-			{
-				ReleaseBuffer(buf);
-				return false;
-			}
-			buf = ReleaseAndReadBuffer(buf, rel, next);
 		}
 	}
 
-	if (buf)
-		ReleaseBuffer(buf);
-}
+	/* flush the last one, if any */
+	zsbt_recompress_flush(&cxt);
 
-/*
- * Get the last tid (plus one) in the tree.
- */
-ItemPointerData
-zsbt_get_last_tid(Relation rel, AttrNumber attno)
-{
-	BlockNumber	rootblk;
-	ItemPointerData rightmostkey;
-	ItemPointerData	tid;
-	Buffer		buf;
-	Page		page;
-	ZSBtreePageOpaque *opaque;
-	OffsetNumber maxoff;
+	//elog(NOTICE, "recompressing att %d: %d already, %d compressed, %d items on %d pages",
+	//	 attno,
+	//	 cxt.total_already_compressed_items, cxt.total_compressed_items, cxt.total_items,
+	//	 list_length(cxt.pages));
 
-	/* Find the rightmost leaf */
-	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
-	ItemPointerSet(&rightmostkey, MaxBlockNumber, 0xfffe);
-	buf = zsbt_descend(rel, rootblk, rightmostkey);
-	page = BufferGetPage(buf);
-	opaque = ZSBtreePageGetOpaque(page);
-
-	/*
-	 * Look at the last item, for its tid.
-	 */
-	maxoff = PageGetMaxOffsetNumber(page);
-	if (maxoff >= FirstOffsetNumber)
+	/* Ok, we now have a list of pages, to replace the original page. */
 	{
-		ItemId		iid = PageGetItemId(page, maxoff);
-		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
+		List	   *bufs;
+		int			i;
+		BlockNumber orignextblk;
+		Buffer		leftbuf;
+		Buffer		rightbuf;
 
-		tid = hitup->t_tid;
-		ItemPointerIncrement(&tid);
-	}
-	else
-	{
-		tid = opaque->zs_lokey;
-	}
-	UnlockReleaseBuffer(buf);
+		/*
+		 * allocate all the pages before entering critical section, so that
+		 * out-of-disk-space doesn't lead to PANIC
+		 */
+		bufs = list_make1_int(oldbuf);
+		for (i = 0; i < list_length(cxt.pages) - 1; i++)
+		{
+			Buffer		newbuf = zs_getnewbuf(rel);
+			bufs = lappend_int(bufs, newbuf);
+		}
 
-	return tid;
+		START_CRIT_SECTION();
+
+		orignextblk = oldopaque->zs_next;
+		forboth(lc, cxt.pages, lc2, bufs)
+		{
+			Page		page_copy = (Page) lfirst(lc);
+			Buffer		buf = (Buffer) lfirst_int(lc2);
+			Page		page = BufferGetPage(buf);
+			ZSBtreePageOpaque *opaque;
+
+			PageRestoreTempPage(page_copy, page);
+			opaque = ZSBtreePageGetOpaque(page);
+
+			/* TODO: WAL-log */
+			if (lnext(lc2))
+			{
+				Buffer nextbuf = (Buffer) lfirst_int(lnext(lc2));
+
+				opaque->zs_next = BufferGetBlockNumber(nextbuf);
+				opaque->zs_flags |= ZS_FOLLOW_RIGHT;
+			}
+			else
+			{
+				/* last one in the chain. */
+				opaque->zs_next = orignextblk;
+			}
+
+			MarkBufferDirty(buf);
+		}
+
+		END_CRIT_SECTION();
+
+		/* If there were more than one page, insert downlinks for new pages. */
+		rightbuf = oldbuf;
+		bufs = list_delete_first(bufs);
+		while (bufs)
+		{
+			leftbuf = rightbuf;
+			rightbuf = (Buffer) linitial_int(bufs);
+			zsbt_insert_downlink(rel, attno, leftbuf,
+								 ZSBtreePageGetOpaque(BufferGetPage(leftbuf))->zs_hikey,
+								 BufferGetBlockNumber(rightbuf));
+			bufs = list_delete_first(bufs);
+		}
+		UnlockReleaseBuffer(rightbuf);
+	}
 }
-
 
 static int
 zsbt_binsrch_internal(ItemPointerData key, ZSBtreeInternalPageItem *arr, int arr_elems)
