@@ -331,11 +331,9 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 
 	/*
 	 * convert booleans array into an array of the attribute numbers of the
-	 * required columns. Always project the first column as it contains the
-	 * visibility info.
+	 * required columns.
 	 */
-	scan->proj_atts[scan->num_proj_atts++] = 0;
-	for (i = 1; i < relation->rd_att->natts; i++)
+	for (i = 0; i < relation->rd_att->natts; i++)
 	{
 		/* if project_columns is empty means need all the columns */
 		if (project_columns == NULL || project_columns[i])
