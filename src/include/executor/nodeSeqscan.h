@@ -27,5 +27,6 @@ extern void ExecSeqScanInitializeDSM(SeqScanState *node, ParallelContext *pcxt);
 extern void ExecSeqScanReInitializeDSM(SeqScanState *node, ParallelContext *pcxt);
 extern void ExecSeqScanInitializeWorker(SeqScanState *node,
 							ParallelWorkerContext *pwcxt);
+extern void GetNeededColumnsForNode(Node *expr, bool *mask, int n);
 
 #endif							/* NODESEQSCAN_H */

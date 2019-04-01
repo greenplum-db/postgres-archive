@@ -35,6 +35,7 @@
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
 #include "executor/executor.h"
+#include "executor/nodeSeqscan.h"
 #include "optimizer/plancat.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
@@ -593,7 +594,7 @@ zedstoream_index_validate_scan(Relation heapRelation,
 }
 
 static double
-zedstoream_index_build_range_scan(Relation heapRelation,
+zedstoream_index_build_range_scan(Relation baseRelation,
 							  Relation indexRelation,
 							  IndexInfo *indexInfo,
 							  bool allow_sync,
@@ -637,7 +638,7 @@ zedstoream_index_build_range_scan(Relation heapRelation,
 	 */
 	estate = CreateExecutorState();
 	econtext = GetPerTupleExprContext(estate);
-	slot = table_slot_create(heapRelation, NULL);
+	slot = table_slot_create(baseRelation, NULL);
 
 	/* Arrange for econtext's scan tuple to be the tuple under test */
 	econtext->ecxt_scantuple = slot;
@@ -656,13 +657,16 @@ zedstoream_index_build_range_scan(Relation heapRelation,
 
 	/* okay to ignore lazy VACUUMs here */
 	if (!IsBootstrapProcessingMode() && !indexInfo->ii_Concurrent)
-		OldestXmin = GetOldestXmin(heapRelation, PROCARRAY_FLAGS_VACUUM);
+		OldestXmin = GetOldestXmin(baseRelation, PROCARRAY_FLAGS_VACUUM);
 
 	/*
 	 * TODO: It would be very good to fetch only the columns we need.
 	 */
 	if (!scan)
 	{
+		bool *proj;
+		int attno;
+
 		/*
 		 * Serial index build.
 		 *
@@ -677,12 +681,23 @@ zedstoream_index_build_range_scan(Relation heapRelation,
 		else
 			snapshot = SnapshotAny;
 
-		scan = table_beginscan_strat(heapRelation,	/* relation */
-									 snapshot,	/* snapshot */
-									 0, /* number of keys */
-									 NULL,	/* scan key */
-									 true,	/* buffer access strategy OK */
-									 allow_sync);	/* syncscan OK? */
+		proj = palloc0(baseRelation->rd_att->natts * sizeof(bool));
+		for (attno = 0; attno < indexInfo->ii_NumIndexKeyAttrs; attno++)
+		{
+			Assert(indexInfo->ii_IndexAttrNumbers[attno] <= baseRelation->rd_att->natts);
+			/* skip expressions */
+			if (indexInfo->ii_IndexAttrNumbers[attno] > 0)
+				proj[indexInfo->ii_IndexAttrNumbers[attno] - 1] = true;
+		}
+
+		GetNeededColumnsForNode((Node *)indexInfo->ii_Expressions, proj,
+								baseRelation->rd_att->natts);
+
+		scan = table_beginscan_with_column_projection(baseRelation,	/* relation */
+													  snapshot,	/* snapshot */
+													  0, /* number of keys */
+													  NULL,	/* scan key */
+													  proj);
 	}
 	else
 	{

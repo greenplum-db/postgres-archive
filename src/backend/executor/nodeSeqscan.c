@@ -77,7 +77,7 @@ neededColumnContextWalker(Node *node, neededColumnContext *c)
  * n specifies the number of allowed entries in mask: we use
  * it for bounds-checking in the walker above.
  */
-static void
+void
 GetNeededColumnsForNode(Node *expr, bool *mask, int n)
 {
 	neededColumnContext c;
