@@ -33,7 +33,7 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value)
 {
 	varatt_zs_toastptr *toastptr;
 	BlockNumber firstblk = InvalidBlockNumber;
-	Buffer		buf;
+	Buffer		buf = InvalidBuffer;
 	Page		page;
 	ZSToastPageOpaque *opaque;
 	Buffer		prevbuf = InvalidBuffer;
