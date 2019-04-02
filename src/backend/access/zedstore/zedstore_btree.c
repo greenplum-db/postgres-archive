@@ -107,6 +107,7 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapsho
 	scan->nexttid = starttid;
 
 	scan->has_decompressed = false;
+	zs_decompress_init(&scan->decompressor);
 
 	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 }
@@ -123,6 +124,8 @@ zsbt_end_scan(ZSBtreeScan *scan)
 			LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
 		ReleaseBuffer(scan->lastbuf);
 	}
+	zs_decompress_free(&scan->decompressor);
+
 	scan->active = false;
 }
 
@@ -1089,6 +1092,9 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 	OffsetNumber maxoff;
 	List	   *items;
 	bool		found_old_item = false;
+	/* We might need to decompress up to two previously compressed items */
+	ZSDecompressContext decompressors[2];
+	int			numdecompressors = 0;
 
 	/*
 	 * Helper routine, to append the given old item 'x' to the list.
@@ -1126,16 +1132,18 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 
 		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 		{
-			ZSDecompressContext decompressor;
-
 			if ((olditem && item->t_tid <= olditem->t_tid && olditem->t_tid <= item->t_lasttid) ||
 				(newitem && item->t_tid <= newitem->t_tid && newitem->t_tid <= item->t_lasttid))
 			{
 				/* Found it, this compressed item covers the target or the new TID. */
 				/* We have to decompress it, and recompress */
-				zs_decompress_chunk(&decompressor, item);
+				ZSDecompressContext *decompressor = &decompressors[numdecompressors++];
+				Assert(numdecompressors <= 2);
 
-				while ((item = zs_decompress_read_item(&decompressor)) != NULL)
+				zs_decompress_init(decompressor);
+				zs_decompress_chunk(decompressor, item);
+
+				while ((item = zs_decompress_read_item(decompressor)) != NULL)
 					PROCESS_ITEM(item);
 			}
 			else
@@ -1159,6 +1167,14 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 	/* Now pass the list to the recompressor. */
 	IncrBufferRefCount(buf);
 	zsbt_recompress_replace(rel, attno, buf, items);
+
+	/*
+	 * We can now free the decompression contexts. The pointers in the 'items' list
+	 * point to decompression buffers, so we cannot free them until after writing out
+	 * the pages.
+	 */
+	for (int i = 0; i < numdecompressors; i++)
+		zs_decompress_free(&decompressors[i]);
 }
 
 /*

@@ -35,7 +35,7 @@
  *
  * Currently, the compressor accepts input, until the *uncompressed* size exceeds
  * the *compressed* size available. I.e it assumes that the compressed size is never
- * larger than uncompressed size. 
+ * larger than uncompressed size.
  *
  * Copyright (c) 2019, PostgreSQL Global Development Group
  *
@@ -75,7 +75,7 @@ void
 zs_compress_begin(ZSCompressContext *context, int maxCompressedSize)
 {
 	int			maxUncompressedSize;
-	
+
 	context->buffer = repalloc(context->buffer, maxCompressedSize + 4 /* LZ slop */);
 
 	context->maxCompressedSize = maxCompressedSize;
@@ -122,13 +122,13 @@ zs_compress_finish(ZSCompressContext *context)
 {
 	ZSBtreeItem *chunk = (ZSBtreeItem *) context->buffer;
 	int32		compressed_size;
-	
+
 	compressed_size = pglz_compress(context->uncompressedbuffer, context->rawsize,
 									chunk->t_payload,
 									PGLZ_strategy_always);
 	if (compressed_size < 0)
 		elog(ERROR, "compression failed. what now?");
-	
+
 	chunk->t_size = offsetof(ZSBtreeItem, t_payload) + compressed_size;
 	chunk->t_flags = ZSBT_COMPRESSED;
 	chunk->t_uncompressedsize = context->rawsize;
@@ -143,16 +143,31 @@ zs_compress_free(ZSCompressContext *context)
 }
 
 void
+zs_decompress_init(ZSDecompressContext *context)
+{
+	context->buffer = NULL;
+	context->bufsize = 0;
+	context->uncompressedsize = 0;
+}
+
+void
 zs_decompress_chunk(ZSDecompressContext *context, ZSBtreeItem *chunk)
 {
 	Assert((chunk->t_flags & ZSBT_COMPRESSED) != 0);
-	context->buffer = palloc(chunk->t_uncompressedsize);
-	context->bufsize = chunk->t_uncompressedsize;
+	Assert(chunk->t_uncompressedsize > 0);
+	if (context->bufsize < chunk->t_uncompressedsize)
+	{
+		if (context->buffer)
+			pfree(context->buffer);
+		context->buffer = palloc(chunk->t_uncompressedsize);
+		context->bufsize = chunk->t_uncompressedsize;
+	}
+	context->uncompressedsize = chunk->t_uncompressedsize;
 
 	if (pglz_decompress(chunk->t_payload,
 						chunk->t_size - offsetof(ZSBtreeItem, t_payload),
 						context->buffer,
-						context->bufsize) != context->bufsize)
+						context->uncompressedsize) != context->uncompressedsize)
 		elog(ERROR, "could not decompress chunk");
 
 	context->bytesread = 0;
@@ -163,10 +178,10 @@ zs_decompress_read_item(ZSDecompressContext *context)
 {
 	ZSBtreeItem *next;
 
-	if (context->bytesread == context->bufsize)
+	if (context->bytesread == context->uncompressedsize)
 		return NULL;
 	next = (ZSBtreeItem *) (context->buffer + context->bytesread);
-	if (context->bytesread + next->t_size > context->bufsize)
+	if (context->bytesread + next->t_size > context->uncompressedsize)
 		elog(ERROR, "invalid compressed item");
 	context->bytesread += next->t_size;
 
@@ -174,4 +189,14 @@ zs_decompress_read_item(ZSDecompressContext *context)
 	Assert(next->t_tid != InvalidZSTid);
 
 	return next;
+}
+
+void
+zs_decompress_free(ZSDecompressContext *context)
+{
+	if (context->buffer)
+		pfree(context->buffer);
+	context->buffer = NULL;
+	context->bufsize = 0;
+	context->uncompressedsize = 0;
 }
