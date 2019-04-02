@@ -18,6 +18,7 @@
 #include "catalog/pg_cast_d.h"
 #include "catalog/pg_class_d.h"
 #include "catalog/pg_default_acl_d.h"
+#include "fe_utils/logging.h"
 #include "fe_utils/string_utils.h"
 
 #include "common.h"
@@ -157,7 +158,7 @@ describeAccessMethods(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support access methods.\n",
+		pg_log_error("The server (version %s) does not support access methods.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -169,9 +170,11 @@ describeAccessMethods(const char *pattern, bool verbose)
 					  "SELECT amname AS \"%s\",\n"
 					  "  CASE amtype"
 					  " WHEN 'i' THEN '%s'"
+					  " WHEN 't' THEN '%s'"
 					  " END AS \"%s\"",
 					  gettext_noop("Name"),
 					  gettext_noop("Index"),
+					  gettext_noop("Table"),
 					  gettext_noop("Type"));
 
 	if (verbose)
@@ -224,7 +227,7 @@ describeTablespaces(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support tablespaces.\n",
+		pg_log_info("The server (version %s) does not support tablespaces.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -327,7 +330,7 @@ describeFunctions(const char *functypes, const char *pattern, bool verbose, bool
 
 	if (strlen(functypes) != strspn(functypes, "anptwS+"))
 	{
-		psql_error("\\df only takes [anptwS+] as options\n");
+		pg_log_error("\\df only takes [anptwS+] as options");
 		return true;
 	}
 
@@ -335,7 +338,7 @@ describeFunctions(const char *functypes, const char *pattern, bool verbose, bool
 	{
 		char		sverbuf[32];
 
-		psql_error("\\df does not take a \"%c\" option with server version %s\n",
+		pg_log_error("\\df does not take a \"%c\" option with server version %s",
 				   'p',
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
@@ -346,7 +349,7 @@ describeFunctions(const char *functypes, const char *pattern, bool verbose, bool
 	{
 		char		sverbuf[32];
 
-		psql_error("\\df does not take a \"%c\" option with server version %s\n",
+		pg_log_error("\\df does not take a \"%c\" option with server version %s",
 				   'w',
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
@@ -1095,7 +1098,7 @@ listDefaultACLs(const char *pattern)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support altering default privileges.\n",
+		pg_log_error("The server (version %s) does not support altering default privileges.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -1396,10 +1399,10 @@ describeTableDetails(const char *pattern, bool verbose, bool showSystem)
 		if (!pset.quiet)
 		{
 			if (pattern)
-				psql_error("Did not find any relation named \"%s\".\n",
+				pg_log_error("Did not find any relation named \"%s\".",
 						   pattern);
 			else
-				psql_error("Did not find any relations.\n");
+				pg_log_error("Did not find any relations.");
 		}
 		PQclear(res);
 		return false;
@@ -1462,6 +1465,7 @@ describeOneTableDetails(const char *schemaname,
 				attnotnull_col = -1,
 				attcoll_col = -1,
 				attidentity_col = -1,
+				attgenerated_col = -1,
 				isindexkey_col = -1,
 				indexdef_col = -1,
 				fdwopts_col = -1,
@@ -1653,7 +1657,7 @@ describeOneTableDetails(const char *schemaname,
 	if (PQntuples(res) == 0)
 	{
 		if (!pset.quiet)
-			psql_error("Did not find any relation with OID %s.\n", oid);
+			pg_log_error("Did not find any relation with OID %s.", oid);
 		goto error_return;
 	}
 
@@ -1832,8 +1836,9 @@ describeOneTableDetails(const char *schemaname,
 
 	if (show_column_details)
 	{
+		/* use "pretty" mode for expression to avoid excessive parentheses */
 		appendPQExpBufferStr(&buf,
-							 ",\n  (SELECT substring(pg_catalog.pg_get_expr(d.adbin, d.adrelid) for 128)"
+							 ",\n  (SELECT substring(pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) for 128)"
 							 "\n   FROM pg_catalog.pg_attrdef d"
 							 "\n   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef)"
 							 ",\n  a.attnotnull");
@@ -1850,6 +1855,11 @@ describeOneTableDetails(const char *schemaname,
 		else
 			appendPQExpBufferStr(&buf, ",\n  ''::pg_catalog.char AS attidentity");
 		attidentity_col = cols++;
+		if (pset.sversion >= 120000)
+			appendPQExpBufferStr(&buf, ",\n  a.attgenerated");
+		else
+			appendPQExpBufferStr(&buf, ",\n  ''::pg_catalog.char AS attgenerated");
+		attgenerated_col = cols++;
 	}
 	if (tableinfo.relkind == RELKIND_INDEX ||
 		tableinfo.relkind == RELKIND_PARTITIONED_INDEX)
@@ -2030,6 +2040,7 @@ describeOneTableDetails(const char *schemaname,
 		if (show_column_details)
 		{
 			char	   *identity;
+			char	   *generated;
 			char	   *default_str = "";
 
 			printTableAddCell(&cont, PQgetvalue(res, i, attcoll_col), false, false);
@@ -2039,16 +2050,19 @@ describeOneTableDetails(const char *schemaname,
 							  false, false);
 
 			identity = PQgetvalue(res, i, attidentity_col);
+			generated = PQgetvalue(res, i, attgenerated_col);
 
-			if (!identity[0])
-				/* (note: above we cut off the 'default' string at 128) */
-				default_str = PQgetvalue(res, i, attrdef_col);
-			else if (identity[0] == ATTRIBUTE_IDENTITY_ALWAYS)
+			if (identity[0] == ATTRIBUTE_IDENTITY_ALWAYS)
 				default_str = "generated always as identity";
 			else if (identity[0] == ATTRIBUTE_IDENTITY_BY_DEFAULT)
 				default_str = "generated by default as identity";
+			else if (generated[0] == ATTRIBUTE_GENERATED_STORED)
+				default_str = psprintf("generated always as (%s) stored", PQgetvalue(res, i, attrdef_col));
+			else
+				/* (note: above we cut off the 'default' string at 128) */
+				default_str = PQgetvalue(res, i, attrdef_col);
 
-			printTableAddCell(&cont, default_str, false, false);
+			printTableAddCell(&cont, default_str, false, generated[0] ? true : false);
 		}
 
 		/* Info for index columns */
@@ -3528,7 +3542,7 @@ listDbRoleSettings(const char *pattern, const char *pattern2)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support per-database role settings.\n",
+		pg_log_error("The server (version %s) does not support per-database role settings.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -3564,13 +3578,13 @@ listDbRoleSettings(const char *pattern, const char *pattern2)
 	if (PQntuples(res) == 0 && !pset.quiet)
 	{
 		if (pattern && pattern2)
-			psql_error("Did not find any settings for role \"%s\" and database \"%s\".\n",
+			pg_log_error("Did not find any settings for role \"%s\" and database \"%s\".",
 					   pattern, pattern2);
 		else if (pattern)
-			psql_error("Did not find any settings for role \"%s\".\n",
+			pg_log_error("Did not find any settings for role \"%s\".",
 					   pattern);
 		else
-			psql_error("Did not find any settings.\n");
+			pg_log_error("Did not find any settings.");
 	}
 	else
 	{
@@ -3740,10 +3754,10 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 	if (PQntuples(res) == 0 && !pset.quiet)
 	{
 		if (pattern)
-			psql_error("Did not find any relation named \"%s\".\n",
+			pg_log_error("Did not find any relation named \"%s\".",
 					   pattern);
 		else
-			psql_error("Did not find any relations.\n");
+			pg_log_error("Did not find any relations.");
 	}
 	else
 	{
@@ -4199,7 +4213,7 @@ listCollations(const char *pattern, bool verbose, bool showSystem)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support collations.\n",
+		pg_log_error("The server (version %s) does not support collations.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -4354,7 +4368,7 @@ listTSParsers(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support full text search.\n",
+		pg_log_error("The server (version %s) does not support full text search.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -4434,10 +4448,10 @@ listTSParsersVerbose(const char *pattern)
 		if (!pset.quiet)
 		{
 			if (pattern)
-				psql_error("Did not find any text search parser named \"%s\".\n",
+				pg_log_error("Did not find any text search parser named \"%s\".",
 						   pattern);
 			else
-				psql_error("Did not find any text search parsers.\n");
+				pg_log_error("Did not find any text search parsers.");
 		}
 		PQclear(res);
 		return false;
@@ -4601,7 +4615,7 @@ listTSDictionaries(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support full text search.\n",
+		pg_log_error("The server (version %s) does not support full text search.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -4672,7 +4686,7 @@ listTSTemplates(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support full text search.\n",
+		pg_log_error("The server (version %s) does not support full text search.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -4743,7 +4757,7 @@ listTSConfigs(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support full text search.\n",
+		pg_log_error("The server (version %s) does not support full text search.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -4824,10 +4838,10 @@ listTSConfigsVerbose(const char *pattern)
 		if (!pset.quiet)
 		{
 			if (pattern)
-				psql_error("Did not find any text search configuration named \"%s\".\n",
+				pg_log_error("Did not find any text search configuration named \"%s\".",
 						   pattern);
 			else
-				psql_error("Did not find any text search configurations.\n");
+				pg_log_error("Did not find any text search configurations.");
 		}
 		PQclear(res);
 		return false;
@@ -4949,7 +4963,7 @@ listForeignDataWrappers(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support foreign-data wrappers.\n",
+		pg_log_error("The server (version %s) does not support foreign-data wrappers.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -5032,7 +5046,7 @@ listForeignServers(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support foreign servers.\n",
+		pg_log_error("The server (version %s) does not support foreign servers.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -5114,7 +5128,7 @@ listUserMappings(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support user mappings.\n",
+		pg_log_error("The server (version %s) does not support user mappings.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -5175,7 +5189,7 @@ listForeignTables(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support foreign tables.\n",
+		pg_log_error("The server (version %s) does not support foreign tables.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -5253,7 +5267,7 @@ listExtensions(const char *pattern)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support extensions.\n",
+		pg_log_error("The server (version %s) does not support extensions.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -5310,7 +5324,7 @@ listExtensionContents(const char *pattern)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support extensions.\n",
+		pg_log_error("The server (version %s) does not support extensions.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -5338,10 +5352,10 @@ listExtensionContents(const char *pattern)
 		if (!pset.quiet)
 		{
 			if (pattern)
-				psql_error("Did not find any extension named \"%s\".\n",
+				pg_log_error("Did not find any extension named \"%s\".",
 						   pattern);
 			else
-				psql_error("Did not find any extensions.\n");
+				pg_log_error("Did not find any extensions.");
 		}
 		PQclear(res);
 		return false;
@@ -5424,7 +5438,7 @@ listPublications(const char *pattern)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support publications.\n",
+		pg_log_error("The server (version %s) does not support publications.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -5495,7 +5509,7 @@ describePublications(const char *pattern)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support publications.\n",
+		pg_log_error("The server (version %s) does not support publications.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;
@@ -5533,10 +5547,10 @@ describePublications(const char *pattern)
 		if (!pset.quiet)
 		{
 			if (pattern)
-				psql_error("Did not find any publication named \"%s\".\n",
+				pg_log_error("Did not find any publication named \"%s\".",
 						   pattern);
 			else
-				psql_error("Did not find any publications.\n");
+				pg_log_error("Did not find any publications.");
 		}
 
 		termPQExpBuffer(&buf);
@@ -5651,7 +5665,7 @@ describeSubscriptions(const char *pattern, bool verbose)
 	{
 		char		sverbuf[32];
 
-		psql_error("The server (version %s) does not support subscriptions.\n",
+		pg_log_error("The server (version %s) does not support subscriptions.",
 				   formatPGVersionNumber(pset.sversion, false,
 										 sverbuf, sizeof(sverbuf)));
 		return true;

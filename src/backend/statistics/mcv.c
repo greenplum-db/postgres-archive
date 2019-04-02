@@ -51,7 +51,7 @@
  *	 ndim * (sizeof(uint16) + sizeof(bool)) + 2 * sizeof(double)
  */
 #define ITEM_SIZE(ndims)	\
-	((ndims) * (sizeof(uint16) + sizeof(bool)) + 2 * sizeof(double))
+	MAXALIGN((ndims) * (sizeof(uint16) + sizeof(bool)) + 2 * sizeof(double))
 
 /*
  * Macros for convenient access to parts of a serialized MCV item.
@@ -451,9 +451,9 @@ statext_mcv_load(Oid mvoid)
  *
  * The overall structure of the serialized representation looks like this:
  *
- * +--------+----------------+---------------------+-------+
- * | header | dimension info | deduplicated values | items |
- * +--------+----------------+---------------------+-------+
+ * +---------------+----------------+---------------------+-------+
+ * | header fields | dimension info | deduplicated values | items |
+ * +---------------+----------------+---------------------+-------+
  *
  * Where dimension info stores information about type of K-th attribute (e.g.
  * typlen, typbyval and length of deduplicated values).  Deduplicated values
@@ -492,6 +492,7 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 
 	/* serialized items (indexes into arrays, etc.) */
 	bytea	   *output;
+	char	   *raw;
 	char	   *ptr;
 
 	/* values per dimension (and number of non-NULL values) */
@@ -593,8 +594,12 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 			info[dim].nbytes = 0;
 			for (i = 0; i < info[dim].nvalues; i++)
 			{
+				Size	len;
+
 				values[dim][i] = PointerGetDatum(PG_DETOAST_DATUM(values[dim][i]));
-				info[dim].nbytes += VARSIZE_ANY(values[dim][i]);
+
+				len = VARSIZE_ANY(values[dim][i]);
+				info[dim].nbytes += MAXALIGN(len);
 			}
 		}
 		else if (info[dim].typlen == -2)	/* cstring */
@@ -602,9 +607,13 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 			info[dim].nbytes = 0;
 			for (i = 0; i < info[dim].nvalues; i++)
 			{
+				Size	len;
+
 				/* c-strings include terminator, so +1 byte */
 				values[dim][i] = PointerGetDatum(PG_DETOAST_DATUM(values[dim][i]));
-				info[dim].nbytes += strlen(DatumGetCString(values[dim][i])) + 1;
+
+				len = strlen(DatumGetCString(values[dim][i])) + 1;
+				info[dim].nbytes += MAXALIGN(len);
 			}
 		}
 
@@ -617,20 +626,22 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 	 * whole serialized MCV list (varlena header, MCV header, dimension info
 	 * for each attribute, deduplicated values and items).
 	 */
-	total_length = VARHDRSZ + offsetof(MCVList, items)
-		+ (ndims * sizeof(DimensionInfo))
-		+ (mcvlist->nitems * itemsize);
+	total_length = offsetof(MCVList, items)
+		+ MAXALIGN(ndims * sizeof(DimensionInfo));
 
 	/* add space for the arrays of deduplicated values */
 	for (i = 0; i < ndims; i++)
-		total_length += info[i].nbytes;
+		total_length += MAXALIGN(info[i].nbytes);
 
-	/* allocate space for the whole serialized MCV list */
-	output = (bytea *) palloc(total_length);
-	SET_VARSIZE(output, total_length);
+	/* and finally the items (no additional alignment needed) */
+	total_length += mcvlist->nitems * itemsize;
 
-	/* 'ptr' points to the current position in the output buffer */
-	ptr = VARDATA(output);
+	/*
+	 * Allocate space for the whole serialized MCV list (we'll skip bytes,
+	 * so we set them to zero to make the result more compressible).
+	 */
+	raw = palloc0(total_length);
+	ptr = raw;
 
 	/* copy the MCV list header */
 	memcpy(ptr, mcvlist, offsetof(MCVList, items));
@@ -638,7 +649,7 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 
 	/* store information about the attributes */
 	memcpy(ptr, info, sizeof(DimensionInfo) * ndims);
-	ptr += sizeof(DimensionInfo) * ndims;
+	ptr += MAXALIGN(sizeof(DimensionInfo) * ndims);
 
 	/* Copy the deduplicated values for all attributes to the output. */
 	for (dim = 0; dim < ndims; dim++)
@@ -670,6 +681,7 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 			}
 			else if (info[dim].typlen > 0)	/* pased by reference */
 			{
+				/* no special alignment needed, treated as char array */
 				memcpy(ptr, DatumGetPointer(value), info[dim].typlen);
 				ptr += info[dim].typlen;
 			}
@@ -678,14 +690,14 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 				int			len = VARSIZE_ANY(value);
 
 				memcpy(ptr, DatumGetPointer(value), len);
-				ptr += len;
+				ptr += MAXALIGN(len);
 			}
 			else if (info[dim].typlen == -2)	/* cstring */
 			{
 				Size		len = strlen(DatumGetCString(value)) + 1;	/* terminator */
 
 				memcpy(ptr, DatumGetCString(value), len);
-				ptr += len;
+				ptr += MAXALIGN(len);
 			}
 
 			/* no underflows or overflows */
@@ -694,6 +706,9 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 
 		/* we should get exactly nbytes of data for this dimension */
 		Assert((ptr - start) == info[dim].nbytes);
+
+		/* make sure the pointer is aligned correctly after each dimension */
+		ptr = raw + MAXALIGN(ptr - raw);
 	}
 
 	/* Serialize the items, with uint16 indexes instead of the values. */
@@ -702,7 +717,7 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 		MCVItem    *mcvitem = &mcvlist->items[i];
 
 		/* don't write beyond the allocated space */
-		Assert(ptr <= (char *) output + total_length - itemsize);
+		Assert(ptr <= raw + total_length - itemsize);
 
 		/* reset the item (we only allocate it once and reuse it) */
 		memset(item, 0, itemsize);
@@ -725,7 +740,6 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 			ITEM_INDEXES(item)[dim] = (uint16) (value - values[dim]);
 
 			/* check the index is within expected bounds */
-			Assert(ITEM_INDEXES(item)[dim] >= 0);
 			Assert(ITEM_INDEXES(item)[dim] < info[dim].nvalues);
 		}
 
@@ -741,11 +755,18 @@ statext_mcv_serialize(MCVList * mcvlist, VacAttrStats **stats)
 	}
 
 	/* at this point we expect to match the total_length exactly */
-	Assert((ptr - (char *) output) == total_length);
+	Assert((ptr - raw) == total_length);
 
 	pfree(item);
 	pfree(values);
 	pfree(counts);
+
+	output = (bytea *) palloc(VARHDRSZ + total_length);
+	SET_VARSIZE(output, VARHDRSZ + total_length);
+
+	memcpy(VARDATA_ANY(output), raw, total_length);
+
+	pfree(raw);
 
 	return output;
 }
@@ -764,6 +785,7 @@ statext_mcv_deserialize(bytea *data)
 				i;
 	Size		expected_size;
 	MCVList    *mcvlist;
+	char	   *raw;
 	char	   *ptr;
 
 	int			ndims,
@@ -781,6 +803,7 @@ statext_mcv_deserialize(bytea *data)
 	Size		datalen;
 	char	   *dataptr;
 	char	   *valuesptr;
+	char	   *isnullptr;
 
 	if (data == NULL)
 		return NULL;
@@ -790,14 +813,17 @@ statext_mcv_deserialize(bytea *data)
 	 * header.
 	 */
 	if (VARSIZE_ANY_EXHDR(data) < offsetof(MCVList, items))
-		elog(ERROR, "invalid MCV size %ld (expected at least %zu)",
+		elog(ERROR, "invalid MCV size %zd (expected at least %zu)",
 			 VARSIZE_ANY_EXHDR(data), offsetof(MCVList, items));
 
 	/* read the MCV list header */
 	mcvlist = (MCVList *) palloc0(offsetof(MCVList, items));
 
 	/* initialize pointer to the data part (skip the varlena header) */
-	ptr = VARDATA_ANY(data);
+	raw = palloc(VARSIZE_ANY_EXHDR(data));
+	ptr = raw;
+
+	memcpy(raw, VARDATA_ANY(data), VARSIZE_ANY_EXHDR(data));
 
 	/* get the header and perform further sanity checks */
 	memcpy(mcvlist, ptr, offsetof(MCVList, items));
@@ -843,12 +869,12 @@ statext_mcv_deserialize(bytea *data)
 	 * to do this check first, before accessing the dimension info.
 	 */
 	if (VARSIZE_ANY_EXHDR(data) < expected_size)
-		elog(ERROR, "invalid MCV size %ld (expected %zu)",
+		elog(ERROR, "invalid MCV size %zd (expected %zu)",
 			 VARSIZE_ANY_EXHDR(data), expected_size);
 
 	/* Now it's safe to access the dimension info. */
 	info = (DimensionInfo *) ptr;
-	ptr += ndims * sizeof(DimensionInfo);
+	ptr += MAXALIGN(ndims * sizeof(DimensionInfo));
 
 	/* account for the value arrays */
 	for (dim = 0; dim < ndims; dim++)
@@ -860,7 +886,7 @@ statext_mcv_deserialize(bytea *data)
 		Assert(info[dim].nvalues >= 0);
 		Assert(info[dim].nbytes >= 0);
 
-		expected_size += info[dim].nbytes;
+		expected_size += MAXALIGN(info[dim].nbytes);
 	}
 
 	/*
@@ -869,7 +895,7 @@ statext_mcv_deserialize(bytea *data)
 	 * check on size.
 	 */
 	if (VARSIZE_ANY_EXHDR(data) != expected_size)
-		elog(ERROR, "invalid MCV size %ld (expected %zu)",
+		elog(ERROR, "invalid MCV size %zd (expected %zu)",
 			 VARSIZE_ANY_EXHDR(data), expected_size);
 
 	/*
@@ -882,7 +908,7 @@ statext_mcv_deserialize(bytea *data)
 	 * original values (it might go away).
 	 */
 	datalen = 0;				/* space for by-ref data */
-	map = (Datum **) palloc(ndims * sizeof(Datum **));
+	map = (Datum **) palloc(ndims * sizeof(Datum *));
 
 	for (dim = 0; dim < ndims; dim++)
 	{
@@ -890,7 +916,7 @@ statext_mcv_deserialize(bytea *data)
 
 		/* space needed for a copy of data for by-ref types */
 		if (!info[dim].typbyval)
-			datalen += info[dim].nbytes;
+			datalen += MAXALIGN(info[dim].nbytes);
 	}
 
 	/*
@@ -899,19 +925,25 @@ statext_mcv_deserialize(bytea *data)
 	 * original data - it may disappear while we're still using the MCV list,
 	 * e.g. due to catcache release. Only needed for by-ref types.
 	 */
-	mcvlen = offsetof(MCVList, items) +
-		+(sizeof(MCVItem) * nitems) /* array of MCVItem */
-		+ ((sizeof(Datum) + sizeof(bool)) * ndims * nitems) +
-		+datalen;				/* by-ref data */
+	mcvlen = MAXALIGN(offsetof(MCVList, items) + (sizeof(MCVItem) * nitems));
 
+	/* arrays of values and isnull flags for all MCV items */
+	mcvlen += nitems * MAXALIGN(sizeof(Datum) * ndims);
+	mcvlen += nitems * MAXALIGN(sizeof(bool) * ndims);
+
+	/* we don't quite need to align this, but it makes some asserts easier */
+	mcvlen += MAXALIGN(datalen);
+
+	/* now resize the deserialized MCV list, and compute pointers to parts */
 	mcvlist = repalloc(mcvlist, mcvlen);
 
-	/* pointer to the beginning of values/isnull space */
-	valuesptr = (char *) mcvlist + offsetof(MCVList, items)
-		+ (sizeof(MCVItem) * nitems);
+	/* pointer to the beginning of values/isnull arrays */
+	valuesptr = (char *) mcvlist
+		+ MAXALIGN(offsetof(MCVList, items) + (sizeof(MCVItem) * nitems));
 
-	/* get pointer where to store the data */
-	dataptr = (char *) mcvlist + (mcvlen - datalen);
+	isnullptr = valuesptr + (nitems * MAXALIGN(sizeof(Datum) * ndims));
+
+	dataptr = isnullptr + (nitems * MAXALIGN(sizeof(bool) * ndims));
 
 	/*
 	 * Build mapping (index => value) for translating the serialized data into
@@ -963,11 +995,11 @@ statext_mcv_deserialize(bytea *data)
 					Size		len = VARSIZE_ANY(ptr);
 
 					memcpy(dataptr, ptr, len);
-					ptr += len;
+					ptr += MAXALIGN(len);
 
 					/* just point into the array */
 					map[dim][i] = PointerGetDatum(dataptr);
-					dataptr += len;
+					dataptr += MAXALIGN(len);
 				}
 			}
 			else if (info[dim].typlen == -2)
@@ -978,11 +1010,11 @@ statext_mcv_deserialize(bytea *data)
 					Size		len = (strlen(ptr) + 1);	/* don't forget the \0 */
 
 					memcpy(dataptr, ptr, len);
-					ptr += len;
+					ptr += MAXALIGN(len);
 
 					/* just point into the array */
 					map[dim][i] = PointerGetDatum(dataptr);
-					dataptr += len;
+					dataptr += MAXALIGN(len);
 				}
 			}
 
@@ -995,6 +1027,9 @@ statext_mcv_deserialize(bytea *data)
 
 		/* check we consumed input data for this dimension exactly */
 		Assert(ptr == (start + info[dim].nbytes));
+
+		/* ensure proper alignment of the data */
+		ptr = raw + MAXALIGN(ptr - raw);
 	}
 
 	/* we should have also filled the MCV list exactly */
@@ -1007,10 +1042,11 @@ statext_mcv_deserialize(bytea *data)
 		MCVItem    *item = &mcvlist->items[i];
 
 		item->values = (Datum *) valuesptr;
-		valuesptr += (sizeof(Datum) * ndims);
+		valuesptr += MAXALIGN(sizeof(Datum) * ndims);
 
-		item->isnull = (bool *) valuesptr;
-		valuesptr += (sizeof(bool) * ndims);
+		item->isnull = (bool *) isnullptr;
+		isnullptr += MAXALIGN(sizeof(bool) * ndims);
+
 
 		/* just point to the right place */
 		indexes = ITEM_INDEXES(ptr);
@@ -1027,16 +1063,18 @@ statext_mcv_deserialize(bytea *data)
 		ptr += ITEM_SIZE(ndims);
 
 		/* check we're not overflowing the input */
-		Assert(ptr <= (char *) data + VARSIZE_ANY(data));
+		Assert(ptr <= (char *) raw + VARSIZE_ANY_EXHDR(data));
 	}
 
 	/* check that we processed all the data */
-	Assert(ptr == (char *) data + VARSIZE_ANY(data));
+	Assert(ptr == raw + VARSIZE_ANY_EXHDR(data));
 
 	/* release the buffers used for mapping */
 	for (dim = 0; dim < ndims; dim++)
 		pfree(map[dim]);
+
 	pfree(map);
+	pfree(raw);
 
 	return mcvlist;
 }

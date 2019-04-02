@@ -34,6 +34,7 @@
 #include "postgres_fe.h"
 #include "common/int.h"
 #include "fe_utils/conditional.h"
+#include "fe_utils/logging.h"
 #include "getopt_long.h"
 #include "libpq-fe.h"
 #include "portability/instr_time.h"
@@ -134,10 +135,10 @@ static int	pthread_join(pthread_t th, void **thread_return);
 #define LOG_STEP_SECONDS	5	/* seconds between log messages */
 #define DEFAULT_NXACTS	10		/* default nxacts */
 
-#define ZIPF_CACHE_SIZE	15		/* cache cells number */
-
 #define MIN_GAUSSIAN_PARAM		2.0 /* minimum parameter for gauss */
-#define MAX_ZIPFIAN_PARAM		1000	/* maximum parameter for zipfian */
+
+#define MIN_ZIPFIAN_PARAM		1.001	/* minimum parameter for zipfian */
+#define MAX_ZIPFIAN_PARAM		1000.0	/* maximum parameter for zipfian */
 
 int			nxacts = 0;			/* number of transactions per client */
 int			duration = 0;		/* duration in seconds */
@@ -410,35 +411,6 @@ typedef struct
 } CState;
 
 /*
- * Cache cell for random_zipfian call
- */
-typedef struct
-{
-	/* cell keys */
-	double		s;				/* s - parameter of random_zipfian function */
-	int64		n;				/* number of elements in range (max - min + 1) */
-
-	double		harmonicn;		/* generalizedHarmonicNumber(n, s) */
-	double		alpha;
-	double		beta;
-	double		eta;
-
-	uint64		last_used;		/* last used logical time */
-} ZipfCell;
-
-/*
- * Zipf cache for zeta values
- */
-typedef struct
-{
-	uint64		current;		/* counter for LRU cache replacement algorithm */
-
-	int			nb_cells;		/* number of filled cells */
-	int			overflowCount;	/* number of cache overflows */
-	ZipfCell	cells[ZIPF_CACHE_SIZE];
-} ZipfCache;
-
-/*
  * Thread state
  */
 typedef struct
@@ -459,8 +431,6 @@ typedef struct
 
 	int64		throttle_trigger;	/* previous/next throttling (us) */
 	FILE	   *logfile;		/* where to log, or NULL */
-	ZipfCache	zipf_cache;		/* for thread-safe  zipfian random number
-								 * generation */
 
 	/* per thread collected stats */
 	instr_time	start_time;		/* thread start time */
@@ -613,7 +583,6 @@ static void doLog(TState *thread, CState *st,
 	  StatsData *agg, bool skipped, double latency, double lag);
 static void processXactStats(TState *thread, CState *st, instr_time *now,
 				 bool skipped, StatsData *agg);
-static void pgbench_error(const char *fmt,...) pg_attribute_printf(1, 2);
 static void addScript(ParsedScript script);
 static void *threadRun(void *arg);
 static void finishCon(CState *st);
@@ -629,7 +598,6 @@ static bool socket_has_input(socket_set *sa, int fd, int idx);
 /* callback functions for our flex lexer */
 static const PsqlScanCallbacks pgbench_callbacks = {
 	NULL,						/* don't need get_variable functionality */
-	pgbench_error
 };
 
 
@@ -976,77 +944,12 @@ getPoissonRand(RandomState *random_state, double center)
 	return (int64) (-log(uniform) * center + 0.5);
 }
 
-/* helper function for getZipfianRand */
-static double
-generalizedHarmonicNumber(int64 n, double s)
-{
-	int			i;
-	double		ans = 0.0;
-
-	for (i = n; i > 1; i--)
-		ans += pow(i, -s);
-	return ans + 1.0;
-}
-
-/* set harmonicn and other parameters to cache cell */
-static void
-zipfSetCacheCell(ZipfCell *cell, int64 n, double s)
-{
-	double		harmonic2;
-
-	cell->n = n;
-	cell->s = s;
-
-	harmonic2 = generalizedHarmonicNumber(2, s);
-	cell->harmonicn = generalizedHarmonicNumber(n, s);
-
-	cell->alpha = 1.0 / (1.0 - s);
-	cell->beta = pow(0.5, s);
-	cell->eta = (1.0 - pow(2.0 / n, 1.0 - s)) / (1.0 - harmonic2 / cell->harmonicn);
-}
-
-/*
- * search for cache cell with keys (n, s)
- * and create new cell if it does not exist
- */
-static ZipfCell *
-zipfFindOrCreateCacheCell(ZipfCache *cache, int64 n, double s)
-{
-	int			i,
-				least_recently_used = 0;
-	ZipfCell   *cell;
-
-	/* search cached cell for given parameters */
-	for (i = 0; i < cache->nb_cells; i++)
-	{
-		cell = &cache->cells[i];
-		if (cell->n == n && cell->s == s)
-			return &cache->cells[i];
-
-		if (cell->last_used < cache->cells[least_recently_used].last_used)
-			least_recently_used = i;
-	}
-
-	/* create new one if it does not exist */
-	if (cache->nb_cells < ZIPF_CACHE_SIZE)
-		i = cache->nb_cells++;
-	else
-	{
-		/* replace LRU cell if cache is full */
-		i = least_recently_used;
-		cache->overflowCount++;
-	}
-
-	zipfSetCacheCell(&cache->cells[i], n, s);
-
-	cache->cells[i].last_used = cache->current++;
-	return &cache->cells[i];
-}
-
 /*
  * Computing zipfian using rejection method, based on
  * "Non-Uniform Random Variate Generation",
  * Luc Devroye, p. 550-551, Springer 1986.
+ *
+ * This works for s > 1.0, but may perform badly for s very close to 1.0.
  */
 static int64
 computeIterativeZipfian(RandomState *random_state, int64 n, double s)
@@ -1056,6 +959,10 @@ computeIterativeZipfian(RandomState *random_state, int64 n, double s)
 				t,
 				u,
 				v;
+
+	/* Ensure n is sane */
+	if (n <= 1)
+		return 1;
 
 	while (true)
 	{
@@ -1073,39 +980,16 @@ computeIterativeZipfian(RandomState *random_state, int64 n, double s)
 	return (int64) x;
 }
 
-/*
- * Computing zipfian using harmonic numbers, based on algorithm described in
- * "Quickly Generating Billion-Record Synthetic Databases",
- * Jim Gray et al, SIGMOD 1994
- */
-static int64
-computeHarmonicZipfian(ZipfCache *zipf_cache, RandomState *random_state,
-					   int64 n, double s)
-{
-	ZipfCell   *cell = zipfFindOrCreateCacheCell(zipf_cache, n, s);
-	double		uniform = pg_erand48(random_state->xseed);
-	double		uz = uniform * cell->harmonicn;
-
-	if (uz < 1.0)
-		return 1;
-	if (uz < 1.0 + cell->beta)
-		return 2;
-	return 1 + (int64) (cell->n * pow(cell->eta * uniform - cell->eta + 1.0, cell->alpha));
-}
-
 /* random number generator: zipfian distribution from min to max inclusive */
 static int64
-getZipfianRand(ZipfCache *zipf_cache, RandomState *random_state, int64 min,
-			   int64 max, double s)
+getZipfianRand(RandomState *random_state, int64 min, int64 max, double s)
 {
 	int64		n = max - min + 1;
 
 	/* abort if parameter is invalid */
-	Assert(s > 0.0 && s != 1.0 && s <= MAX_ZIPFIAN_PARAM);
+	Assert(MIN_ZIPFIAN_PARAM <= s && s <= MAX_ZIPFIAN_PARAM);
 
-	return min - 1 + ((s > 1)
-					  ? computeIterativeZipfian(random_state, n, s)
-					  : computeHarmonicZipfian(zipf_cache, random_state, n, s));
+	return min - 1 + computeIterativeZipfian(random_state, n, s);
 }
 
 /*
@@ -2427,17 +2311,17 @@ evalStandardFunc(TState *thread, CState *st,
 					}
 					else if (func == PGBENCH_RANDOM_ZIPFIAN)
 					{
-						if (param <= 0.0 || param == 1.0 || param > MAX_ZIPFIAN_PARAM)
+						if (param < MIN_ZIPFIAN_PARAM || param > MAX_ZIPFIAN_PARAM)
 						{
 							fprintf(stderr,
-									"zipfian parameter must be in range (0, 1) U (1, %d]"
-									" (got %f)\n", MAX_ZIPFIAN_PARAM, param);
+									"zipfian parameter must be in range [%.3f, %.0f]"
+									" (not %f)\n",
+									MIN_ZIPFIAN_PARAM, MAX_ZIPFIAN_PARAM, param);
 							return false;
 						}
+
 						setIntValue(retval,
-									getZipfianRand(&thread->zipf_cache,
-												   &st->cs_func_rs,
-												   imin, imax, param));
+									getZipfianRand(&st->cs_func_rs, imin, imax, param));
 					}
 					else		/* exponential */
 					{
@@ -2445,7 +2329,7 @@ evalStandardFunc(TState *thread, CState *st,
 						{
 							fprintf(stderr,
 									"exponential parameter must be greater than zero"
-									" (got %f)\n", param);
+									" (not %f)\n", param);
 							return false;
 						}
 
@@ -4154,20 +4038,6 @@ parseQuery(Command *cmd)
 }
 
 /*
- * Simple error-printing function, might be needed by lexer
- */
-static void
-pgbench_error(const char *fmt,...)
-{
-	va_list		ap;
-
-	fflush(stdout);
-	va_start(ap, fmt);
-	vfprintf(stderr, _(fmt), ap);
-	va_end(ap);
-}
-
-/*
  * syntax error while parsing a script (in practice, while parsing a
  * backslash command, because we don't detect syntax errors in SQL)
  *
@@ -5011,8 +4881,6 @@ printResults(TState *threads, StatsData *total, instr_time total_time,
 				tps_include,
 				tps_exclude;
 	int64		ntx = total->cnt - total->skipped;
-	int			i,
-				totalCacheOverflows = 0;
 
 	time_include = INSTR_TIME_GET_DOUBLE(total_time);
 
@@ -5039,15 +4907,6 @@ printResults(TState *threads, StatsData *total, instr_time total_time,
 		printf("duration: %d s\n", duration);
 		printf("number of transactions actually processed: " INT64_FORMAT "\n",
 			   ntx);
-	}
-	/* Report zipfian cache overflow */
-	for (i = 0; i < nthreads; i++)
-	{
-		totalCacheOverflows += threads[i].zipf_cache.overflowCount;
-	}
-	if (totalCacheOverflows > 0)
-	{
-		printf("zipfian cache array overflowed %d time(s)\n", totalCacheOverflows);
 	}
 
 	/* Remaining stats are nonsensical if we failed to execute any xacts */
@@ -5276,6 +5135,7 @@ main(int argc, char **argv)
 
 	int			exit_code = 0;
 
+	pg_logging_init(argv[0]);
 	progname = get_progname(argv[0]);
 
 	if (argc > 1)
@@ -5291,11 +5151,6 @@ main(int argc, char **argv)
 			exit(0);
 		}
 	}
-
-#ifdef WIN32
-	/* stderr is buffered on Win32. */
-	setvbuf(stderr, NULL, _IONBF, 0);
-#endif
 
 	if ((env = getenv("PGHOST")) != NULL && *env != '\0')
 		pghost = env;
@@ -5935,9 +5790,6 @@ main(int argc, char **argv)
 		initRandomState(&thread->ts_sample_rs);
 		thread->logfile = NULL; /* filled in later */
 		thread->latency_late = 0;
-		thread->zipf_cache.nb_cells = 0;
-		thread->zipf_cache.current = 0;
-		thread->zipf_cache.overflowCount = 0;
 		initStats(&thread->stats, 0);
 
 		nclients_dealt += thread->nstate;

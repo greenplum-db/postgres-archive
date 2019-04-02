@@ -3213,12 +3213,24 @@ psql_completion(const char *text, int start, int end)
 	else if (Matches("REINDEX"))
 		COMPLETE_WITH("TABLE", "INDEX", "SYSTEM", "SCHEMA", "DATABASE");
 	else if (Matches("REINDEX", "TABLE"))
-		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_indexables, NULL);
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_indexables,
+								   " UNION SELECT 'CONCURRENTLY'");
 	else if (Matches("REINDEX", "INDEX"))
-		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_indexes, NULL);
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_indexes,
+								   " UNION SELECT 'CONCURRENTLY'");
 	else if (Matches("REINDEX", "SCHEMA"))
-		COMPLETE_WITH_QUERY(Query_for_list_of_schemas);
+		COMPLETE_WITH_QUERY(Query_for_list_of_schemas
+							" UNION SELECT 'CONCURRENTLY'");
 	else if (Matches("REINDEX", "SYSTEM|DATABASE"))
+		COMPLETE_WITH_QUERY(Query_for_list_of_databases
+							" UNION SELECT 'CONCURRENTLY'");
+	else if (Matches("REINDEX", "TABLE", "CONCURRENTLY"))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_indexables, NULL);
+	else if (Matches("REINDEX", "INDEX", "CONCURRENTLY"))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_indexes, NULL);
+	else if (Matches("REINDEX", "SCHEMA", "CONCURRENTLY"))
+		COMPLETE_WITH_QUERY(Query_for_list_of_schemas);
+	else if (Matches("REINDEX", "SYSTEM|DATABASE", "CONCURRENTLY"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_databases);
 
 /* SECURITY LABEL */
@@ -3432,6 +3444,8 @@ psql_completion(const char *text, int start, int end)
 		if (ends_with(prev_wd, '(') || ends_with(prev_wd, ','))
 			COMPLETE_WITH("FULL", "FREEZE", "ANALYZE", "VERBOSE",
 						  "DISABLE_PAGE_SKIPPING", "SKIP_LOCKED");
+		else if (TailMatches("FULL|FREEZE|ANALYZE|VERBOSE|DISABLE_PAGE_SKIPPING|SKIP_LOCKED"))
+			COMPLETE_WITH("ON", "OFF");
 	}
 	else if (HeadMatches("VACUUM") && TailMatches("("))
 		/* "VACUUM (" should be caught above, so assume we want columns */
@@ -4315,7 +4329,7 @@ exec_query(const char *query)
 	if (PQresultStatus(result) != PGRES_TUPLES_OK)
 	{
 #ifdef NOT_USED
-		psql_error("tab completion query failed: %s\nQuery was:\n%s\n",
+		pg_log_error("tab completion query failed: %s\nQuery was:\n%s",
 				   PQerrorMessage(pset.db), query);
 #endif
 		PQclear(result);

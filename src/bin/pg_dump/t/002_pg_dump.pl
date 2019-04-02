@@ -2392,6 +2392,23 @@ my %tests = (
 		unlike => { exclude_dump_test_schema => 1, },
 	},
 
+	'CREATE TABLE test_table_generated' => {
+		create_order => 3,
+		create_sql   => 'CREATE TABLE dump_test.test_table_generated (
+						   col1 int primary key,
+						   col2 int generated always as (col1 * 2) stored
+					   );',
+		regexp => qr/^
+			\QCREATE TABLE dump_test.test_table_generated (\E\n
+			\s+\Qcol1 integer NOT NULL,\E\n
+			\s+\Qcol2 integer GENERATED ALWAYS AS ((col1 * 2)) STORED\E\n
+			\);
+			/xms,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => { exclude_dump_test_schema => 1, },
+	},
+
 	'CREATE TABLE table_with_stats' => {
 		create_order => 98,
 		create_sql   => 'CREATE TABLE dump_test.table_index_stats (
@@ -3312,8 +3329,8 @@ foreach my $db (sort keys %create_sql)
 
 command_fails_like(
 	[ 'pg_dump', '-p', "$port", 'qqq' ],
-	qr/\Qpg_dump: [archiver (db)] connection to database "qqq" failed: FATAL:  database "qqq" does not exist\E/,
-	'pg_dump: [archiver (db)] connection to database "qqq" failed: FATAL:  database "qqq" does not exist'
+	qr/\Qpg_dump: error: connection to database "qqq" failed: FATAL:  database "qqq" does not exist\E/,
+	'connecting to a non-existent database'
 );
 
 #########################################
@@ -3321,31 +3338,31 @@ command_fails_like(
 
 command_fails_like(
 	[ 'pg_dump', '-p', "$port", '--role=regress_dump_test_role' ],
-	qr/\Qpg_dump: [archiver (db)] query failed: ERROR:  permission denied for\E/,
-	'pg_dump: [archiver (db)] query failed: ERROR:  permission denied for');
+	qr/\Qpg_dump: error: query failed: ERROR:  permission denied for\E/,
+	'connecting with an unprivileged user');
 
 #########################################
 # Test dumping a non-existent schema, table, and patterns with --strict-names
 
 command_fails_like(
 	[ 'pg_dump', '-p', "$port", '-n', 'nonexistant' ],
-	qr/\Qpg_dump: no matching schemas were found\E/,
-	'pg_dump: no matching schemas were found');
+	qr/\Qpg_dump: error: no matching schemas were found\E/,
+	'dumping a non-existent schema');
 
 command_fails_like(
 	[ 'pg_dump', '-p', "$port", '-t', 'nonexistant' ],
-	qr/\Qpg_dump: no matching tables were found\E/,
-	'pg_dump: no matching tables were found');
+	qr/\Qpg_dump: error: no matching tables were found\E/,
+	'dumping a non-existent table');
 
 command_fails_like(
 	[ 'pg_dump', '-p', "$port", '--strict-names', '-n', 'nonexistant*' ],
-	qr/\Qpg_dump: no matching schemas were found for pattern\E/,
-	'pg_dump: no matching schemas were found for pattern');
+	qr/\Qpg_dump: error: no matching schemas were found for pattern\E/,
+	'no matching schemas');
 
 command_fails_like(
 	[ 'pg_dump', '-p', "$port", '--strict-names', '-t', 'nonexistant*' ],
-	qr/\Qpg_dump: no matching tables were found for pattern\E/,
-	'pg_dump: no matching tables were found for pattern');
+	qr/\Qpg_dump: error: no matching tables were found for pattern\E/,
+	'no matching tables');
 
 #########################################
 # Run all runs

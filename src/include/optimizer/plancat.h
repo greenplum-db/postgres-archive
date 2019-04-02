@@ -33,6 +33,7 @@ extern List *infer_arbiter_indexes(PlannerInfo *root);
 extern void estimate_rel_size(Relation rel, int32 *attr_widths,
 				  BlockNumber *pages, double *tuples, double *allvisfrac);
 
+extern int32 get_rel_data_width(Relation rel, int32 *attr_widths);
 extern int32 get_relation_data_width(Oid relid, int32 *attr_widths);
 
 extern bool relation_excluded_by_constraints(PlannerInfo *root,
@@ -70,5 +71,7 @@ extern void add_function_cost(PlannerInfo *root, Oid funcid, Node *node,
 extern double get_function_rows(PlannerInfo *root, Oid funcid, Node *node);
 
 extern bool has_row_triggers(PlannerInfo *root, Index rti, CmdType event);
+
+extern bool has_stored_generated_columns(PlannerInfo *root, Index rti);
 
 #endif							/* PLANCAT_H */

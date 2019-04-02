@@ -452,6 +452,9 @@ typedef struct ResultRelInfo
 	/* array of constraint-checking expr states */
 	ExprState **ri_ConstraintExprs;
 
+	/* array of stored generated columns expr states */
+	ExprState **ri_GeneratedExprs;
+
 	/* for removing junk attributes from tuples */
 	JunkFilter *ri_junkFilter;
 
@@ -1302,6 +1305,9 @@ typedef struct SampleScanState
 	bool		use_pagemode;	/* use page-at-a-time visibility checking? */
 	bool		begun;			/* false means need to call BeginSampleScan */
 	uint32		seed;			/* random seed */
+	int64		donetuples;		/* number of tuples already returned */
+	bool		haveblock;		/* has a block for sampling been determined */
+	bool		done;			/* exhausted all tuples? */
 } SampleScanState;
 
 /*
@@ -1502,7 +1508,7 @@ typedef struct ParallelBitmapHeapState
  *		tbmiterator		   iterator for scanning current pages
  *		tbmres			   current-page data
  *		can_skip_fetch	   can we potentially skip tuple fetches in this scan?
- *		skip_fetch		   are we skipping tuple fetches on this page?
+ *		return_empty_tuples number of empty tuples to return
  *		vmbuffer		   buffer for visibility-map lookups
  *		pvmbuffer		   ditto, for prefetched pages
  *		exact_pages		   total number of exact pages retrieved
@@ -1526,7 +1532,7 @@ typedef struct BitmapHeapScanState
 	TBMIterator *tbmiterator;
 	TBMIterateResult *tbmres;
 	bool		can_skip_fetch;
-	bool		skip_fetch;
+	int			return_empty_tuples;
 	Buffer		vmbuffer;
 	Buffer		pvmbuffer;
 	long		exact_pages;
