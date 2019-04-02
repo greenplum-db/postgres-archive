@@ -115,6 +115,13 @@ IndexNext(IndexScanState *node)
 								   node->iss_NumScanKeys,
 								   node->iss_NumOrderByKeys);
 
+		if (table_scans_leverage_column_projection(node->ss.ss_currentRelation))
+		{
+			bool *proj;
+			proj = GetNeededColumnsForScan(&node->ss, node->ss.ss_currentRelation->rd_att->natts);
+			table_index_fetch_set_column_projection(scandesc->xs_heapfetch, proj);
+		}
+
 		node->iss_ScanDesc = scandesc;
 
 		/*

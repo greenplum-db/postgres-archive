@@ -266,6 +266,13 @@ typedef struct TableAmRoutine
 	void		(*index_fetch_end) (struct IndexFetchTableData *data);
 
 	/*
+	 * Set column projections for AM which leverage column projections for
+	 * scanning.
+	 */
+	void (*index_fetch_set_column_projection) (struct IndexFetchTableData *data,
+											   bool *project_column);
+
+	/*
 	 * Fetch tuple at `tid` into `slot`, after doing a visibility test
 	 * according to `snapshot`. If a tuple was found and passed the visibility
 	 * test, return true, false otherwise.
@@ -663,6 +670,13 @@ static inline void
 table_index_fetch_end(struct IndexFetchTableData *scan)
 {
 	scan->rel->rd_tableam->index_fetch_end(scan);
+}
+
+static inline void
+table_index_fetch_set_column_projection(struct IndexFetchTableData *scan,
+										 bool *project_column)
+{
+	scan->rel->rd_tableam->index_fetch_set_column_projection(scan, project_column);
 }
 
 /*

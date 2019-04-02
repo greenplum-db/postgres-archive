@@ -20,6 +20,7 @@
 
 #include "executor/executor.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "utils/memutils.h"
 
 
@@ -299,4 +300,78 @@ ExecScanReScan(ScanState *node)
 			}
 		}
 	}
+}
+
+typedef struct neededColumnContext
+{
+	bool *mask;
+	int n;
+} neededColumnContext;
+
+static bool
+neededColumnContextWalker(Node *node, neededColumnContext *c)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Var))
+	{
+		Var *var = (Var *)node;
+
+		if (var->varattno > 0)
+		{
+			Assert(var->varattno <= c->n);
+			c->mask[var->varattno - 1] = true;
+		}
+		/*
+		 * If all attributes are included,
+		 * set all entries in mask to true.
+		 */
+		else if (var->varattno == 0)
+			memset(c->mask, true, c->n);
+
+		return false;
+	}
+	return expression_tree_walker(node, neededColumnContextWalker, (void * )c);
+}
+
+/*
+ * n specifies the number of allowed entries in mask: we use
+ * it for bounds-checking in the walker above.
+ */
+void
+GetNeededColumnsForNode(Node *expr, bool *mask, int n)
+{
+	neededColumnContext c;
+
+	c.mask = mask;
+	c.n = n;
+
+	neededColumnContextWalker(expr, &c);
+}
+
+bool *
+GetNeededColumnsForScan(ScanState *scanstate, int ncol)
+{
+	bool *proj;
+	int i;
+
+	proj = palloc0(ncol * sizeof(bool));
+	GetNeededColumnsForNode((Node*) scanstate->ps.plan->targetlist, proj, ncol);
+	GetNeededColumnsForNode((Node*) scanstate->ps.plan->qual, proj, ncol);
+
+	for (i = 0; i < ncol; i++)
+	{
+		if (proj[i])
+			break;
+	}
+
+	/*
+	 * In some cases (for example, count(*)), no columns are specified.
+	 * We always scan the first column.
+	 */
+	if (i == ncol)
+		proj[0] = true;
+
+	return proj;
 }

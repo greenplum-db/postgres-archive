@@ -63,6 +63,17 @@ typedef struct ZedStoreDescData
 	bool		finished;
 } ZedStoreDescData;
 
+typedef struct ZedStoreDescData *ZedStoreDesc;
+
+typedef struct ZedStoreIndexFetchData
+{
+	IndexFetchTableData idx_fetch_data;
+	int		   *proj_atts;
+	int			num_proj_atts;
+} ZedStoreIndexFetchData;
+
+typedef struct ZedStoreIndexFetchData *ZedStoreIndexFetch;
+
 typedef struct ParallelZSScanDescData *ParallelZSScanDesc;
 
 static Size zs_parallelscan_estimate(Relation rel);
@@ -73,7 +84,7 @@ static bool zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
 
 
 
-typedef struct ZedStoreDescData *ZedStoreDesc;
+
 /* ----------------------------------------------------------------
  *				storage AM support routines for zedstoream
  * ----------------------------------------------------------------
@@ -501,13 +512,38 @@ zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot, Snapshot
 static IndexFetchTableData *
 zedstoream_begin_index_fetch(Relation rel)
 {
-	IndexFetchTableData *scan = palloc0(sizeof(IndexFetchTableData));
+	ZedStoreIndexFetch zscan = palloc0(sizeof(ZedStoreIndexFetchData));
 
-	scan->rel = rel;
+	zscan->idx_fetch_data.rel = rel;
 
-	return scan;
+	zscan->proj_atts = palloc(rel->rd_att->natts * sizeof(int));
+	zscan->num_proj_atts = 0;
+
+	return (IndexFetchTableData*) zscan;
 }
 
+static void
+zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
+											 bool *project_column)
+{
+	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch)scan;
+	Relation rel = zscan->idx_fetch_data.rel;
+
+	zscan->num_proj_atts = 0;
+
+	/*
+	 * convert booleans array into an array of the attribute numbers of the
+	 * required columns.
+	 */
+	for (int i = 0; i < rel->rd_att->natts; i++)
+	{
+		/* if project_columns is empty means need all the columns */
+		if (project_column == NULL || project_column[i])
+		{
+			zscan->proj_atts[zscan->num_proj_atts++] = i;
+		}
+	}
+}
 
 static void
 zedstoream_reset_index_fetch(IndexFetchTableData *scan)
@@ -517,7 +553,9 @@ zedstoream_reset_index_fetch(IndexFetchTableData *scan)
 static void
 zedstoream_end_index_fetch(IndexFetchTableData *scan)
 {
-	pfree(scan);
+	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch)scan;
+	pfree(zscan->proj_atts);
+	pfree(zscan);
 }
 
 static bool
@@ -527,12 +565,24 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 						 TupleTableSlot *slot,
 						 bool *call_again, bool *all_dead)
 {
-	Relation	rel = scan->rel;
+	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch)scan;
+	Relation	rel = zscan->idx_fetch_data.rel;
 	bool		found = true;
 
-	for (int i = 0; i < rel->rd_att->natts && found; i++)
+	/*
+	 * if executor didn't set the column projections, need to return all the
+	 * columns.
+	 */
+	if (zscan->num_proj_atts == 0)
 	{
-		Form_pg_attribute att = &rel->rd_att->attrs[i];
+		for (int i = 0; i < rel->rd_att->natts; i++)
+			zscan->proj_atts[zscan->num_proj_atts++] = i;
+	}
+
+	for (int i = 0; i < zscan->num_proj_atts && found; i++)
+	{
+		int         natt = zscan->proj_atts[i];
+		Form_pg_attribute att = &rel->rd_att->attrs[natt];
 		ZSBtreeScan btree_scan;
 		Datum		datum;
 		bool        isnull;
@@ -541,7 +591,7 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 		if (att->attisdropped)
 			continue;
 
-		zsbt_begin_scan(rel, i + 1, *tid, snapshot, &btree_scan);
+		zsbt_begin_scan(rel, natt + 1, *tid, snapshot, &btree_scan);
 
 		if (zsbt_scan_next(&btree_scan, &datum, &isnull, &curtid))
 		{
@@ -549,14 +599,12 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 				found = false;
 			else
 			{
-				slot->tts_values[i] = datum;
-				slot->tts_isnull[i] = isnull;
+				slot->tts_values[natt] = datum;
+				slot->tts_isnull[natt] = isnull;
 			}
 		}
 		else
-		{
 			found = false;
-		}
 
 		zsbt_end_scan(&btree_scan);
 	}
@@ -1133,6 +1181,7 @@ static const TableAmRoutine zedstoream_methods = {
 	.index_fetch_begin = zedstoream_begin_index_fetch,
 	.index_fetch_reset = zedstoream_reset_index_fetch,
 	.index_fetch_end = zedstoream_end_index_fetch,
+	.index_fetch_set_column_projection = zedstoream_fetch_set_column_projection,
 	.index_fetch_tuple = zedstoream_index_fetch_tuple,
 
 //	.scansetlimits = zedstoream_setscanlimits,
