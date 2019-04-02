@@ -215,7 +215,6 @@ typedef struct ZSMetaPageOpaque
 	BlockNumber	zs_undo_head;
 	BlockNumber	zs_undo_tail;
 	ZSUndoRecPtr zs_undo_oldestptr;
-	ZSUndoRecPtr zs_undo_curptr;
 
 	uint16		zs_flags;
 	uint16		zs_page_id;
@@ -238,6 +237,8 @@ typedef struct ZSBtreeScan
 	OffsetNumber lastoff;
 	ItemPointerData nexttid;
 	Snapshot	snapshot;
+
+	/* in the "real" UNDO-log, this would probably be a global variable */
 	ZSUndoRecPtr recent_oldest_undo;
 
 	/*
@@ -290,12 +291,11 @@ extern ItemPointerData zsbt_get_last_tid(Relation rel, AttrNumber attno);
 extern Buffer zs_getnewbuf(Relation rel);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
-
-extern void zs_prepare_insert(Relation relation, HeapTupleHeader hdr, TransactionId xid, CommandId cid, int options);
+extern ZSUndoRecPtr zsmeta_get_oldest_undo_ptr(Relation rel);
 
 /* prototypes for functions in zstore_visibility.c */
-extern TM_Result zs_SatisfiesUpdate(Relation rel, ZSBtreeItem *item, Snapshot snapshot);
-extern bool zs_SatisfiesVisibility(Relation rel, ZSBtreeItem *item, Snapshot snapshot);
+extern TM_Result zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSBtreeItem *item);
+extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item);
 
 /* prototypes for functions in zstore_toast.c */
 extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);

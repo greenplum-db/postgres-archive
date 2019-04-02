@@ -30,6 +30,7 @@
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "access/zedstore_internal.h"
+#include "access/zedstore_undo.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
 #include "catalog/pg_am_d.h"
@@ -297,6 +298,15 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 {
 	int i;
 	ZedStoreDesc scan;
+
+	/*
+	 * TODO:
+	 *
+	 * The UNDO log needs trimming every now and then. There is no VACUUM
+	 * tableam function yet, so we don't have a proper place to do it. So quite
+	 * arbitrarily, trigger it here.
+	 */
+	zsundo_trim(relation, GetOldestXmin(relation, PROCARRAY_FLAGS_VACUUM));
 
 	/*
 	 * allocate and initialize scan descriptor
@@ -636,7 +646,7 @@ zedstoream_index_validate_scan(Relation heapRelation,
 						   Relation indexRelation,
 						   IndexInfo *indexInfo,
 						   Snapshot snapshot,
-						   ValidateIndexState * state)
+						   ValidateIndexState *state)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

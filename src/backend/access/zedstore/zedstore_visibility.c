@@ -17,22 +17,15 @@
 #include "storage/procarray.h"
 
 /*
- * This should be used kind of like RecentGlobalXmin, to determine
- * the cutoff point for old UNDO. UNDO records older than this are
- * assumed to be old enough to not be visible to anyone anymore.
- * This speeds up visibility checks for old-enough tuples, and
- * allows trimming old UNDO logs.
- *
- * TODO: but it's not implemented yet.
- */
-static ZSUndoRecPtr recent_oldest_undo = {0};
-
-/*
  * Like HeapTupleSatisfiesUpdate.
  */
 TM_Result
-zs_SatisfiesUpdate(Relation rel, ZSBtreeItem *item, Snapshot snapshot)
+zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
+	Relation	rel = scan->rel;
+	Snapshot	snapshot = scan->snapshot;
+	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
+
 	/* Is it visible? */
 	if (item->t_undo_ptr.counter < recent_oldest_undo.counter)
 	{
@@ -104,7 +97,7 @@ zs_SatisfiesUpdate(Relation rel, ZSBtreeItem *item, Snapshot snapshot)
  * Like HeapTupleSatisfiesAny
  */
 static bool
-zs_SatisfiesAny(Relation rel, ZSBtreeItem *item, Snapshot snapshot)
+zs_SatisfiesAny(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
 	return true;
 }
@@ -113,8 +106,11 @@ zs_SatisfiesAny(Relation rel, ZSBtreeItem *item, Snapshot snapshot)
  * Like HeapTupleSatisfiesMVCC
  */
 static bool
-zs_SatisfiesMVCC(Relation rel, ZSBtreeItem *item, Snapshot snapshot)
+zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
+	Relation	rel = scan->rel;
+	Snapshot	snapshot = scan->snapshot;
+	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
 	ZSUndoRec *undorec;
 
 	Assert (snapshot->snapshot_type == SNAPSHOT_MVCC);
@@ -177,18 +173,26 @@ zs_SatisfiesMVCC(Relation rel, ZSBtreeItem *item, Snapshot snapshot)
  * Like HeapTupleSatisfiesVisibility
  */
 bool
-zs_SatisfiesVisibility(Relation rel, ZSBtreeItem *item, Snapshot snapshot)
+zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
-	switch (snapshot->snapshot_type)
+	/*
+	 * If we don't have a cached oldest-undo-ptr value yet, fetch it
+	 * from the metapage. (TODO: In the final EDB's UNDO-log implementation
+	 * this will probably be just a global variable, like RecentGlobalXmin.)
+	 */
+	if (scan->recent_oldest_undo.counter == 0)
+		scan->recent_oldest_undo = zsmeta_get_oldest_undo_ptr(scan->rel);
+
+	switch (scan->snapshot->snapshot_type)
 	{
 		case SNAPSHOT_MVCC:
-			return zs_SatisfiesMVCC(rel, item, snapshot);
+			return zs_SatisfiesMVCC(scan, item);
 			break;
 		case SNAPSHOT_SELF:
 			elog(ERROR, "SnapshotSelf not implemented in zedstore yet");
 			break;
 		case SNAPSHOT_ANY:
-			return zs_SatisfiesAny(rel, item, snapshot);
+			return zs_SatisfiesAny(scan, item);
 			break;
 		case SNAPSHOT_TOAST:
 			elog(ERROR, "SnapshotToast not implemented in zedstore");
@@ -205,5 +209,4 @@ zs_SatisfiesVisibility(Relation rel, ZSBtreeItem *item, Snapshot snapshot)
 	}
 
 	return false;				/* keep compiler quiet */
-
 }

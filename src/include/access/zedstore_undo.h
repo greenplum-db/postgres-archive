@@ -91,5 +91,6 @@ typedef struct
 /* prototypes for functions in zstore_undo.c */
 extern ZSUndoRecPtr zsundo_insert(Relation rel, ZSUndoRec *rec);
 extern ZSUndoRec *zsundo_fetch(Relation rel, ZSUndoRecPtr undorecptr);
+extern void zsundo_trim(Relation rel, TransactionId OldestXmin);
 
 #endif							/* ZEDSTORE_UNDO_H */

@@ -92,8 +92,12 @@ zs_initmetapage(Relation rel, int nattributes)
 	opaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(page);
 	opaque->zs_flags = 0;
 	opaque->zs_page_id = ZS_META_PAGE_ID;
+
+	/* UNDO-related fields */
+	opaque->zs_undo_counter = 1; /* start at 1, so that 0 is always "old" */
 	opaque->zs_undo_head = InvalidBlockNumber;
 	opaque->zs_undo_tail = InvalidBlockNumber;
+	opaque->zs_undo_oldestptr.counter = 1;
 
 	MarkBufferDirty(buf);
 	/* TODO: WAL-log */
@@ -187,4 +191,29 @@ zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf,
 	metapg->roots[attno - 1] = rootblk;
 
 	MarkBufferDirty(metabuf);
+}
+
+ZSUndoRecPtr
+zsmeta_get_oldest_undo_ptr(Relation rel)
+{
+	Buffer		metabuf;
+	ZSMetaPageOpaque *opaque;
+	ZSUndoRecPtr result;
+
+	if (RelationGetNumberOfBlocks(rel) == 0)
+	{
+		memset(&result, 0, sizeof(ZSUndoRecPtr));
+	}
+	else
+	{
+		metabuf = ReadBuffer(rel, ZS_META_BLK);
+		LockBuffer(metabuf, BUFFER_LOCK_SHARE);
+		opaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(BufferGetPage(metabuf));
+		Assert(opaque->zs_page_id == ZS_META_PAGE_ID);
+
+		result = opaque->zs_undo_oldestptr;
+
+		UnlockReleaseBuffer(metabuf);
+	}
+	return result;
 }

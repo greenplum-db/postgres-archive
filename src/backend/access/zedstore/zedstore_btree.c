@@ -87,6 +87,7 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, Snapsh
 		scan->lastbuf_is_locked = false;
 		scan->lastoff = InvalidOffsetNumber;
 		scan->snapshot = NULL;
+		memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 		ItemPointerSetInvalid(&scan->nexttid);
 		return;
 	}
@@ -106,6 +107,8 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, Snapsh
 	scan->nexttid = starttid;
 
 	scan->has_decompressed = false;
+
+	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 }
 
 void
@@ -142,7 +145,7 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, ItemPointerData *t
 
 	while ((item = zsbt_scan_next_internal(scan)) != NULL)
 	{
-		if (zs_SatisfiesVisibility(scan->rel, item, scan->snapshot))
+		if (zs_SatisfiesVisibility(scan, item))
 		{
 			char		*ptr = item->t_payload;
 
@@ -385,7 +388,7 @@ zsbt_delete(Relation rel, AttrNumber attno, ItemPointerData tid,
 			 ItemPointerGetBlockNumber(&tid),
 			 ItemPointerGetOffsetNumber(&tid));
 	}
-	result = zs_SatisfiesUpdate(rel, item, snapshot);
+	result = zs_SatisfiesUpdate(&scan, item);
 	if (result != TM_Ok)
 	{
 		zsbt_end_scan(&scan);
@@ -471,7 +474,7 @@ zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum
 	/*
 	 * Is it visible to us?
 	 */
-	result = zs_SatisfiesUpdate(rel, olditem, snapshot);
+	result = zs_SatisfiesUpdate(&scan, olditem);
 	if (result != TM_Ok)
 	{
 		zsbt_end_scan(&scan);
