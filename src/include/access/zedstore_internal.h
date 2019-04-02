@@ -17,6 +17,73 @@
 #include "utils/datum.h"
 
 /*
+ * Throughout ZedStore, we pass around TIDs as uint64's, rather than ItemPointers,
+ * for speed.
+ */
+typedef uint64	zstid;
+
+#define InvalidZSTid		0
+#define MinZSTid			1		/* blk 0, off 1 */
+#define MaxZSTid			((uint64) MaxBlockNumber << 16 | 0xffff)
+/* note: if this is converted to ItemPointer, it is invalid */
+#define MaxPlusOneZSTid		(MaxZSTid + 1)
+
+/*
+ * Helper function to "increment" a TID by one.
+ *
+ * Skips over values that would be invalid ItemPointers.
+ */
+static inline zstid
+ZSTidIncrement(zstid tid)
+{
+	tid++;
+	if ((tid & 0xffff) == 0)
+		tid++;
+	return tid;
+}
+
+static inline zstid
+ZSTidFromItemPointer(ItemPointerData iptr)
+{
+	Assert(ItemPointerIsValid(&iptr));
+	return ((uint64) iptr.ip_blkid.bi_hi << 32 |
+			(uint64) iptr.ip_blkid.bi_lo << 16 |
+			(uint64) iptr.ip_posid);
+}
+
+static inline zstid
+ZSTidFromBlkOff(BlockNumber blk, OffsetNumber off)
+{
+	Assert(off != 0);
+	return ((uint64) blk << 16 | off);
+}
+
+static inline ItemPointerData
+ItemPointerFromZSTid(zstid tid)
+{
+	ItemPointerData iptr;
+
+	iptr.ip_blkid.bi_hi = (tid >> 32) & 0xffff;
+	iptr.ip_blkid.bi_lo = (tid >> 16) & 0xffff;
+	iptr.ip_posid = (tid) & 0xffff;
+	Assert(ItemPointerIsValid(&iptr));
+	return iptr;
+}
+
+static inline BlockNumber
+ZSTidGetBlockNumber(zstid tid)
+{
+	return (BlockNumber) (tid >> 32);
+}
+
+static inline OffsetNumber
+ZSTidGetOffsetNumber(zstid tid)
+{
+	return (OffsetNumber) tid;
+}
+
+
+/*
  * Different page types:
  *
  * - metapage (block 0)
@@ -37,8 +104,8 @@
 typedef struct ZSBtreePageOpaque
 {
 	BlockNumber zs_next;
-	ItemPointerData zs_lokey;		/* inclusive */
-	ItemPointerData zs_hikey;		/* exclusive */
+	zstid		zs_lokey;		/* inclusive */
+	zstid		zs_hikey;		/* exclusive */
 	uint16		zs_level;			/* 0 = leaf */
 	uint16		zs_flags;
 	uint16		zs_page_id;			/* always ZS_BTREE_PAGE_ID */
@@ -54,8 +121,8 @@ typedef struct ZSBtreePageOpaque
  */
 typedef struct ZSBtreeInternalPageItem
 {
-	ItemPointerData tid;
-	BlockIdData childblk;
+	zstid		tid;
+	BlockNumber childblk;
 } ZSBtreeInternalPageItem;
 
 static inline ZSBtreeInternalPageItem *
@@ -102,10 +169,10 @@ typedef struct ZSBtreeItem
 {
 	uint16		t_size;
 	uint16		t_flags;
-	ItemPointerData t_tid;
+	zstid		t_tid;
 
 	/* these are only used on compressed items */
-	ItemPointerData t_lasttid;	/* inclusive */
+	zstid		t_lasttid;	/* inclusive */
 	uint16		t_uncompressedsize;
 
 	/* these are only used on uncompressed items. */
@@ -134,7 +201,7 @@ typedef struct ZSToastPageOpaque
 	AttrNumber	zs_attno;
 
 	/* these are only set on the first page. */
-	ItemPointerData zs_tid;
+	zstid		zs_tid;
 	uint32		zs_total_size;
 
 	uint32		zs_slice_offset;
@@ -235,7 +302,7 @@ typedef struct ZSBtreeScan
 	Buffer		lastbuf;
 	bool		lastbuf_is_locked;
 	OffsetNumber lastoff;
-	ItemPointerData nexttid;
+	zstid		nexttid;
 	Snapshot	snapshot;
 
 	/* in the "real" UNDO-log, this would probably be a global variable */
@@ -249,43 +316,20 @@ typedef struct ZSBtreeScan
 	bool		has_decompressed;
 } ZSBtreeScan;
 
-/*
- * Helper function to "increment" a TID by one.
- */
-static inline void
-ItemPointerIncrement(ItemPointer itemptr)
-{
-	if (itemptr->ip_posid == 0xffff)
-		ItemPointerSet(itemptr, ItemPointerGetBlockNumber(itemptr) + 1, 1);
-	else
-		itemptr->ip_posid++;
-}
-
-/*
- * a <= x <= b
- */
-static inline bool
-ItemPointerBetween(ItemPointer a, ItemPointer x, ItemPointer b)
-{
-	return ItemPointerCompare(a, x) <= 0 &&
-		ItemPointerCompare(x, b) <= 0;
-}
-
 /* prototypes for functions in zstore_btree.c */
-extern ItemPointerData zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull, TransactionId xmin, CommandId cmin, ItemPointerData tid);
-extern TM_Result zsbt_delete(Relation rel, AttrNumber attno, ItemPointerData tid,
-							 TransactionId xid, CommandId cid,
+extern zstid zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull, TransactionId xmin, CommandId cmin, zstid tid);
+extern TM_Result zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
+			TransactionId xid, CommandId cid,
 			Snapshot snapshot, Snapshot crosscheck, bool wait,
 			TM_FailureData *hufd, bool changingPart);
-extern TM_Result zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid,
+extern TM_Result zsbt_update(Relation rel, AttrNumber attno, zstid otid,
 							 Datum newdatum, bool newisnull, TransactionId xid,
 							 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
-							 bool wait, TM_FailureData *hufd, ItemPointerData *newtid_p);
-
-extern void zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, Snapshot snapshot, ZSBtreeScan *scan);
-extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, ItemPointerData *tid);
+							 bool wait, TM_FailureData *hufd, zstid *newtid_p);
+extern void zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapshot, ZSBtreeScan *scan);
+extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
-extern ItemPointerData zsbt_get_last_tid(Relation rel, AttrNumber attno);
+extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
 
 /* prototypes for functions in zstore_meta.c */
 extern Buffer zs_getnewbuf(Relation rel);
@@ -299,7 +343,7 @@ extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item);
 
 /* prototypes for functions in zstore_toast.c */
 extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);
-extern void zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, ItemPointerData tid);
-extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, ItemPointerData tid, Datum toasted);
+extern void zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, zstid tid);
+extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted);
 
 #endif							/* ZEDSTORE_INTERNAL_H */

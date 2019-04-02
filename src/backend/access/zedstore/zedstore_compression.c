@@ -171,7 +171,7 @@ zs_decompress_read_item(ZSDecompressContext *context)
 	context->bytesread += next->t_size;
 
 	Assert(next->t_size >= sizeof(ZSBtreeItem));
-	Assert(ItemPointerIsValid(&next->t_tid));
+	Assert(next->t_tid != InvalidZSTid);
 
 	return next;
 }

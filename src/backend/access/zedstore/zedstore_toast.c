@@ -67,7 +67,7 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value)
 
 		opaque = (ZSToastPageOpaque *) PageGetSpecialPointer(page);
 		opaque->zs_attno = attno;
-		ItemPointerSetInvalid(&opaque->zs_tid);
+		opaque->zs_tid = InvalidZSTid;
 		opaque->zs_total_size = total_size;
 		opaque->zs_slice_offset = offset;
 		opaque->zs_prev = BufferIsValid(prevbuf) ? BufferGetBlockNumber(prevbuf) : InvalidBlockNumber;
@@ -105,7 +105,7 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value)
 }
 
 void
-zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, ItemPointerData tid)
+zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, zstid tid)
 {
 	varatt_zs_toastptr *toastptr = (varatt_zs_toastptr *) DatumGetPointer(toasted);
 	Buffer		buf;
@@ -119,7 +119,7 @@ zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, ItemPointer
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 	opaque = (ZSToastPageOpaque *) PageGetSpecialPointer(page);
 
-	Assert(!ItemPointerIsValid(&opaque->zs_tid));
+	Assert(opaque->zs_tid == InvalidZSTid);
 	Assert(opaque->zs_attno == attno);
 	Assert(opaque->zs_prev == InvalidBlockNumber);
 
@@ -132,7 +132,7 @@ zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, ItemPointer
 }
 
 Datum
-zedstore_toast_flatten(Relation rel, AttrNumber attno, ItemPointerData tid, Datum toasted)
+zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted)
 {
 	varatt_zs_toastptr *toastptr = (varatt_zs_toastptr *) DatumGetPointer(toasted);
 	BlockNumber	nextblk;
@@ -164,7 +164,7 @@ zedstore_toast_flatten(Relation rel, AttrNumber attno, ItemPointerData tid, Datu
 
 		if (prevblk == InvalidBlockNumber)
 		{
-			Assert(ItemPointerEquals(&opaque->zs_tid, &tid));
+			Assert(opaque->zs_tid == tid);
 
 			total_size = opaque->zs_total_size;
 

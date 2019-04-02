@@ -12,6 +12,9 @@
 
 #include "utils/relcache.h"
 
+/* this must match the definition in zedstore_internal.h */
+typedef uint64	zstid;
+
 /*
  * An UNDO-pointer.
  *
@@ -40,7 +43,7 @@ typedef struct
 	ZSUndoRecPtr undorecptr;
 	TransactionId xid;
 	CommandId	cid;
-	ItemPointerData tid;
+	zstid		tid;
 } ZSUndoRec;
 
 #define ZSUNDO_TYPE_INSERT		1
@@ -79,7 +82,7 @@ typedef struct
 	 * left in the old place. Once we start supporting in-place updates,
 	 * the old tuple should be stored here.
 	 */
-	ItemPointerData otid;
+	zstid		otid;
 } ZSUndoRec_Update;
 
 typedef struct

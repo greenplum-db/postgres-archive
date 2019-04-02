@@ -156,8 +156,8 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
 		PageInit(rootpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
 		opaque = ZSBtreePageGetOpaque(rootpage);
 		opaque->zs_next = InvalidBlockNumber;
-		ItemPointerSet(&opaque->zs_lokey, 0, 1);
-		ItemPointerSet(&opaque->zs_hikey, MaxBlockNumber, 0xFFFF);
+		opaque->zs_lokey = MinZSTid;
+		opaque->zs_hikey = MaxPlusOneZSTid;
 		opaque->zs_level = 0;
 		opaque->zs_flags = 0;
 		opaque->zs_page_id = ZS_BTREE_PAGE_ID;

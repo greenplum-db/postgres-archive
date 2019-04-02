@@ -61,8 +61,8 @@ typedef struct ZedStoreDescData
 	int			num_proj_atts;
 
 	zs_scan_state state;
-	ItemPointerData cur_range_start;
-	ItemPointerData cur_range_end;
+	zstid		cur_range_start;
+	zstid		cur_range_end;
 	bool		finished;
 } ZedStoreDescData;
 
@@ -83,7 +83,7 @@ static Size zs_parallelscan_estimate(Relation rel);
 static Size zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan);
 static void zs_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan);
 static bool zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
-						  ItemPointer start, ItemPointer end);
+						  zstid *start, zstid *end);
 
 
 
@@ -116,14 +116,14 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	AttrNumber	attno;
 	Datum	   *d;
 	bool	   *isnulls;
-	ItemPointerData tid;
+	zstid		tid;
 	TransactionId xid = GetCurrentTransactionId();
 
 	slot_getallattrs(slot);
 	d = slot->tts_values;
 	isnulls = slot->tts_isnull;
 
-	ItemPointerSetInvalid(&tid);
+	tid = InvalidZSTid;
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
 		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
@@ -145,7 +145,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	}
 
 	slot->tts_tableOid = RelationGetRelid(relation);
-	ItemPointerCopy(&tid, &slot->tts_tid);
+	slot->tts_tid = ItemPointerFromZSTid(tid);
 }
 
 static void
@@ -168,10 +168,11 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 
 
 static TM_Result
-zedstoream_delete(Relation relation, ItemPointer tid, CommandId cid,
+zedstoream_delete(Relation relation, ItemPointer tid_p, CommandId cid,
 				   Snapshot snapshot, Snapshot crosscheck, bool wait,
 				   TM_FailureData *hufd, bool changingPart)
 {
+	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	TransactionId xid = GetCurrentTransactionId();
 	AttrNumber	attno;
 
@@ -179,7 +180,7 @@ zedstoream_delete(Relation relation, ItemPointer tid, CommandId cid,
 	{
 		TM_Result result;
 
-		result = zsbt_delete(relation, attno, *tid, xid, cid,
+		result = zsbt_delete(relation, attno, tid, xid, cid,
 							 snapshot, crosscheck, wait, hufd, changingPart);
 
 		/*
@@ -216,17 +217,18 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 
 
 static TM_Result
-zedstoream_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
+zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 				   CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 				   bool wait, TM_FailureData *hufd,
 				   LockTupleMode *lockmode, bool *update_indexes)
 {
+	zstid		otid = ZSTidFromItemPointer(*otid_p);
 	TransactionId xid = GetCurrentTransactionId();
 	AttrNumber	attno;
 	Datum		*d;
 	bool		*isnulls;
 	TM_Result	result;
-	ItemPointerData newtid;
+	zstid		newtid;
 
 	slot_getallattrs(slot);
 	d = slot->tts_values;
@@ -238,7 +240,7 @@ zedstoream_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 	 */
 
 	result = TM_Ok;
-	ItemPointerSetInvalid(&newtid);
+	newtid = InvalidZSTid;
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
 		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
@@ -254,7 +256,7 @@ zedstoream_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 			toastptr = newdatum = zedstore_toast_datum(relation, attno, newdatum);
 		}
 
-		this_result = zsbt_update(relation, attno, *otid, newdatum, newisnull,
+		this_result = zsbt_update(relation, attno, otid, newdatum, newisnull,
 								  xid, cid, snapshot, crosscheck,
 								  wait, hufd, &newtid);
 
@@ -270,7 +272,7 @@ zedstoream_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, newtid);
 	}
-	slot->tts_tid = newtid;
+	slot->tts_tid = ItemPointerFromZSTid(newtid);
 
 	/* TODO: could we do HOT udates? */
 	/* TODO: What should we set lockmode to? */
@@ -408,7 +410,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 	while (scan->state != ZSSCAN_STATE_FINISHED)
 	{
-		ItemPointerData this_tid;
+		zstid		this_tid;
 
 		if (scan->state == ZSSCAN_STATE_UNSTARTED ||
 			scan->state == ZSSCAN_STATE_FINISHED_RANGE)
@@ -431,8 +433,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 					scan->state = ZSSCAN_STATE_FINISHED;
 					break;
 				}
-				ItemPointerSet(&scan->cur_range_start, 0, 1);
-				ItemPointerSet(&scan->cur_range_end, MaxBlockNumber, 0xffff);
+				scan->cur_range_start = MinZSTid;
+				scan->cur_range_end = MaxPlusOneZSTid;
 			}
 
 			for (int i = 0; i < scan->num_proj_atts; i++)
@@ -449,21 +451,21 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 		/* We now have a range to scan */
 		Assert(scan->state == ZSSCAN_STATE_SCANNING);
-		ItemPointerSetInvalid(&this_tid);
+		this_tid = InvalidZSTid;
 		for (int i = 0; i < scan->num_proj_atts; i++)
 		{
 			Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[i];
 			int			natt = scan->proj_atts[i];
 			Datum		datum;
 			bool        isnull;
-			ItemPointerData tid;
+			zstid		tid;
 
 			if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &isnull, &tid))
 			{
 				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
 				break;
 			}
-			if (ItemPointerCompare(&tid, &scan->cur_range_end) >= 0)
+			if (tid >= scan->cur_range_end)
 			{
 				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
 				break;
@@ -471,7 +473,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 			if (i == 0)
 				this_tid = tid;
-			else if (!ItemPointerEquals(&this_tid, &tid))
+			else if (this_tid != tid)
 			{
 				elog(ERROR, "scans on different attributes out of sync");
 			}
@@ -502,7 +504,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		else
 		{
 			Assert(scan->state == ZSSCAN_STATE_SCANNING);
-			slot->tts_tid = this_tid;
+			slot->tts_tid = ItemPointerFromZSTid(this_tid);
 			slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
 			slot->tts_flags &= ~TTS_FLAG_EMPTY;
 			return true;
@@ -572,13 +574,14 @@ zedstoream_end_index_fetch(IndexFetchTableData *scan)
 
 static bool
 zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
-						 ItemPointer tid,
+						 ItemPointer tid_p,
 						 Snapshot snapshot,
 						 TupleTableSlot *slot,
 						 bool *call_again, bool *all_dead)
 {
-	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch)scan;
+	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
 	Relation	rel = zscan->idx_fetch_data.rel;
+	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	bool		found = true;
 
 	/*
@@ -598,16 +601,16 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 		ZSBtreeScan btree_scan;
 		Datum		datum;
 		bool        isnull;
-		ItemPointerData	curtid;
+		zstid		this_tid;
 
 		if (att->attisdropped)
 			continue;
 
-		zsbt_begin_scan(rel, natt + 1, *tid, snapshot, &btree_scan);
+		zsbt_begin_scan(rel, natt + 1, tid, snapshot, &btree_scan);
 
-		if (zsbt_scan_next(&btree_scan, &datum, &isnull, &curtid))
+		if (zsbt_scan_next(&btree_scan, &datum, &isnull, &this_tid))
 		{
-			if (!ItemPointerEquals(&curtid, tid))
+			if (this_tid != tid)
 				found = false;
 			else
 			{
@@ -623,7 +626,7 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 
 	if (found)
 	{
-		slot->tts_tid = *tid;
+		slot->tts_tid = ItemPointerFromZSTid(tid);
 		slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
 		slot->tts_flags &= ~TTS_FLAG_EMPTY;
 		return true;
@@ -1511,7 +1514,7 @@ typedef struct ParallelZSScanDescData
 {
 	ParallelTableScanDescData base;
 
-	ItemPointerData pzs_endtid;		/* last tid + 1 in relation at start of scan */
+	zstid		pzs_endtid;		/* last tid + 1 in relation at start of scan */
 	pg_atomic_uint64 pzs_allocatedtid_blk;	/* TID space allocated to workers so far. (in  65536 increments) */
 } ParallelZSScanDescData;
 typedef struct ParallelZSScanDescData *ParallelZSScanDesc;
@@ -1555,7 +1558,7 @@ zs_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
  */
 static bool
 zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
-						  ItemPointer start, ItemPointer end)
+						  zstid *start, zstid *end)
 {
 	uint64		allocatedtid_blk;
 
@@ -1578,8 +1581,8 @@ zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
 	 * ranges. But this is good for testing.
 	 */
 	allocatedtid_blk = pg_atomic_fetch_add_u64(&pzscan->pzs_allocatedtid_blk, 1);
-	ItemPointerSet(start, allocatedtid_blk, 1);
-	ItemPointerSet(end, allocatedtid_blk + 1, 1);
+	*start = ZSTidFromBlkOff(allocatedtid_blk, 1);
+	*end = ZSTidFromBlkOff(allocatedtid_blk + 1, 1);
 
-	return ItemPointerCompare(start, &pzscan->pzs_endtid) < 0;
+	return *start < pzscan->pzs_endtid;
 }

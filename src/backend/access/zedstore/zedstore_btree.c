@@ -41,25 +41,25 @@
 #include "utils/rel.h"
 
 /* prototypes for local functions */
-static Buffer zsbt_descend(Relation rel, BlockNumber rootblk, ItemPointerData key);
+static Buffer zsbt_descend(Relation rel, BlockNumber rootblk, zstid key);
 static Buffer zsbt_find_downlink(Relation rel, AttrNumber attno,
-				   ItemPointerData key, BlockNumber childblk, int level,
+				   zstid key, BlockNumber childblk, int level,
 				   int *itemno);
 static void zsbt_recompress_replace(Relation rel, AttrNumber attno,
 									Buffer oldbuf, List *items);
 static void zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
-					 ItemPointerData rightlokey, BlockNumber rightblkno);
+					 zstid rightlokey, BlockNumber rightblkno);
 static void zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer childbuf,
-					OffsetNumber newoff, ItemPointerData newkey, BlockNumber childblk);
+					OffsetNumber newoff, zstid newkey, BlockNumber childblk);
 static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
-			 ItemPointerData key1, BlockNumber blk1,
-			 ItemPointerData key2, BlockNumber blk2,
+			 zstid key1, BlockNumber blk1,
+			 zstid key2, BlockNumber blk2,
 			 Buffer leftchildbuf);
 static ZSBtreeItem *zsbt_scan_next_internal(ZSBtreeScan *scan);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 				  ZSBtreeItem *olditem, ZSBtreeItem *replacementitem, ZSBtreeItem *newitem);
 
-static int zsbt_binsrch_internal(ItemPointerData key, ZSBtreeInternalPageItem *arr, int arr_elems);
+static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems);
 
 /* ----------------------------------------------------------------
  *						 Public interface
@@ -70,7 +70,7 @@ static int zsbt_binsrch_internal(ItemPointerData key, ZSBtreeInternalPageItem *a
  * Begin a scan of the btree.
  */
 void
-zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, Snapshot snapshot, ZSBtreeScan *scan)
+zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapshot, ZSBtreeScan *scan)
 {
 	BlockNumber	rootblk;
 	Buffer		buf;
@@ -88,7 +88,7 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, ItemPointerData starttid, Snapsh
 		scan->lastoff = InvalidOffsetNumber;
 		scan->snapshot = NULL;
 		memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
-		ItemPointerSetInvalid(&scan->nexttid);
+		scan->nexttid = InvalidZSTid;
 		return;
 	}
 
@@ -131,7 +131,7 @@ zsbt_end_scan(ZSBtreeScan *scan)
  * and its TID in *tid. For a pass-by-ref datum, it's a palloc'd copy.
  */
 bool
-zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, ItemPointerData *tid)
+zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 {
 	TupleDesc	desc;
 	Form_pg_attribute attr;
@@ -174,12 +174,12 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, ItemPointerData *t
 /*
  * Get the last tid (plus one) in the tree.
  */
-ItemPointerData
+zstid
 zsbt_get_last_tid(Relation rel, AttrNumber attno)
 {
 	BlockNumber	rootblk;
-	ItemPointerData rightmostkey;
-	ItemPointerData	tid;
+	zstid		rightmostkey;
+	zstid		tid;
 	Buffer		buf;
 	Page		page;
 	ZSBtreePageOpaque *opaque;
@@ -187,7 +187,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 
 	/* Find the rightmost leaf */
 	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
-	ItemPointerSet(&rightmostkey, MaxBlockNumber, 0xfffe);
+	rightmostkey = MaxZSTid;
 	buf = zsbt_descend(rel, rootblk, rightmostkey);
 	page = BufferGetPage(buf);
 	opaque = ZSBtreePageGetOpaque(page);
@@ -202,7 +202,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
 
 		tid = hitup->t_tid;
-		ItemPointerIncrement(&tid);
+		tid = ZSTidIncrement(tid);
 	}
 	else
 	{
@@ -223,9 +223,9 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
  * first column of the row, pass invalid, and for other columns, pass the TID
  * you got for the first column.)
  */
-ItemPointerData
+zstid
 zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
-			TransactionId xid, CommandId cid, ItemPointerData tid)
+			TransactionId xid, CommandId cid, zstid tid)
 {
 	TupleDesc	desc = RelationGetDescr(rel);
 	Form_pg_attribute attr = &desc->attrs[attno - 1];
@@ -234,13 +234,13 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 	Page		page;
 	ZSBtreePageOpaque *opaque;
 	OffsetNumber maxoff;
-	ItemPointerData lasttid;
+	zstid		lasttid;
 	Size		datumsz;
 	Size		itemsz;
 	ZSBtreeItem	*newitem;
 	char	   *dataptr;
 	ZSUndoRecPtr undorecptr;
-	ItemPointerData insert_target_key;
+	zstid		insert_target_key;
 
 	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
 
@@ -250,10 +250,10 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 	 *
 	 * TODO: use a Free Space Map to find suitable target.
 	 */
-	if (ItemPointerIsValid(&tid))
+	if (tid != InvalidZSTid)
 		insert_target_key = tid;
 	else
-		ItemPointerSet(&insert_target_key, MaxBlockNumber, 0xfffe);
+		insert_target_key = MaxZSTid;
 
 	buf = zsbt_descend(rel, rootblk, insert_target_key);
 	page = BufferGetPage(buf);
@@ -273,16 +273,16 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 		else
 			lasttid = hitup->t_tid;
 
-		if (!ItemPointerIsValid(&tid))
+		if (tid == InvalidZSTid)
 		{
 			tid = lasttid;
-			ItemPointerIncrement(&tid);
+			tid = ZSTidIncrement(tid);
 		}
 	}
 	else
 	{
 		lasttid = opaque->zs_lokey;
-		if (!ItemPointerIsValid(&tid))
+		if (tid == InvalidZSTid)
 			tid = lasttid;
 	}
 
@@ -336,7 +336,7 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 	 * an existing compressed item.
 	 */
 	if (PageGetFreeSpace(page) >= MAXALIGN(itemsz) &&
-		(maxoff > FirstOffsetNumber || ItemPointerCompare(&tid, &lasttid) > 0))
+		(maxoff > FirstOffsetNumber || tid > lasttid))
 	{
 		OffsetNumber off;
 
@@ -362,7 +362,7 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 }
 
 TM_Result
-zsbt_delete(Relation rel, AttrNumber attno, ItemPointerData tid,
+zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 			TransactionId xid, CommandId cid,
 			Snapshot snapshot, Snapshot crosscheck, bool wait,
 			TM_FailureData *hufd, bool changingPart)
@@ -378,15 +378,14 @@ zsbt_delete(Relation rel, AttrNumber attno, ItemPointerData tid,
 
 	/* Find the item to delete. (It could be compressed) */
 	item = zsbt_scan_next_internal(&scan);
-	if (!ItemPointerEquals(&item->t_tid, &tid))
+	if (item->t_tid != tid)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
 		 * an error, I think..
 		 */
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u)",
-			 ItemPointerGetBlockNumber(&tid),
-			 ItemPointerGetOffsetNumber(&tid));
+			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid));
 	}
 	result = zs_SatisfiesUpdate(&scan, item);
 	if (result != TM_Ok)
@@ -430,10 +429,10 @@ zsbt_delete(Relation rel, AttrNumber attno, ItemPointerData tid,
  * other columns, pass the TID you got for the first column.)
  */
 TM_Result
-zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum,
+zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 			bool newisnull, TransactionId xid, CommandId cid, Snapshot snapshot,
 			Snapshot crosscheck, bool wait, TM_FailureData *hufd,
-			ItemPointerData *newtid_p)
+			zstid *newtid_p)
 {
 	TupleDesc	desc = RelationGetDescr(rel);
 	Form_pg_attribute attr = &desc->attrs[attno - 1];
@@ -447,7 +446,7 @@ zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum
 	Buffer		buf;
 	Page		page;
 	ZSBtreePageOpaque *opaque;
-	ItemPointerData newtid = *newtid_p;
+	zstid		newtid = *newtid_p;
 	Size		datumsz;
 	Size		newitemsz;
 	char	   *dataptr;
@@ -460,15 +459,14 @@ zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum
 	scan.for_update = true;
 
 	olditem = zsbt_scan_next_internal(&scan);
-	if (!ItemPointerEquals(&olditem->t_tid, &otid))
+	if (olditem->t_tid != otid)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
 		 * an error, I think..
 		 */
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u)",
-			 ItemPointerGetBlockNumber(&otid),
-			 ItemPointerGetOffsetNumber(&otid));
+			 ZSTidGetBlockNumber(otid), ZSTidGetOffsetNumber(otid));
 	}
 
 	/*
@@ -498,14 +496,14 @@ zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum
 			newtid = hitup->t_lasttid;
 		else
 			newtid = hitup->t_tid;
-		ItemPointerIncrement(&newtid);
+		newtid = ZSTidIncrement(newtid);
 	}
 	else
 	{
 		newtid = opaque->zs_lokey;
 	}
 
-	if (ItemPointerCompare(&newtid, &opaque->zs_hikey) >= 0)
+	if (newtid >= opaque->zs_hikey)
 	{
 		/* no more free TIDs on the page. Bail out */
 		/*
@@ -579,7 +577,7 @@ zsbt_update(Relation rel, AttrNumber attno, ItemPointerData otid, Datum newdatum
  * Find the leaf buffer containing the given key TID.
  */
 static Buffer
-zsbt_descend(Relation rel, BlockNumber rootblk, ItemPointerData key)
+zsbt_descend(Relation rel, BlockNumber rootblk, zstid key)
 {
 	BlockNumber next;
 	Buffer		buf;
@@ -609,7 +607,7 @@ zsbt_descend(Relation rel, BlockNumber rootblk, ItemPointerData key)
 		/*
 		 * Do we need to walk right? This could happen if the page was concurrently split.
 		 */
-		if (ItemPointerCompare(&key, &opaque->zs_hikey) >= 0)
+		if (key >= opaque->zs_hikey)
 		{
 			/* follow the right-link */
 			next = opaque->zs_next;
@@ -625,9 +623,8 @@ zsbt_descend(Relation rel, BlockNumber rootblk, ItemPointerData key)
 			itemno = zsbt_binsrch_internal(key, items, nitems);
 			if (itemno < 0)
 				elog(ERROR, "could not descend tree for tid (%u, %u)",
-					 ItemPointerGetBlockNumberNoCheck(&key),
-					 ItemPointerGetOffsetNumberNoCheck(&key));
-			next = BlockIdGetBlockNumber(&items[itemno].childblk);
+					 ZSTidGetBlockNumber(key), ZSTidGetOffsetNumber(key));
+			next = items[itemno].childblk;
 			nextlevel--;
 		}
 		UnlockReleaseBuffer(buf);
@@ -643,7 +640,7 @@ zsbt_descend(Relation rel, BlockNumber rootblk, ItemPointerData key)
  */
 static Buffer
 zsbt_find_downlink(Relation rel, AttrNumber attno,
-				   ItemPointerData key, BlockNumber childblk, int level,
+				   zstid key, BlockNumber childblk, int level,
 				   int *itemno_p)
 {
 	BlockNumber rootblk;
@@ -682,7 +679,7 @@ zsbt_find_downlink(Relation rel, AttrNumber attno,
 		/*
 		 * Do we need to walk right? This could happen if the page was concurrently split.
 		 */
-		if (ItemPointerCompare(&key, &opaque->zs_hikey) >= 0)
+		if (key >= opaque->zs_hikey)
 		{
 			next = opaque->zs_next;
 			if (next == InvalidBlockNumber)
@@ -696,18 +693,17 @@ zsbt_find_downlink(Relation rel, AttrNumber attno,
 			itemno = zsbt_binsrch_internal(key, items, nitems);
 			if (itemno < 0)
 				elog(ERROR, "could not descend tree for tid (%u, %u)",
-					 ItemPointerGetBlockNumberNoCheck(&key),
-					 ItemPointerGetOffsetNumberNoCheck(&key));
+					 ZSTidGetBlockNumber(key), ZSTidGetOffsetNumber(key));
 
 			if (opaque->zs_level == level + 1)
 			{
-				if (BlockIdGetBlockNumber(&items[itemno].childblk) != childblk)
+				if (items[itemno].childblk != childblk)
 					elog(ERROR, "could not re-find downlink for block %u", childblk);
 				*itemno_p = itemno;
 				return buf;
 			}
 
-			next = BlockIdGetBlockNumber(&items[itemno].childblk);
+			next = items[itemno].childblk;
 			nextlevel--;
 		}
 		UnlockReleaseBuffer(buf);
@@ -722,8 +718,8 @@ zsbt_find_downlink(Relation rel, AttrNumber attno,
  */
 static void
 zsbt_newroot(Relation rel, AttrNumber attno, int level,
-			 ItemPointerData key1, BlockNumber blk1,
-			 ItemPointerData key2, BlockNumber blk2,
+			 zstid key1, BlockNumber blk1,
+			 zstid key2, BlockNumber blk2,
 			 Buffer leftchildbuf)
 {
 	ZSBtreePageOpaque *opaque;
@@ -736,24 +732,24 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level,
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
-	Assert(ItemPointerCompare(&key1, &key2) < 0);
+	Assert(key1 < key2);
 
 	buf = zs_getnewbuf(rel);
 	page = BufferGetPage(buf);
 	PageInit(page, BLCKSZ, sizeof(ZSBtreePageOpaque));
 	opaque = ZSBtreePageGetOpaque(page);
 	opaque->zs_next = InvalidBlockNumber;
-	ItemPointerSet(&opaque->zs_lokey, 0, 1);
-	ItemPointerSet(&opaque->zs_hikey, MaxBlockNumber, 0xFFFF);
+	opaque->zs_lokey = MinZSTid;
+	opaque->zs_hikey = MaxPlusOneZSTid;
 	opaque->zs_level = level;
 	opaque->zs_flags = 0;
 	opaque->zs_page_id = ZS_BTREE_PAGE_ID;
 
 	items = ZSBtreeInternalPageGetItems(page);
 	items[0].tid = key1;
-	BlockIdSet(&items[0].childblk, blk1);
+	items[0].childblk =  blk1;
 	items[1].tid = key2;
-	BlockIdSet(&items[1].childblk, blk2);
+	items[1].childblk = blk2;
 	((PageHeader) page)->pd_lower += 2 * sizeof(ZSBtreeInternalPageItem);
 	Assert(ZSBtreeInternalPageGetNumItems(page) == 2);
 
@@ -783,12 +779,12 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level,
  */
 static void
 zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
-					 ItemPointerData rightlokey, BlockNumber rightblkno)
+					 zstid rightlokey, BlockNumber rightblkno)
 {
 	BlockNumber	leftblkno = BufferGetBlockNumber(leftbuf);
 	Page		leftpage = BufferGetPage(leftbuf);
 	ZSBtreePageOpaque *leftopaque = ZSBtreePageGetOpaque(leftpage);
-	ItemPointerData leftlokey = leftopaque->zs_lokey;
+	zstid		leftlokey = leftopaque->zs_lokey;
 	ZSBtreeInternalPageItem *items;
 	int			nitems;
 	int			itemno;
@@ -818,10 +814,11 @@ zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
 	itemno = zsbt_binsrch_internal(rightlokey, items, nitems);
 
 	/* sanity checks */
-	if (itemno < 1 ||
-		!ItemPointerEquals(&items[itemno].tid, &leftlokey) ||
-		BlockIdGetBlockNumber(&items[itemno].childblk) != leftblkno)
+	if (itemno < 1 || items[itemno].tid != leftlokey ||
+		items[itemno].childblk != leftblkno)
+	{
 		elog(ERROR, "could not find downlink");
+	}
 	itemno++;
 
 	if (ZSBtreeInternalPageIsFull(parentpage))
@@ -836,7 +833,7 @@ zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
 				&items[itemno],
 				(nitems - itemno) * sizeof(ZSBtreeInternalPageItem));
 		items[itemno].tid = rightlokey;
-		BlockIdSet(&items[itemno].childblk, rightblkno);
+		items[itemno].childblk = rightblkno;
 		((PageHeader) parentpage)->pd_lower += sizeof(ZSBtreeInternalPageItem);
 
 		leftopaque->zs_flags &= ~ZS_FOLLOW_RIGHT;
@@ -858,7 +855,7 @@ zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
  */
 static void
 zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer childbuf,
-						 OffsetNumber newoff, ItemPointerData newkey, BlockNumber childblk)
+						 OffsetNumber newoff, zstid newkey, BlockNumber childblk)
 {
 	Buffer		rightbuf;
 	Page		origpage = BufferGetPage(leftbuf);
@@ -874,7 +871,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer 
 	int			leftnitems;
 	int			rightnitems;
 	int			splitpoint;
-	ItemPointerData splittid;
+	zstid		splittid;
 	bool		newitemonleft;
 	int			i;
 	ZSBtreeInternalPageItem newitem;
@@ -900,7 +897,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer 
 	orignitems = ZSBtreeInternalPageGetNumItems(origpage);
 	splitpoint = orignitems * 0.9;
 	splittid = origitems[splitpoint].tid;
-	newitemonleft = (ItemPointerCompare(&newkey, &splittid) < 0);
+	newitemonleft = (newkey < splittid);
 
 	/* Set up the page headers */
 	rightopaque->zs_next = leftopaque->zs_next;
@@ -921,7 +918,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer 
 	rightnitems = 0;
 
 	newitem.tid = newkey;
-	BlockIdSet(&newitem.childblk, childblk);
+	newitem.childblk = childblk;
 
 	for (i = 0; i < orignitems; i++)
 	{
@@ -998,10 +995,10 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 				scan->has_decompressed = false;
 				break;
 			}
-			if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
+			if (item->t_tid >= scan->nexttid)
 			{
 				scan->nexttid = item->t_tid;
-				ItemPointerIncrement(&scan->nexttid);
+				scan->nexttid = ZSTidIncrement(scan->nexttid);
 				return item;
 			}
 		}
@@ -1025,7 +1022,7 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 
 			if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 			{
-				if (ItemPointerCompare(&item->t_lasttid, &scan->nexttid) >= 0)
+				if (item->t_lasttid >= scan->nexttid)
 				{
 					zs_decompress_chunk(&scan->decompressor, item);
 					scan->has_decompressed = true;
@@ -1039,10 +1036,10 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 			}
 			else
 			{
-				if (ItemPointerCompare(&item->t_tid, &scan->nexttid) >= 0)
+				if (item->t_tid >= scan->nexttid)
 				{
 					scan->nexttid = item->t_tid;
-					ItemPointerIncrement(&scan->nexttid);
+					scan->nexttid = ZSTidIncrement(scan->nexttid);
 					return item;
 				}
 			}
@@ -1103,13 +1100,13 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 	 */
 #define PROCESS_ITEM(x) \
 	do { \
-		if (newitem && ItemPointerCompare(&(x)->t_tid, &newitem->t_tid) >= 0) \
+		if (newitem && (x)->t_tid >= newitem->t_tid) \
 		{ \
-			Assert(!ItemPointerEquals(&(x)->t_tid, &newitem->t_tid)); \
+			Assert((x)->t_tid != newitem->t_tid); \
 			items = lappend(items, newitem); \
 			newitem = NULL; \
 		} \
-		if (olditem && ItemPointerEquals(&(x)->t_tid, &olditem->t_tid)) \
+		if (olditem && (x)->t_tid == olditem->t_tid) \
 		{ \
 			Assert(!found_old_item); \
 			found_old_item = true; \
@@ -1131,8 +1128,8 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 		{
 			ZSDecompressContext decompressor;
 
-			if ((olditem && ItemPointerBetween(&item->t_tid, &olditem->t_tid, &item->t_lasttid)) ||
-				(newitem && ItemPointerBetween(&item->t_tid, &newitem->t_tid, &item->t_lasttid)))
+			if ((olditem && item->t_tid <= olditem->t_tid && olditem->t_tid <= item->t_lasttid) ||
+				(newitem && item->t_tid <= newitem->t_tid && newitem->t_tid <= item->t_lasttid))
 			{
 				/* Found it, this compressed item covers the target or the new TID. */
 				/* We have to decompress it, and recompress */
@@ -1181,11 +1178,11 @@ typedef struct
 	int			total_compressed_items;
 	int			total_already_compressed_items;
 
-	ItemPointerData hikey;
+	zstid		hikey;
 } zsbt_recompress_context;
 
 static void
-zsbt_recompress_newpage(zsbt_recompress_context *cxt, ItemPointerData nexttid)
+zsbt_recompress_newpage(zsbt_recompress_context *cxt, zstid nexttid)
 {
 	Page		newpage;
 	ZSBtreePageOpaque *newopaque;
@@ -1406,12 +1403,11 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 }
 
 static int
-zsbt_binsrch_internal(ItemPointerData key, ZSBtreeInternalPageItem *arr, int arr_elems)
+zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems)
 {
 	int			low,
 				high,
 				mid;
-	int			cmp;
 
 	low = 0;
 	high = arr_elems;
@@ -1419,8 +1415,7 @@ zsbt_binsrch_internal(ItemPointerData key, ZSBtreeInternalPageItem *arr, int arr
 	{
 		mid = low + (high - low) / 2;
 
-		cmp = ItemPointerCompare(&key, &arr[mid].tid);
-		if (cmp >= 0)
+		if (key >= arr[mid].tid)
 			low = mid + 1;
 		else
 			high = mid;
