@@ -350,8 +350,6 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 		/* TODO: WAL-log */
 
 		UnlockReleaseBuffer(buf);
-
-		return tid;
 	}
 	else
 	{
@@ -359,9 +357,11 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 		zsbt_replace_item(rel, attno, buf, NULL, NULL, newitem);
 		/* zsbt_replace_item unlocked 'buf' */
 		ReleaseBuffer(buf);
-
-		return tid;
 	}
+
+	pfree(newitem);
+
+	return tid;
 }
 
 TM_Result
@@ -420,6 +420,8 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	zsbt_replace_item(rel, attno, scan.lastbuf, item, deleteditem, NULL);
 	scan.lastbuf_is_locked = false;	/* zsbt_replace_item released */
 	zsbt_end_scan(&scan);
+
+	pfree(deleteditem);
 
 	return TM_Ok;
 }
@@ -566,6 +568,9 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	zsbt_replace_item(rel, attno, scan.lastbuf, olditem, deleteditem, newitem);
 	scan.lastbuf_is_locked = false;	/* zsbt_recompress_replace released */
 	zsbt_end_scan(&scan);
+
+	pfree(deleteditem);
+	pfree(newitem);
 
 	*newtid_p = newtid;
 	return TM_Ok;
@@ -1175,6 +1180,7 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 	 */
 	for (int i = 0; i < numdecompressors; i++)
 		zs_decompress_free(&decompressors[i]);
+	list_free(items);
 }
 
 /*
@@ -1347,10 +1353,13 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	/* flush the last one, if any */
 	zsbt_recompress_flush(&cxt);
 
-	//elog(NOTICE, "recompressing att %d: %d already, %d compressed, %d items on %d pages",
+	zs_compress_free(&cxt.compressor);
+
+	//elog(NOTICE, "recompressing att %d: %d already, %d compressed, %d items on %d pages, firsttid %ld",
 	//	 attno,
 	//	 cxt.total_already_compressed_items, cxt.total_compressed_items, cxt.total_items,
-	//	 list_length(cxt.pages));
+	//	 list_length(cxt.pages),
+	//	 ((ZSBtreeItem *) linitial(items))->t_tid);
 
 	/* Ok, we now have a list of pages, to replace the original page. */
 	{
@@ -1400,6 +1409,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 
 			MarkBufferDirty(buf);
 		}
+		list_free(cxt.pages);
 
 		END_CRIT_SECTION();
 

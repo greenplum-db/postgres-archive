@@ -139,6 +139,7 @@ zs_compress_finish(ZSCompressContext *context)
 void
 zs_compress_free(ZSCompressContext *context)
 {
+	pfree(context->uncompressedbuffer);
 	pfree(context->buffer);
 }
 
