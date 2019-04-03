@@ -1300,6 +1300,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	zs_compress_init(&cxt.compressor);
 	cxt.compressed_items = 0;
 	cxt.pages = NIL;
+	cxt.hikey = oldopaque->zs_hikey;
 
 	cxt.total_items = 0;
 	cxt.total_compressed_items = 0;
