@@ -44,10 +44,159 @@
  */
 #include "postgres.h"
 
+#ifdef USE_LZ4
+#include <lz4.h>
+#endif
+
 #include "access/zedstore_compression.h"
 #include "access/zedstore_internal.h"
 #include "common/pg_lzcompress.h"
 #include "utils/datum.h"
+
+
+#ifdef USE_LZ4
+
+/*
+ * Begin compression, with given max compressed size.
+ */
+void
+zs_compress_init(ZSCompressContext *context)
+{
+	context->uncompressedbuffer = palloc(BLCKSZ * 10); // FIXME: arbitrary size
+	context->buffer = palloc(BLCKSZ);
+	context->maxCompressedSize = 0;
+	context->nitems = 0;
+	context->rawsize = 0;
+}
+
+void
+zs_compress_begin(ZSCompressContext *context, int maxCompressedSize)
+{
+	context->buffer = repalloc(context->buffer, maxCompressedSize);
+
+	maxCompressedSize -= offsetof(ZSBtreeItem, t_payload);
+	if (maxCompressedSize < 0)
+		maxCompressedSize = 0;
+
+	context->maxCompressedSize = maxCompressedSize;
+	context->nitems = 0;
+	context->rawsize = 0;
+}
+
+/*
+ * Try to add some data to the compressed block.
+ *
+ * If it wouldn't fit, return false.
+ */
+bool
+zs_compress_add(ZSCompressContext *context, ZSBtreeItem *item)
+{
+	ZSBtreeItem *chunk = (ZSBtreeItem *) context->buffer;
+
+	Assert ((item->t_flags & ZSBT_COMPRESSED) == 0);
+
+	if (LZ4_COMPRESSBOUND(context->rawsize + item->t_size) > context->maxCompressedSize)
+		return false;
+
+	memcpy(context->uncompressedbuffer + context->rawsize, item, item->t_size);
+	if (context->nitems == 0)
+		chunk->t_tid = item->t_tid;
+	chunk->t_lasttid = item->t_tid;
+	context->nitems++;
+	context->rawsize += item->t_size;
+
+	return true;
+}
+
+ZSBtreeItem *
+zs_compress_finish(ZSCompressContext *context)
+{
+	ZSBtreeItem *chunk = (ZSBtreeItem *) context->buffer;
+	int32		compressed_size;
+
+	compressed_size = LZ4_compress_default(context->uncompressedbuffer,
+										   chunk->t_payload,
+										   context->rawsize,
+										   context->maxCompressedSize);
+	if (compressed_size < 0)
+		elog(ERROR, "compression failed. what now?");
+
+	chunk->t_size = offsetof(ZSBtreeItem, t_payload) + compressed_size;
+	chunk->t_flags = ZSBT_COMPRESSED;
+	chunk->t_uncompressedsize = context->rawsize;
+
+	return chunk;
+}
+
+void
+zs_compress_free(ZSCompressContext *context)
+{
+	pfree(context->uncompressedbuffer);
+	pfree(context->buffer);
+}
+
+void
+zs_decompress_init(ZSDecompressContext *context)
+{
+	context->buffer = NULL;
+	context->bufsize = 0;
+	context->uncompressedsize = 0;
+}
+
+void
+zs_decompress_chunk(ZSDecompressContext *context, ZSBtreeItem *chunk)
+{
+	Assert((chunk->t_flags & ZSBT_COMPRESSED) != 0);
+	Assert(chunk->t_uncompressedsize > 0);
+	if (context->bufsize < chunk->t_uncompressedsize)
+	{
+		if (context->buffer)
+			pfree(context->buffer);
+		context->buffer = palloc(chunk->t_uncompressedsize);
+		context->bufsize = chunk->t_uncompressedsize;
+	}
+	context->uncompressedsize = chunk->t_uncompressedsize;
+
+	if (LZ4_decompress_safe(chunk->t_payload,
+							context->buffer,
+							chunk->t_size - offsetof(ZSBtreeItem, t_payload),
+							context->uncompressedsize) != context->uncompressedsize)
+		elog(ERROR, "could not decompress chunk");
+
+	context->bytesread = 0;
+}
+
+ZSBtreeItem *
+zs_decompress_read_item(ZSDecompressContext *context)
+{
+	ZSBtreeItem *next;
+
+	if (context->bytesread == context->uncompressedsize)
+		return NULL;
+	next = (ZSBtreeItem *) (context->buffer + context->bytesread);
+	if (context->bytesread + next->t_size > context->uncompressedsize)
+		elog(ERROR, "invalid compressed item");
+	context->bytesread += next->t_size;
+
+	Assert(next->t_size >= sizeof(ZSBtreeItem));
+	Assert(next->t_tid != InvalidZSTid);
+
+	return next;
+}
+
+void
+zs_decompress_free(ZSDecompressContext *context)
+{
+	if (context->buffer)
+		pfree(context->buffer);
+	context->buffer = NULL;
+	context->bufsize = 0;
+	context->uncompressedsize = 0;
+}
+
+
+#else
+/* PGLZ imlementation */
 
 /*
  * In the worst case, pg_lz outputs everything as "literals", and emits one
@@ -201,3 +350,5 @@ zs_decompress_free(ZSDecompressContext *context)
 	context->bufsize = 0;
 	context->uncompressedsize = 0;
 }
+
+#endif		/* !USE_LZ4 */
