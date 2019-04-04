@@ -17,6 +17,7 @@
 
 #include "access/zedstore_internal.h"
 #include "access/zedstore_undo.h"
+#include "miscadmin.h"
 #include "utils/rel.h"
 
 /*
@@ -200,13 +201,16 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 		Page		page;
 		ZSUndoPageOpaque *opaque;
 
+		CHECK_FOR_INTERRUPTS();
+
 		/* Read the UNDO page */
 		buf = ReadBuffer(rel, lastblk);
 		page = BufferGetPage(buf);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(page);
 
-		Assert(opaque->zs_page_id == ZS_UNDO_PAGE_ID);
+		if (opaque->zs_page_id != ZS_UNDO_PAGE_ID)
+			elog(ERROR, "unexpected page id on UNDO page");
 
 		/* loop through all records on the page */
 		endptr = (char *) page + ((PageHeader) page)->pd_lower;
