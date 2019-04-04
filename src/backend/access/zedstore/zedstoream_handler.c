@@ -36,6 +36,7 @@
 #include "catalog/pg_am_d.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
+#include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "executor/nodeSeqscan.h"
 #include "optimizer/plancat.h"
@@ -307,15 +308,6 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 {
 	int i;
 	ZedStoreDesc scan;
-
-	/*
-	 * TODO:
-	 *
-	 * The UNDO log needs trimming every now and then. There is no VACUUM
-	 * tableam function yet, so we don't have a proper place to do it. So quite
-	 * arbitrarily, trigger it here.
-	 */
-	zsundo_trim(relation, GetOldestXmin(relation, PROCARRAY_FLAGS_VACUUM));
 
 	/*
 	 * allocate and initialize scan descriptor
@@ -1565,6 +1557,17 @@ zedstoream_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate
 	return false;
 }
 
+static void
+zedstoream_vacuum_rel(Relation onerel, VacuumParams *params,
+					  BufferAccessStrategy bstrategy)
+{
+	/*
+	 * TODO: we should scan the UNDO log for dead TIDs, and remove them
+	 * from indexes.
+	 */
+	zsundo_trim(onerel, GetOldestXmin(onerel, PROCARRAY_FLAGS_VACUUM));
+}
+
 static const TableAmRoutine zedstoream_methods = {
 	.type = T_TableAmRoutine,
 	.scans_leverage_column_projection = true,
@@ -1604,7 +1607,7 @@ static const TableAmRoutine zedstoream_methods = {
 	.relation_nontransactional_truncate = zedstoream_relation_nontransactional_truncate,
 	.relation_copy_data = zedstoream_relation_copy_data,
 	.relation_copy_for_cluster = zedstoream_relation_copy_for_cluster,
-	.relation_vacuum = heap_vacuum_rel,
+	.relation_vacuum = zedstoream_vacuum_rel,
 	.scan_analyze_next_block = zedstoream_scan_analyze_next_block,
 	.scan_analyze_next_tuple = zedstoream_scan_analyze_next_tuple,
 

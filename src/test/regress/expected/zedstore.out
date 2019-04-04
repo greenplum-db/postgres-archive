@@ -166,6 +166,26 @@ select * from t_zedstore;
 (11 rows)
 
 --
+-- Test VACUUM
+--
+vacuum t_zedstore;
+select * from t_zedstore;
+ c1 | c2  | c3 
+----+-----+----
+  5 |   6 |  7
+  6 |   7 |  8
+  7 |   8 |  9
+  9 |  10 | 11
+ 10 |  11 | 12
+ 31 |  32 | 33
+ 32 |  33 | 34
+ 33 |  34 | 35
+ 34 |  35 | 36
+ 35 |  36 | 37
+  8 | 100 | 10
+(11 rows)
+
+--
 -- Test toasting
 --
 create table t_zedtoast(c1 int, t text) USING zedstore;

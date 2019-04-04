@@ -48,6 +48,11 @@ select * from t_zedstore;
 update t_zedstore set c2 = 100 where c1 = 8;
 select * from t_zedstore;
 
+--
+-- Test VACUUM
+--
+vacuum t_zedstore;
+select * from t_zedstore;
 
 --
 -- Test toasting
