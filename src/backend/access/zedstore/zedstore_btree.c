@@ -206,7 +206,11 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 		ItemId		iid = PageGetItemId(page, maxoff);
 		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
 
-		tid = hitup->t_tid;
+		/* COMPRESSED items cover a range of TIDs */
+		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
+			tid = hitup->t_lasttid;
+		else
+			tid = hitup->t_tid;
 		tid = ZSTidIncrement(tid);
 	}
 	else
