@@ -148,12 +148,16 @@ zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item)
 	else if (undorec->type == ZSUNDO_TYPE_DELETE ||
 			 (undorec->type == ZSUNDO_TYPE_UPDATE && (item->t_flags & ZSBT_UPDATED) != 0))
 	{
+		// FIXME: if we determine that the deletion is invisible to use, we
+		// should follow the pointer in the deletion record to the *previous*
+		// undo record, which must be an insertion (or update). It's possible
+		// that the insertion is not visible to us yet, either.
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
 			if (undorec->cid >= snapshot->curcid)
 				return true;	/* deleted after scan started */
 			else
-				return false;	/* deleted befor scan started */
+				return false;	/* deleted before scan started */
 		}
 		else if (XidInMVCCSnapshot(undorec->xid, snapshot))
 			return true;
