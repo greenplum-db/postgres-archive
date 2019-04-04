@@ -41,6 +41,8 @@
 #include "utils/rel.h"
 
 /* prototypes for local functions */
+static zstid zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
+				 TransactionId xid, CommandId cid);
 static Buffer zsbt_descend(Relation rel, BlockNumber rootblk, zstid key);
 static Buffer zsbt_find_downlink(Relation rel, AttrNumber attno,
 				   zstid key, BlockNumber childblk, int level,
@@ -232,18 +234,58 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 {
 	TupleDesc	desc = RelationGetDescr(rel);
 	Form_pg_attribute attr = &desc->attrs[attno - 1];
+	Size		datumsz;
+	Size		itemsz;
+	ZSBtreeItem	*newitem;
+	char	   *dataptr;
+
+	/*
+	 * Form a ZSBtreeItem to insert.
+	 */
+	if (isnull)
+		datumsz = 0;
+	else
+		datumsz = zs_datumGetSize(datum, attr->attbyval, attr->attlen);
+	itemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
+
+	newitem = palloc(itemsz);
+	newitem->t_tid = tid;
+	newitem->t_flags = 0;
+	newitem->t_size = itemsz;
+	memset(&newitem->t_undo_ptr, 0, sizeof(ZSUndoRecPtr));
+
+	if (isnull)
+		newitem->t_flags |= ZSBT_NULL;
+	else
+	{
+		dataptr = ((char *) newitem) + offsetof(ZSBtreeItem, t_payload);
+		if (attr->attbyval)
+			store_att_byval(dataptr, datum, attr->attlen);
+		else
+			memcpy(dataptr, DatumGetPointer(datum), datumsz);
+	}
+
+	/* and then insert it */
+	tid = zsbt_insert_item(rel, attno, newitem, xid, cid);
+
+	pfree(newitem);
+
+	return tid;
+}
+
+static zstid
+zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
+				 TransactionId xid, CommandId cid)
+{
+	zstid		tid = newitem->t_tid;
 	BlockNumber	rootblk;
 	Buffer		buf;
 	Page		page;
 	ZSBtreePageOpaque *opaque;
 	OffsetNumber maxoff;
 	zstid		lasttid;
-	Size		datumsz;
-	Size		itemsz;
-	ZSBtreeItem	*newitem;
-	char	   *dataptr;
-	ZSUndoRecPtr undorecptr;
 	zstid		insert_target_key;
+	ZSUndoRec_Insert undorec;
 
 	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
 
@@ -290,44 +332,18 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 	}
 
 	/* Form an undo record */
-	{
-		ZSUndoRec_Insert undorec;
+	undorec.rec.size = sizeof(ZSUndoRec_Insert);
+	undorec.rec.type = ZSUNDO_TYPE_INSERT;
+	undorec.rec.attno = attno;
+	undorec.rec.xid = xid;
+	undorec.rec.cid = cid;
+	undorec.rec.tid = tid;
 
-		undorec.rec.size = sizeof(ZSUndoRec_Insert);
-		undorec.rec.type = ZSUNDO_TYPE_INSERT;
-		undorec.rec.attno = attno;
-		undorec.rec.xid = xid;
-		undorec.rec.cid = cid;
-		undorec.rec.tid = tid;
+	/* fill in the remaining fields in the item */
+	newitem->t_undo_ptr = zsundo_insert(rel, &undorec.rec);
 
-		undorecptr = zsundo_insert(rel, &undorec.rec);
-	}
-
-	/*
-	 * Form a ZSBtreeItem to insert.
-	 */
-	if (isnull)
-		datumsz = 0;
-	else
-		datumsz = zs_datumGetSize(datum, attr->attbyval, attr->attlen);
-	itemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
-
-	newitem = palloc(itemsz);
-	newitem->t_tid = tid;
-	newitem->t_flags = 0;
-	newitem->t_size = itemsz;
-	newitem->t_undo_ptr = undorecptr;
-
-	if (isnull)
-		newitem->t_flags |= ZSBT_NULL;
-	else
-	{
-		dataptr = ((char *) newitem) + offsetof(ZSBtreeItem, t_payload);
-		if (attr->attbyval)
-			store_att_byval(dataptr, datum, attr->attlen);
-		else
-			memcpy(dataptr, DatumGetPointer(datum), datumsz);
-	}
+	if (newitem->t_tid == InvalidZSTid)
+		newitem->t_tid = tid;
 
 	/*
 	 * If there's enough space on the page, insert it directly. Otherwise, try to
@@ -338,12 +354,12 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 	 * the page. Things get difficult, if the new TID is covered by the range of
 	 * an existing compressed item.
 	 */
-	if (PageGetFreeSpace(page) >= MAXALIGN(itemsz) &&
+	if (PageGetFreeSpace(page) >= MAXALIGN(newitem->t_size) &&
 		(maxoff > FirstOffsetNumber || tid > lasttid))
 	{
 		OffsetNumber off;
 
-		off = PageAddItemExtended(page, (Item) newitem, itemsz, maxoff + 1, PAI_OVERWRITE);
+		off = PageAddItemExtended(page, (Item) newitem, newitem->t_size, maxoff + 1, PAI_OVERWRITE);
 		if (off == InvalidOffsetNumber)
 			elog(ERROR, "didn't fit, after all?");
 		MarkBufferDirty(buf);
@@ -358,8 +374,6 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 		/* zsbt_replace_item unlocked 'buf' */
 		ReleaseBuffer(buf);
 	}
-
-	pfree(newitem);
 
 	return tid;
 }
