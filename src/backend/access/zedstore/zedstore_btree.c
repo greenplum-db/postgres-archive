@@ -211,7 +211,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 			tid = hitup->t_lasttid;
 		else
 			tid = hitup->t_tid;
-		tid = ZSTidIncrement(tid);
+		tid = ZSTidIncrementForInsert(tid);
 	}
 	else
 	{
@@ -325,7 +325,7 @@ zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
 		if (tid == InvalidZSTid)
 		{
 			tid = lasttid;
-			tid = ZSTidIncrement(tid);
+			tid = ZSTidIncrementForInsert(tid);
 		}
 	}
 	else
@@ -345,7 +345,6 @@ zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
 
 	/* fill in the remaining fields in the item */
 	newitem->t_undo_ptr = zsundo_insert(rel, &undorec.rec);
-
 	if (newitem->t_tid == InvalidZSTid)
 		newitem->t_tid = tid;
 
@@ -519,7 +518,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 			newtid = hitup->t_lasttid;
 		else
 			newtid = hitup->t_tid;
-		newtid = ZSTidIncrement(newtid);
+		newtid = ZSTidIncrementForInsert(newtid);
 	}
 	else
 	{

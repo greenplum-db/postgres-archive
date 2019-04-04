@@ -28,20 +28,6 @@ typedef uint64	zstid;
 /* note: if this is converted to ItemPointer, it is invalid */
 #define MaxPlusOneZSTid		(MaxZSTid + 1)
 
-/*
- * Helper function to "increment" a TID by one.
- *
- * Skips over values that would be invalid ItemPointers.
- */
-static inline zstid
-ZSTidIncrement(zstid tid)
-{
-	tid++;
-	if ((tid & 0xffff) == 0)
-		tid++;
-	return tid;
-}
-
 static inline zstid
 ZSTidFromItemPointer(ItemPointerData iptr)
 {
@@ -73,7 +59,7 @@ ItemPointerFromZSTid(zstid tid)
 static inline BlockNumber
 ZSTidGetBlockNumber(zstid tid)
 {
-	return (BlockNumber) (tid >> 32);
+	return (BlockNumber) (tid >> 16);
 }
 
 static inline OffsetNumber
@@ -82,6 +68,28 @@ ZSTidGetOffsetNumber(zstid tid)
 	return (OffsetNumber) tid;
 }
 
+/*
+ * Helper function to "increment" a TID by one.
+ *
+ * Skips over values that would be invalid ItemPointers.
+ */
+static inline zstid
+ZSTidIncrement(zstid tid)
+{
+	tid++;
+	if ((tid & 0xffff) == 0)
+		tid++;
+	return tid;
+}
+
+static inline zstid
+ZSTidIncrementForInsert(zstid tid)
+{
+	tid++;
+	if (ZSTidGetOffsetNumber(tid) >= MaxHeapTuplesPerPage)
+		tid = ZSTidFromBlkOff(ZSTidGetBlockNumber(tid) + 1, 1);
+	return tid;
+}
 
 /*
  * Different page types:

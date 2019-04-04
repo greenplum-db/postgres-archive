@@ -24,8 +24,6 @@ select * from t_zedstore;
 create index on t_zedstore (c1);
 set enable_seqscan=off;
 set enable_indexscan=on;
-
--- TODO:Bitmap scans are currently not working
 set enable_bitmapscan=off;
 
 -- index scan
@@ -34,6 +32,10 @@ select * from t_zedstore where c1 = 5;
 -- index-only scan
 select c1 from t_zedstore where c1 = 5;
 
+-- bitmap scan
+set enable_indexscan=off;
+set enable_bitmapscan=on;
+select c1, c2 from t_zedstore where c1 between 5 and 10;
 
 --
 -- Test DELETE and UPDATE

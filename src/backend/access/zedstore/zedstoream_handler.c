@@ -64,6 +64,15 @@ typedef struct ZedStoreDescData
 	zstid		cur_range_start;
 	zstid		cur_range_end;
 	bool		finished;
+
+	/* These fields are used for bitmap scans, to hold a "block's" worth of data */
+#define	MAX_ITEMS_PER_LOGICAL_BLOCK		MaxHeapTuplesPerPage
+	int			bmscan_ntuples;
+	zstid	   *bmscan_tids;
+	Datum	  **bmscan_datums;
+	bool	  **bmscan_isnulls;
+	int			bmscan_nexttuple;
+
 } ZedStoreDescData;
 
 typedef struct ZedStoreDescData *ZedStoreDesc;
@@ -84,8 +93,6 @@ static Size zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan
 static void zs_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan);
 static bool zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
 						  zstid *start, zstid *end);
-
-
 
 
 /* ----------------------------------------------------------------
@@ -352,10 +359,25 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	 */
 	for (i = 0; i < relation->rd_att->natts; i++)
 	{
-		/* if project_columns is empty means need all the columns */
+		/* if project_columns is empty means need all thscan->bmscan_e columns */
 		if (project_columns == NULL || project_columns[i])
 		{
 			scan->proj_atts[scan->num_proj_atts++] = i;
+		}
+	}
+
+	/* Extra setup for bitmap scans */
+	if (is_bitmapscan)
+	{
+		scan->bmscan_ntuples = 0;
+		scan->bmscan_tids = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(zstid));
+
+		scan->bmscan_datums = palloc(scan->num_proj_atts * sizeof(Datum *));
+		scan->bmscan_isnulls = palloc(scan->num_proj_atts * sizeof(bool *));
+		for (i = 0; i < scan->num_proj_atts; i++)
+		{
+			scan->bmscan_datums[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(Datum));
+			scan->bmscan_isnulls[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(bool));
 		}
 	}
 
@@ -1189,7 +1211,7 @@ zedstoream_finish_bulk_insert(Relation relation, int options)
 }
 
 /* ------------------------------------------------------------------------
- * DDL related callbacks for heap AM.
+ * DDL related callbacks for zedstore AM.
  * ------------------------------------------------------------------------
  */
 
@@ -1288,7 +1310,7 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 }
 
 /* ------------------------------------------------------------------------
- * Planner related callbacks for the heap AM
+ * Planner related callbacks for the zedstore AM
  * ------------------------------------------------------------------------
  */
 
@@ -1399,29 +1421,129 @@ zedstoream_estimate_rel_size(Relation rel, int32 *attr_widths,
 }
 
 /* ------------------------------------------------------------------------
- * Executor related callbacks for the heap AM
+ * Executor related callbacks for the zedstore AM
  * ------------------------------------------------------------------------
  */
 
 static bool
-zedstoream_scan_bitmap_next_block(TableScanDesc scan,
+zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 								  TBMIterateResult *tbmres)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("function %s not implemented yet", __func__)));
-	return false;
+	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	BlockNumber tid_blkno = tbmres->blockno;
+	int			ntuples;
+	int			first_ntuples = 0;
+	bool		firstcol;
+
+	firstcol = true;
+	for (int i = 0; i < scan->num_proj_atts; i++)
+	{
+		int			natt = scan->proj_atts[i];
+		ZSBtreeScan	btree_scan;
+		Datum		datum;
+		bool        isnull;
+		zstid		tid;
+		Datum	   *datums = scan->bmscan_datums[natt];
+		bool	   *isnulls = scan->bmscan_isnulls[natt];
+		int			noff = 0;
+
+		zsbt_begin_scan(scan->rs_scan.rs_rd, natt + 1,
+						ZSTidFromBlkOff(tid_blkno, 1),
+						scan->rs_scan.rs_snapshot,
+						&btree_scan);
+
+		/*
+		 * TODO: it would be good to pass the next expected TID down to zsbt_scan_next,
+		 * so that it could skip over to it more efficiently.
+		 */
+		ntuples = 0;
+		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+		{
+			if (ZSTidGetBlockNumber(tid) != tid_blkno)
+			{
+				Assert(ZSTidGetBlockNumber(tid) > tid_blkno);
+				break;
+			}
+
+			if (tbmres->ntuples != -1)
+			{
+				while (ZSTidGetOffsetNumber(tid) > tbmres->offsets[noff] && noff < tbmres->ntuples)
+					noff++;
+
+				if (noff == tbmres->ntuples)
+					break;
+
+				if (ZSTidGetOffsetNumber(tid) < tbmres->offsets[noff])
+					continue;
+			}
+
+			datums[ntuples] = datum;
+			isnulls[ntuples] = isnull;
+			if (firstcol)
+				scan->bmscan_tids[ntuples] = tid;
+			else if (tid != scan->bmscan_tids[ntuples])
+				elog(ERROR, "scans on different attributes out of sync");
+
+			ntuples++;
+		}
+		if (firstcol)
+			first_ntuples = ntuples;
+		else if (ntuples != first_ntuples)
+			elog(ERROR, "scans on different attributes out of sync");
+
+		zsbt_end_scan(&btree_scan);
+
+		firstcol = false;
+	}
+
+	scan->bmscan_nexttuple = 0;
+	scan->bmscan_ntuples = first_ntuples;
+
+	return first_ntuples > 0;
 }
 
 static bool
-zedstoream_scan_bitmap_next_tuple(TableScanDesc scan,
+zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 								  TBMIterateResult *tbmres,
 								  TupleTableSlot *slot)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("function %s not implemented yet", __func__)));
-	return false;
+	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	zstid		tid;
+
+	if (scan->bmscan_nexttuple >= scan->bmscan_ntuples)
+		return false;
+
+	tid = scan->bmscan_tids[scan->bmscan_nexttuple];
+	for (int i = 0; i < scan->num_proj_atts; i++)
+	{
+		Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[i];
+		int			natt = scan->proj_atts[i];
+		Datum		datum;
+		bool        isnull;
+
+		datum = (scan->bmscan_datums[i])[scan->bmscan_nexttuple];
+		isnull = (scan->bmscan_isnulls[i])[scan->bmscan_nexttuple];
+
+		/*
+		 * flatten any ZS-TOASTed values, becaue the rest of the system
+		 * doesn't know how to deal with them.
+		 */
+		if (!isnull && att->attlen == -1 &&
+			VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+		{
+			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt + 1, tid, datum);
+		}
+
+		slot->tts_values[natt] = datum;
+		slot->tts_isnull[natt] = isnull;
+	}
+	slot->tts_tid = ItemPointerFromZSTid(tid);
+	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
+	slot->tts_flags &= ~TTS_FLAG_EMPTY;
+
+	scan->bmscan_nexttuple++;
+
+	return true;
 }
 
 static bool
