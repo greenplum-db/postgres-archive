@@ -86,7 +86,7 @@ static Size zs_parallelscan_estimate(Relation rel);
 static Size zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan);
 static void zs_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan);
 static bool zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
-						  zstid *start, zstid *end);
+									  zstid *start, zstid *end);
 
 
 /* ----------------------------------------------------------------
@@ -112,7 +112,7 @@ zedstoream_fetch_row_version(Relation relation,
  */
 static void
 zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
-				   int options, BulkInsertState bistate)
+				  int options, BulkInsertState bistate)
 {
 	AttrNumber	attno;
 	Datum	   *d;
@@ -153,7 +153,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 static void
 zedstoream_insert_speculative(Relation relation, TupleTableSlot *slot, CommandId cid,
-							   int options, BulkInsertState bistate, uint32 specToken)
+							  int options, BulkInsertState bistate, uint32 specToken)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -162,7 +162,7 @@ zedstoream_insert_speculative(Relation relation, TupleTableSlot *slot, CommandId
 
 static void
 zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 spekToken,
-								 bool succeeded)
+								bool succeeded)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -171,7 +171,7 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 
 static void
 zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
-				  CommandId cid, int options, BulkInsertState bistate)
+						CommandId cid, int options, BulkInsertState bistate)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -180,8 +180,8 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 static TM_Result
 zedstoream_delete(Relation relation, ItemPointer tid_p, CommandId cid,
-				   Snapshot snapshot, Snapshot crosscheck, bool wait,
-				   TM_FailureData *hufd, bool changingPart)
+				  Snapshot snapshot, Snapshot crosscheck, bool wait,
+				  TM_FailureData *hufd, bool changingPart)
 {
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	TransactionId xid = GetCurrentTransactionId();
@@ -217,9 +217,9 @@ zedstoream_delete(Relation relation, ItemPointer tid_p, CommandId cid,
 
 static TM_Result
 zedstoream_lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
-				TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
-				LockWaitPolicy wait_policy, uint8 flags,
-				TM_FailureData *hufd)
+					  TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
+					  LockWaitPolicy wait_policy, uint8 flags,
+					  TM_FailureData *hufd)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -229,9 +229,9 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 
 static TM_Result
 zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
-				   CommandId cid, Snapshot snapshot, Snapshot crosscheck,
-				   bool wait, TM_FailureData *hufd,
-				   LockTupleMode *lockmode, bool *update_indexes)
+				  CommandId cid, Snapshot snapshot, Snapshot crosscheck,
+				  bool wait, TM_FailureData *hufd,
+				  LockTupleMode *lockmode, bool *update_indexes)
 {
 	zstid		otid = ZSTidFromItemPointer(*otid_p);
 	TransactionId xid = GetCurrentTransactionId();
@@ -354,7 +354,7 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	 */
 	for (i = 0; i < relation->rd_att->natts; i++)
 	{
-		/* if project_columns is empty means need all thscan->bmscan_e columns */
+		/* project_columns empty also conveys need all the columns */
 		if (project_columns == NULL || project_columns[i])
 		{
 			scan->proj_atts[scan->num_proj_atts++] = i;
@@ -555,7 +555,7 @@ zedstoream_begin_index_fetch(Relation rel)
 
 static void
 zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
-											 bool *project_column)
+									   bool *project_column)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch)scan;
 	Relation rel = zscan->idx_fetch_data.rel;
@@ -591,10 +591,10 @@ zedstoream_end_index_fetch(IndexFetchTableData *scan)
 
 static bool
 zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
-						 ItemPointer tid_p,
-						 Snapshot snapshot,
-						 TupleTableSlot *slot,
-						 bool *call_again, bool *all_dead)
+							 ItemPointer tid_p,
+							 Snapshot snapshot,
+							 TupleTableSlot *slot,
+							 bool *call_again, bool *all_dead)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
 	Relation	rel = zscan->idx_fetch_data.rel;
@@ -663,10 +663,10 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 
 static void
 zedstoream_index_validate_scan(Relation heapRelation,
-						   Relation indexRelation,
-						   IndexInfo *indexInfo,
-						   Snapshot snapshot,
-						   ValidateIndexState *state)
+							   Relation indexRelation,
+							   IndexInfo *indexInfo,
+							   Snapshot snapshot,
+							   ValidateIndexState *state)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1000,7 +1000,7 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 /*
  * currently this is exact duplicate of heapam_estimate_rel_size().
  * TODO fix to tune it based on zedstore storage.
-*/
+ */
 static void
 zedstoream_estimate_rel_size(Relation rel, int32 *attr_widths,
 							 BlockNumber *pages, double *tuples,

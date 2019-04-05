@@ -42,21 +42,21 @@ static zstid zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newit
 							  TransactionId xid, CommandId cid, ZSUndoRecPtr *undorecptr);
 static Buffer zsbt_descend(Relation rel, BlockNumber rootblk, zstid key);
 static Buffer zsbt_find_downlink(Relation rel, AttrNumber attno,
-				   zstid key, BlockNumber childblk, int level,
-				   int *itemno);
+								 zstid key, BlockNumber childblk, int level,
+								 int *itemno);
 static void zsbt_recompress_replace(Relation rel, AttrNumber attno,
 									Buffer oldbuf, List *items);
 static void zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
-					 zstid rightlokey, BlockNumber rightblkno);
+								 zstid rightlokey, BlockNumber rightblkno);
 static void zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer childbuf,
-					OffsetNumber newoff, zstid newkey, BlockNumber childblk);
+									 OffsetNumber newoff, zstid newkey, BlockNumber childblk);
 static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
-			 zstid key1, BlockNumber blk1,
-			 zstid key2, BlockNumber blk2,
-			 Buffer leftchildbuf);
+						 zstid key1, BlockNumber blk1,
+						 zstid key2, BlockNumber blk2,
+						 Buffer leftchildbuf);
 static ZSBtreeItem *zsbt_scan_next_internal(ZSBtreeScan *scan);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
-				  ZSBtreeItem *olditem, ZSBtreeItem *replacementitem, ZSBtreeItem *newitem);
+							  ZSBtreeItem *olditem, ZSBtreeItem *replacementitem, ZSBtreeItem *newitem);
 
 static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems);
 
@@ -1451,8 +1451,8 @@ static int
 zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems)
 {
 	int			low,
-				high,
-				mid;
+		high,
+		mid;
 
 	low = 0;
 	high = arr_elems;
