@@ -114,6 +114,7 @@ typedef struct ZSBtreePageOpaque
 	zstid		zs_hikey;		/* exclusive */
 	uint16		zs_level;			/* 0 = leaf */
 	uint16		zs_flags;
+	uint16		padding;			/* padding, to put zs_page_id last */
 	uint16		zs_page_id;			/* always ZS_BTREE_PAGE_ID */
 } ZSBtreePageOpaque;
 
@@ -221,6 +222,8 @@ typedef struct ZSToastPageOpaque
 	BlockNumber	zs_prev;
 	BlockNumber	zs_next;
 	uint16		zs_flags;
+	uint16		padding1;			/* padding, to put zs_page_id last */
+	uint16		padding2;			/* padding, to put zs_page_id last */
 	uint16		zs_page_id;
 } ZSToastPageOpaque;
 
@@ -302,6 +305,8 @@ typedef struct ZSMetaPageOpaque
 	ZSUndoRecPtr zs_undo_oldestptr;
 
 	uint16		zs_flags;
+	uint16		padding1;			/* padding, to put zs_page_id last */
+	uint16		padding2;			/* padding, to put zs_page_id last */
 	uint16		zs_page_id;
 } ZSMetaPageOpaque;
 

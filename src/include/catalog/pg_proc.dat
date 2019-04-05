@@ -10638,4 +10638,9 @@
   proname => 'pg_partition_root', prorettype => 'regclass',
   proargtypes => 'regclass', prosrc => 'pg_partition_root' },
 
+# zedstore inspection functions
+{ oid => '7000', descr => 'get page type',
+  proname => 'pg_zs_page_type', prorettype => 'text',
+  proargtypes => 'regclass int8', prosrc => 'pg_zs_page_type' },
+
 ]

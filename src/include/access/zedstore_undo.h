@@ -88,6 +88,7 @@ typedef struct
 typedef struct
 {
 	BlockNumber	next;
+	uint16		padding;			/* padding, to put zs_page_id last */
 	uint16		zs_page_id; /* ZS_UNDO_PAGE_ID */
 } ZSUndoPageOpaque;
 
