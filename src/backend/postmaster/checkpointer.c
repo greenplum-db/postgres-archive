@@ -108,10 +108,8 @@
  */
 typedef struct
 {
-	RelFileNode rnode;
-	ForkNumber	forknum;
-	BlockNumber segno;			/* see md.c for special values */
-	/* might add a real request-type field later; not needed yet */
+	SyncRequestType type;		/* request type */
+	FileTag		ftag;			/* file identifier */
 } CheckpointerRequest;
 
 typedef struct
@@ -281,6 +279,8 @@ CheckpointerMain(void)
 			CheckpointerShmem->ckpt_done = CheckpointerShmem->ckpt_started;
 			SpinLockRelease(&CheckpointerShmem->ckpt_lck);
 
+			ConditionVariableBroadcast(&CheckpointerShmem->done_cv);
+
 			ckpt_active = false;
 		}
 
@@ -349,7 +349,7 @@ CheckpointerMain(void)
 		/*
 		 * Process any requests or signals received recently.
 		 */
-		AbsorbFsyncRequests();
+		AbsorbSyncRequests();
 
 		if (got_SIGHUP)
 		{
@@ -684,7 +684,7 @@ CheckpointWriteDelay(int flags, double progress)
 			UpdateSharedMemoryConfig();
 		}
 
-		AbsorbFsyncRequests();
+		AbsorbSyncRequests();
 		absorb_counter = WRITES_PER_ABSORB;
 
 		CheckArchiveTimeout();
@@ -709,7 +709,7 @@ CheckpointWriteDelay(int flags, double progress)
 		 * operations even when we don't sleep, to prevent overflow of the
 		 * fsync request queue.
 		 */
-		AbsorbFsyncRequests();
+		AbsorbSyncRequests();
 		absorb_counter = WRITES_PER_ABSORB;
 	}
 }
@@ -1084,7 +1084,7 @@ RequestCheckpoint(int flags)
 }
 
 /*
- * ForwardFsyncRequest
+ * ForwardSyncRequest
  *		Forward a file-fsync request from a backend to the checkpointer
  *
  * Whenever a backend is compelled to write directly to a relation
@@ -1092,15 +1092,6 @@ RequestCheckpoint(int flags)
  * the backend calls this routine to pass over knowledge that the relation
  * is dirty and must be fsync'd before next checkpoint.  We also use this
  * opportunity to count such writes for statistical purposes.
- *
- * This functionality is only supported for regular (not backend-local)
- * relations, so the rnode argument is intentionally RelFileNode not
- * RelFileNodeBackend.
- *
- * segno specifies which segment (not block!) of the relation needs to be
- * fsync'd.  (Since the valid range is much less than BlockNumber, we can
- * use high values for special flags; that's all internal to md.c, which
- * see for details.)
  *
  * To avoid holding the lock for longer than necessary, we normally write
  * to the requests[] queue without checking for duplicates.  The checkpointer
@@ -1113,7 +1104,7 @@ RequestCheckpoint(int flags)
  * let the backend know by returning false.
  */
 bool
-ForwardFsyncRequest(RelFileNode rnode, ForkNumber forknum, BlockNumber segno)
+ForwardSyncRequest(const FileTag *ftag, SyncRequestType type)
 {
 	CheckpointerRequest *request;
 	bool		too_full;
@@ -1122,7 +1113,7 @@ ForwardFsyncRequest(RelFileNode rnode, ForkNumber forknum, BlockNumber segno)
 		return false;			/* probably shouldn't even get here */
 
 	if (AmCheckpointerProcess())
-		elog(ERROR, "ForwardFsyncRequest must not be called in checkpointer");
+		elog(ERROR, "ForwardSyncRequest must not be called in checkpointer");
 
 	LWLockAcquire(CheckpointerCommLock, LW_EXCLUSIVE);
 
@@ -1151,9 +1142,8 @@ ForwardFsyncRequest(RelFileNode rnode, ForkNumber forknum, BlockNumber segno)
 
 	/* OK, insert request */
 	request = &CheckpointerShmem->requests[CheckpointerShmem->num_requests++];
-	request->rnode = rnode;
-	request->forknum = forknum;
-	request->segno = segno;
+	request->ftag = *ftag;
+	request->type = type;
 
 	/* If queue is more than half full, nudge the checkpointer to empty it */
 	too_full = (CheckpointerShmem->num_requests >=
@@ -1284,8 +1274,8 @@ CompactCheckpointerRequestQueue(void)
 }
 
 /*
- * AbsorbFsyncRequests
- *		Retrieve queued fsync requests and pass them to local smgr.
+ * AbsorbSyncRequests
+ *		Retrieve queued sync requests and pass them to sync mechanism.
  *
  * This is exported because it must be called during CreateCheckPoint;
  * we have to be sure we have accepted all pending requests just before
@@ -1293,7 +1283,7 @@ CompactCheckpointerRequestQueue(void)
  * non-checkpointer processes, do nothing if not checkpointer.
  */
 void
-AbsorbFsyncRequests(void)
+AbsorbSyncRequests(void)
 {
 	CheckpointerRequest *requests = NULL;
 	CheckpointerRequest *request;
@@ -1335,7 +1325,7 @@ AbsorbFsyncRequests(void)
 	LWLockRelease(CheckpointerCommLock);
 
 	for (request = requests; n > 0; request++, n--)
-		RememberFsyncRequest(request->rnode, request->forknum, request->segno);
+		RememberSyncRequest(&request->ftag, request->type);
 
 	END_CRIT_SECTION();
 

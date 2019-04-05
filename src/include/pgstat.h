@@ -801,7 +801,8 @@ typedef enum
 	WAIT_EVENT_SSL_OPEN_SERVER,
 	WAIT_EVENT_WAL_RECEIVER_WAIT_START,
 	WAIT_EVENT_WAL_SENDER_WAIT_WAL,
-	WAIT_EVENT_WAL_SENDER_WRITE_DATA
+	WAIT_EVENT_WAL_SENDER_WRITE_DATA,
+	WAIT_EVENT_GSS_OPEN_SERVER,
 } WaitEventClient;
 
 /* ----------
@@ -951,10 +952,11 @@ typedef enum ProgressCommandType
 {
 	PROGRESS_COMMAND_INVALID,
 	PROGRESS_COMMAND_VACUUM,
-	PROGRESS_COMMAND_CLUSTER
+	PROGRESS_COMMAND_CLUSTER,
+	PROGRESS_COMMAND_CREATE_INDEX
 } ProgressCommandType;
 
-#define PGSTAT_NUM_PROGRESS_PARAM	10
+#define PGSTAT_NUM_PROGRESS_PARAM	20
 
 /* ----------
  * Shared-memory data structures
@@ -987,6 +989,23 @@ typedef struct PgBackendSSLStatus
 
 	char		ssl_issuer_dn[NAMEDATALEN];
 } PgBackendSSLStatus;
+
+/*
+ * PgBackendGSSStatus
+ *
+ * For each backend, we keep the GSS status in a separate struct, that
+ * is only filled in if GSS is enabled.
+ *
+ * All char arrays must be null-terminated.
+ */
+typedef struct PgBackendGSSStatus
+{
+	/* Information about GSSAPI connection */
+	char		gss_princ[NAMEDATALEN]; /* GSSAPI Principal used to auth */
+	bool		gss_auth;		/* If GSSAPI authentication was used */
+	bool		gss_enc;		/* If encryption is being used */
+
+} PgBackendGSSStatus;
 
 
 /* ----------
@@ -1041,6 +1060,10 @@ typedef struct PgBackendStatus
 	/* Information about SSL connection */
 	bool		st_ssl;
 	PgBackendSSLStatus *st_sslstatus;
+
+	/* Information about GSSAPI connection */
+	bool		st_gss;
+	PgBackendGSSStatus *st_gssstatus;
 
 	/* current state */
 	BackendState st_state;

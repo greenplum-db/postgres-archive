@@ -169,6 +169,14 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 			 errmsg("function %s not implemented yet", __func__)));
 }
 
+static void
+zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
+				  CommandId cid, int options, BulkInsertState bistate)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("function %s not implemented yet", __func__)));
+}
 
 static TM_Result
 zedstoream_delete(Relation relation, ItemPointer tid_p, CommandId cid,
@@ -667,15 +675,16 @@ zedstoream_index_validate_scan(Relation heapRelation,
 
 static double
 zedstoream_index_build_range_scan(Relation baseRelation,
-							  Relation indexRelation,
-							  IndexInfo *indexInfo,
-							  bool allow_sync,
-							  bool anyvisible,
-							  BlockNumber start_blockno,
-							  BlockNumber numblocks,
-							  IndexBuildCallback callback,
-							  void *callback_state,
-							  TableScanDesc scan)
+								  Relation indexRelation,
+								  IndexInfo *indexInfo,
+								  bool allow_sync,
+								  bool anyvisible,
+								  bool progress,
+								  BlockNumber start_blockno,
+								  BlockNumber numblocks,
+								  IndexBuildCallback callback,
+								  void *callback_state,
+								  TableScanDesc scan)
 {
 	bool		checking_uniqueness;
 	Datum		values[INDEX_MAX_KEYS];
@@ -1284,6 +1293,7 @@ static const TableAmRoutine zedstoream_methods = {
 	.tuple_insert = zedstoream_insert,
 	.tuple_insert_speculative = zedstoream_insert_speculative,
 	.tuple_complete_speculative = zedstoream_complete_speculative,
+	.multi_insert = zedstoream_multi_insert,
 	.tuple_delete = zedstoream_delete,
 	.tuple_update = zedstoream_update,
 	.tuple_lock = zedstoream_lock_tuple,

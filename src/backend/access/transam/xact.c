@@ -50,6 +50,7 @@
 #include "storage/fd.h"
 #include "storage/freespace.h"
 #include "storage/lmgr.h"
+#include "storage/md.h"
 #include "storage/predicate.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
@@ -263,6 +264,9 @@ static char *prepareGID;
  * Some commands want to force synchronous commit.
  */
 static bool forceSyncCommit = false;
+
+/* Flag for logging statements in a transaction. */
+bool		xact_is_sampled = false;
 
 /*
  * Private context for transaction-abort work --- we reserve space for this
@@ -1902,6 +1906,11 @@ StartTransaction(void)
 	 */
 	s->state = TRANS_START;
 	s->fullTransactionId = InvalidFullTransactionId;	/* until assigned */
+
+	/* Determine if statements are logged in this transaction */
+	xact_is_sampled = log_xact_sample_rate != 0 &&
+		(log_xact_sample_rate == 1 ||
+		 random() <= log_xact_sample_rate * MAX_RANDOM_VALUE);
 
 	/*
 	 * initialize current transaction state fields

@@ -64,6 +64,7 @@ ginhandler(PG_FUNCTION_ARGS)
 	amroutine->amcostestimate = gincostestimate;
 	amroutine->amoptions = ginoptions;
 	amroutine->amproperty = NULL;
+	amroutine->ambuildphasename = NULL;
 	amroutine->amvalidate = ginvalidate;
 	amroutine->ambeginscan = ginbeginscan;
 	amroutine->amrescan = ginrescan;
@@ -661,7 +662,7 @@ ginGetStats(Relation index, GinStatsData *stats)
  * Note: nPendingPages and ginVersion are *not* copied over
  */
 void
-ginUpdateStats(Relation index, const GinStatsData *stats)
+ginUpdateStats(Relation index, const GinStatsData *stats, bool is_build)
 {
 	Buffer		metabuffer;
 	Page		metapage;
@@ -691,7 +692,7 @@ ginUpdateStats(Relation index, const GinStatsData *stats)
 
 	MarkBufferDirty(metabuffer);
 
-	if (RelationNeedsWAL(index))
+	if (RelationNeedsWAL(index) && !is_build)
 	{
 		XLogRecPtr	recptr;
 		ginxlogUpdateMeta data;

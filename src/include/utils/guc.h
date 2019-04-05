@@ -227,6 +227,8 @@ typedef enum
 #define GUC_UNIT_MIN		   0x30000	/* value is in minutes */
 #define GUC_UNIT_TIME		   0xF0000	/* mask for time-related units */
 
+#define GUC_EXPLAIN			  0x100000	/* include in explain */
+
 #define GUC_UNIT				(GUC_UNIT_MEMORY | GUC_UNIT_TIME)
 
 
@@ -252,6 +254,7 @@ extern PGDLLIMPORT int client_min_messages;
 extern int	log_min_duration_statement;
 extern int	log_temp_files;
 extern double log_statement_sample_rate;
+extern double log_xact_sample_rate;
 
 extern int	temp_file_limit;
 

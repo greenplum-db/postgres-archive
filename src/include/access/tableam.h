@@ -9,6 +9,9 @@
  *
  * src/include/access/tableam.h
  *
+ * NOTES
+ *		See tableam.sgml for higher level documentation.
+ *
  *-------------------------------------------------------------------------
  */
 #ifndef TABLEAM_H
@@ -367,6 +370,10 @@ typedef struct TableAmRoutine
 											   uint32 specToken,
 											   bool succeeded);
 
+	/* see table_multi_insert() for reference about parameters */
+	void		(*multi_insert) (Relation rel, TupleTableSlot **slots, int nslots,
+								 CommandId cid, int options, struct BulkInsertStateData *bistate);
+
 	/* see table_delete() for reference about parameters */
 	TM_Result	(*tuple_delete) (Relation rel,
 								 ItemPointer tid,
@@ -527,6 +534,7 @@ typedef struct TableAmRoutine
 										   struct IndexInfo *index_nfo,
 										   bool allow_sync,
 										   bool anyvisible,
+										   bool progress,
 										   BlockNumber start_blockno,
 										   BlockNumber end_blockno,
 										   IndexBuildCallback callback,
@@ -1118,6 +1126,28 @@ table_complete_speculative(Relation rel, TupleTableSlot *slot,
 }
 
 /*
+ * Insert multiple tuple into a table.
+ *
+ * This is like table_insert(), but inserts multiple tuples in one
+ * operation. That's often faster than calling table_insert() in a loop,
+ * because e.g. the AM can reduce WAL logging and page locking overhead.
+ *
+ * Except for taking `nslots` tuples as input, as an array of TupleTableSlots
+ * in `slots`, the parameters for table_multi_insert() are the same as for
+ * table_insert().
+ *
+ * Note: this leaks memory into the current memory context. You can create a
+ * temporary context before calling this, if that's a problem.
+ */
+static inline void
+table_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
+				   CommandId cid, int options, struct BulkInsertStateData *bistate)
+{
+	rel->rd_tableam->multi_insert(rel, slots, nslots,
+								  cid, options, bistate);
+}
+
+/*
  * Delete a tuple.
  *
  * NB: do not call this directly unless prepared to deal with
@@ -1413,6 +1443,8 @@ table_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
  * so here because the AM might reject some of the tuples for its own reasons,
  * such as being unable to store NULLs.
  *
+ * If 'progress', the PROGRESS_SCAN_BLOCKS_TOTAL counter is updated when
+ * starting the scan, and PROGRESS_SCAN_BLOCKS_DONE is updated as we go along.
  *
  * A side effect is to set indexInfo->ii_BrokenHotChain to true if we detect
  * any potentially broken HOT chains.  Currently, we set this if there are any
@@ -1426,6 +1458,7 @@ table_index_build_scan(Relation heap_rel,
 					   Relation index_rel,
 					   struct IndexInfo *index_nfo,
 					   bool allow_sync,
+					   bool progress,
 					   IndexBuildCallback callback,
 					   void *callback_state,
 					   TableScanDesc scan)
@@ -1435,6 +1468,7 @@ table_index_build_scan(Relation heap_rel,
 														index_nfo,
 														allow_sync,
 														false,
+														progress,
 														0,
 														InvalidBlockNumber,
 														callback,
@@ -1458,6 +1492,7 @@ table_index_build_range_scan(Relation heap_rel,
 							 struct IndexInfo *index_nfo,
 							 bool allow_sync,
 							 bool anyvisible,
+							 bool progress,
 							 BlockNumber start_blockno,
 							 BlockNumber numblocks,
 							 IndexBuildCallback callback,
@@ -1469,6 +1504,7 @@ table_index_build_range_scan(Relation heap_rel,
 														index_nfo,
 														allow_sync,
 														anyvisible,
+														progress,
 														start_blockno,
 														numblocks,
 														callback,
@@ -1624,7 +1660,6 @@ extern void table_block_parallelscan_startblock_init(Relation rel,
  */
 
 extern const TableAmRoutine *GetTableAmRoutine(Oid amhandler);
-extern const TableAmRoutine *GetTableAmRoutineByAmId(Oid amoid);
 extern const TableAmRoutine *GetHeapamTableAmRoutine(void);
 extern bool check_default_table_access_method(char **newval, void **extra,
 								  GucSource source);

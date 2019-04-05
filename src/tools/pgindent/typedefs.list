@@ -402,6 +402,9 @@ ConversionLocation
 ConvertRowtypeExpr
 CookedConstraint
 CopyDest
+CopyInsertMethod
+CopyMultiInsertBuffer
+CopyMultiInsertInfo
 CopyState
 CopyStateData
 CopyStmt
@@ -651,6 +654,7 @@ File
 FileFdwExecutionState
 FileFdwPlanState
 FileNameMap
+FileTag
 FindSplitData
 FixedParallelExecutorState
 FixedParallelState
@@ -1700,7 +1704,7 @@ PathKeysComparison
 PathTarget
 Pattern_Prefix_Status
 Pattern_Type
-PendingOperationEntry
+PendingFsyncEntry
 PendingRelDelete
 PendingUnlinkEntry
 PendingWriteback
@@ -2276,7 +2280,10 @@ Subscription
 SubscriptionInfo
 SubscriptionRelState
 Syn
+SyncOps
 SyncRepConfigData
+SyncRequestHandler
+SyncRequestType
 SysScanDesc
 SyscacheCallbackFunction
 SystemRowsSamplerData
