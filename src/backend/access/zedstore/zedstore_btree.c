@@ -15,9 +15,6 @@
  *
  * - range scans by TID (for bitmap index scan)
  *
- * TODO:
- * - compression
- *
  * NOTES:
  * - Locking order: child before parent, left before right
  *
@@ -599,7 +596,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
  */
 
 /*
- * Find the leaf buffer containing the given key TID.
+ * Find the leaf page containing the given key TID.
  */
 static Buffer
 zsbt_descend(Relation rel, BlockNumber rootblk, zstid key)
@@ -739,7 +736,7 @@ zsbt_find_downlink(Relation rel, AttrNumber attno,
  * Create a new btree root page, containing two downlinks.
  *
  * NOTE: the very first root page of a btree, which is also the leaf, is created
- *
+ * in zsmeta_get_root_for_attribute(), not here.
  */
 static void
 zsbt_newroot(Relation rel, AttrNumber attno, int level,
@@ -798,7 +795,7 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level,
 }
 
 /*
- * After page split, insert the downlink of 'rightbuf' to the parent.
+ * After page split, insert the downlink of 'rightblkno' to the parent.
  *
  * On entry, 'leftbuf' must be pinned exclusive-locked. It is released on exit.
  */
@@ -1318,6 +1315,9 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	ListCell   *lc2;
 	zsbt_recompress_context cxt;
 	ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(BufferGetPage(oldbuf));
+	List	   *bufs;
+	int			i;
+	BlockNumber orignextblk;
 
 	cxt.currpage = NULL;
 	zs_compress_init(&cxt.compressor);
@@ -1378,72 +1378,68 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	//	 list_length(cxt.pages),
 	//	 ((ZSBtreeItem *) linitial(items))->t_tid);
 
-	/* Ok, we now have a list of pages, to replace the original page. */
+	/*
+	 * Ok, we now have a list of pages, to replace the original page, as private
+	 * in-memory copies. Allocate buffers for them, and write them out
+	 *
+	 * allocate all the pages before entering critical section, so that
+	 * out-of-disk-space doesn't lead to PANIC
+	 */
+	bufs = list_make1_int(oldbuf);
+	for (i = 0; i < list_length(cxt.pages) - 1; i++)
 	{
-		List	   *bufs;
-		int			i;
-		BlockNumber orignextblk;
-		Buffer		leftbuf;
-		Buffer		rightbuf;
-
-		/*
-		 * allocate all the pages before entering critical section, so that
-		 * out-of-disk-space doesn't lead to PANIC
-		 */
-		bufs = list_make1_int(oldbuf);
-		for (i = 0; i < list_length(cxt.pages) - 1; i++)
-		{
-			Buffer		newbuf = zs_getnewbuf(rel);
-			bufs = lappend_int(bufs, newbuf);
-		}
-
-		START_CRIT_SECTION();
-
-		orignextblk = oldopaque->zs_next;
-		forboth(lc, cxt.pages, lc2, bufs)
-		{
-			Page		page_copy = (Page) lfirst(lc);
-			Buffer		buf = (Buffer) lfirst_int(lc2);
-			Page		page = BufferGetPage(buf);
-			ZSBtreePageOpaque *opaque;
-
-			PageRestoreTempPage(page_copy, page);
-			opaque = ZSBtreePageGetOpaque(page);
-
-			/* TODO: WAL-log */
-			if (lnext(lc2))
-			{
-				Buffer nextbuf = (Buffer) lfirst_int(lnext(lc2));
-
-				opaque->zs_next = BufferGetBlockNumber(nextbuf);
-				opaque->zs_flags |= ZS_FOLLOW_RIGHT;
-			}
-			else
-			{
-				/* last one in the chain. */
-				opaque->zs_next = orignextblk;
-			}
-
-			MarkBufferDirty(buf);
-		}
-		list_free(cxt.pages);
-
-		END_CRIT_SECTION();
-
-		/* If there were more than one page, insert downlinks for new pages. */
-		rightbuf = oldbuf;
-		bufs = list_delete_first(bufs);
-		while (bufs)
-		{
-			leftbuf = rightbuf;
-			rightbuf = (Buffer) linitial_int(bufs);
-			zsbt_insert_downlink(rel, attno, leftbuf,
-								 ZSBtreePageGetOpaque(BufferGetPage(leftbuf))->zs_hikey,
-								 BufferGetBlockNumber(rightbuf));
-			bufs = list_delete_first(bufs);
-		}
-		UnlockReleaseBuffer(rightbuf);
+		Buffer		newbuf = zs_getnewbuf(rel);
+		bufs = lappend_int(bufs, newbuf);
 	}
+
+	START_CRIT_SECTION();
+
+	orignextblk = oldopaque->zs_next;
+	forboth(lc, cxt.pages, lc2, bufs)
+	{
+		Page		page_copy = (Page) lfirst(lc);
+		Buffer		buf = (Buffer) lfirst_int(lc2);
+		Page		page = BufferGetPage(buf);
+		ZSBtreePageOpaque *opaque;
+
+		PageRestoreTempPage(page_copy, page);
+		opaque = ZSBtreePageGetOpaque(page);
+
+		/* TODO: WAL-log */
+		if (lnext(lc2))
+		{
+			Buffer nextbuf = (Buffer) lfirst_int(lnext(lc2));
+
+			opaque->zs_next = BufferGetBlockNumber(nextbuf);
+			opaque->zs_flags |= ZS_FOLLOW_RIGHT;
+		}
+		else
+		{
+			/* last one in the chain. */
+			opaque->zs_next = orignextblk;
+		}
+
+		MarkBufferDirty(buf);
+	}
+	list_free(cxt.pages);
+
+	END_CRIT_SECTION();
+
+	/* If we had to split, insert downlinks for the new pages. */
+	while (list_length(bufs) > 1)
+	{
+		Buffer leftbuf = (Buffer) linitial_int(bufs);
+		Buffer rightbuf = (Buffer) lsecond_int(bufs);
+
+		zsbt_insert_downlink(rel, attno, leftbuf,
+							 ZSBtreePageGetOpaque(BufferGetPage(leftbuf))->zs_hikey,
+							 BufferGetBlockNumber(rightbuf));
+		/* zsbt_insert_downlink() released leftbuf */
+		bufs = list_delete_first(bufs);
+	}
+	/* release the last page */
+	UnlockReleaseBuffer((Buffer) linitial_int(bufs));
+	list_free(bufs);
 }
 
 static int
