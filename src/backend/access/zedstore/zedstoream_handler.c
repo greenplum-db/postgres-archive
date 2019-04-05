@@ -118,6 +118,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	Datum	   *d;
 	bool	   *isnulls;
 	zstid		tid;
+	ZSUndoRecPtr undorecptr;
 	TransactionId xid = GetCurrentTransactionId();
 
 	slot_getallattrs(slot);
@@ -125,6 +126,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	isnulls = slot->tts_isnull;
 
 	tid = InvalidZSTid;
+	ZSUndoRecPtrInitialize(&undorecptr);
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
 		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
@@ -139,7 +141,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 			toastptr = datum = zedstore_toast_datum(relation, attno, datum);
 		}
 
-		tid = zsbt_insert(relation, attno, datum, isnull, xid, cid, tid);
+		tid = zsbt_insert(relation, attno, datum, isnull, xid, cid, tid, &undorecptr);
 
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, tid);

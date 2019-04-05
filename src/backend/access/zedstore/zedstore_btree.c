@@ -39,7 +39,7 @@
 
 /* prototypes for local functions */
 static zstid zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
-				 TransactionId xid, CommandId cid);
+							  TransactionId xid, CommandId cid, ZSUndoRecPtr *undorecptr);
 static Buffer zsbt_descend(Relation rel, BlockNumber rootblk, zstid key);
 static Buffer zsbt_find_downlink(Relation rel, AttrNumber attno,
 				   zstid key, BlockNumber childblk, int level,
@@ -231,7 +231,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
  */
 zstid
 zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
-			TransactionId xid, CommandId cid, zstid tid)
+			TransactionId xid, CommandId cid, zstid tid, ZSUndoRecPtr *undorecptr)
 {
 	TupleDesc	desc = RelationGetDescr(rel);
 	Form_pg_attribute attr = &desc->attrs[attno - 1];
@@ -267,7 +267,7 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 	}
 
 	/* and then insert it */
-	tid = zsbt_insert_item(rel, attno, newitem, xid, cid);
+	tid = zsbt_insert_item(rel, attno, newitem, xid, cid, undorecptr);
 
 	pfree(newitem);
 
@@ -276,7 +276,7 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 
 static zstid
 zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
-				 TransactionId xid, CommandId cid)
+				 TransactionId xid, CommandId cid, ZSUndoRecPtr *undorecptr)
 {
 	zstid		tid = newitem->t_tid;
 	BlockNumber	rootblk;
@@ -333,15 +333,20 @@ zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
 	}
 
 	/* Form an undo record */
-	undorec.rec.size = sizeof(ZSUndoRec_Insert);
-	undorec.rec.type = ZSUNDO_TYPE_INSERT;
-	undorec.rec.attno = attno;
-	undorec.rec.xid = xid;
-	undorec.rec.cid = cid;
-	undorec.rec.tid = tid;
+	if (!IsZSUndoRecPtrValid(undorecptr))
+	{
+		undorec.rec.size = sizeof(ZSUndoRec_Insert);
+		undorec.rec.type = ZSUNDO_TYPE_INSERT;
+		undorec.rec.attno = attno;
+		undorec.rec.xid = xid;
+		undorec.rec.cid = cid;
+		undorec.rec.tid = tid;
+		*undorecptr = zsundo_insert(rel, &undorec.rec);
+	}
 
 	/* fill in the remaining fields in the item */
-	newitem->t_undo_ptr = zsundo_insert(rel, &undorec.rec);
+	newitem->t_undo_ptr = *undorecptr;
+
 	if (newitem->t_tid == InvalidZSTid)
 		newitem->t_tid = tid;
 

@@ -28,7 +28,7 @@ typedef uint64	zstid;
  * 'blkno' and 'offset' are the physical location of the UNDO record. They
  * can be used to easily fetch a given record.
  */
-typedef struct 
+typedef struct
 {
 	uint64		counter;
 	BlockNumber blkno;
@@ -39,7 +39,7 @@ typedef struct
 {
 	int16		size;			/* size of this record, including header */
 	uint8		type;			/* ZSUNDO_TYPE_* */
-	AttrNumber	attno;
+	AttrNumber      attno;
 	ZSUndoRecPtr undorecptr;
 	TransactionId xid;
 	CommandId	cid;
@@ -91,6 +91,21 @@ typedef struct
 	uint16		padding;			/* padding, to put zs_page_id last */
 	uint16		zs_page_id; /* ZS_UNDO_PAGE_ID */
 } ZSUndoPageOpaque;
+
+static inline void
+ZSUndoRecPtrInitialize(ZSUndoRecPtr *uptr)
+{
+	uptr->blkno = InvalidBlockNumber;
+	uptr->offset = InvalidOffsetNumber;
+	uptr->counter = 0;
+}
+
+static inline bool
+IsZSUndoRecPtrValid(ZSUndoRecPtr *uptr)
+{
+	return (uptr->blkno != InvalidBlockNumber &&
+				uptr->offset != InvalidOffsetNumber);
+}
 
 /* prototypes for functions in zstore_undo.c */
 extern ZSUndoRecPtr zsundo_insert(Relation rel, ZSUndoRec *rec);

@@ -340,7 +340,9 @@ typedef struct ZSBtreeScan
 } ZSBtreeScan;
 
 /* prototypes for functions in zstore_btree.c */
-extern zstid zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull, TransactionId xmin, CommandId cmin, zstid tid);
+extern zstid zsbt_insert(Relation rel, AttrNumber attno, Datum datum,
+						 bool isnull, TransactionId xmin, CommandId cmin,
+						 zstid tid, ZSUndoRecPtr *undorecptr);
 extern TM_Result zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 			TransactionId xid, CommandId cid,
 			Snapshot snapshot, Snapshot crosscheck, bool wait,
