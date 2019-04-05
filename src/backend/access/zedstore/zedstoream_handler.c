@@ -173,9 +173,62 @@ static void
 zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 						CommandId cid, int options, BulkInsertState bistate)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function %s not implemented yet", __func__)));
+	AttrNumber	attno;
+	Datum	   *d;
+	bool	   *isnulls;
+	zstid		*tid;
+	ZSUndoRecPtr *undorecptr;
+	int i;
+	bool slotgetandset = true;
+	TransactionId xid = GetCurrentTransactionId();
+
+	d = palloc(ntuples * sizeof(Datum*));
+	isnulls = palloc(ntuples * sizeof(bool));
+	tid = palloc(ntuples * sizeof(zstid));
+	undorecptr = palloc(ntuples * sizeof(ZSUndoRecPtr));
+
+	for (attno = 1; attno <= relation->rd_att->natts; attno++)
+	{
+		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
+
+		for (i = 0; i < ntuples; i++)
+		{
+			Datum		datum = slots[i]->tts_values[attno - 1];
+			bool		isnull = slots[i]->tts_isnull[attno - 1];
+			Datum		toastptr = (Datum) 0;
+
+			if (slotgetandset)
+			{
+				slot_getallattrs(slots[i]);
+				tid[i] = InvalidZSTid;
+				ZSUndoRecPtrInitialize(&undorecptr[i]);
+			}
+
+			/* If this datum is too large, toast it */
+			if (!isnull && attr->attlen < 0 &&
+				VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
+			{
+				toastptr = datum = zedstore_toast_datum(relation, attno, datum);
+			}
+
+			tid[i] = zsbt_insert(relation, attno, datum, isnull, xid, cid, tid[i], &undorecptr[i]);
+
+			if (toastptr != (Datum) 0)
+				zedstore_toast_finish(relation, attno, toastptr, tid[i]);
+
+			if (slotgetandset)
+			{
+				slots[i]->tts_tableOid = RelationGetRelid(relation);
+				slots[i]->tts_tid = ItemPointerFromZSTid(tid[i]);
+			}
+		}
+		slotgetandset = false;
+	}
+
+	pfree(d);
+	pfree(isnulls);
+	pfree(tid);
+	pfree(undorecptr);
 }
 
 static TM_Result
