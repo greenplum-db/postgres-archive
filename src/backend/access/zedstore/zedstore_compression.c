@@ -54,6 +54,11 @@
 #include "utils/datum.h"
 
 
+/*
+ * There are two implementations at the moment: LZ4, and the Postgres
+ * pg_lzcompress(). LZ4 support requires that the server was compiled
+ * with --with-lz4.
+ */
 #ifdef USE_LZ4
 
 /*

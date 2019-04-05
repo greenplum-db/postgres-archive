@@ -92,14 +92,12 @@ ZSTidIncrementForInsert(zstid tid)
 }
 
 /*
- * Different page types:
+ * A ZedStore table contains different kinds of pages, all in the same file.
  *
- * - metapage (block 0)
- * - Btree pages
- *   - root, internal, leaf
- * - FSM pages
- * - "toast" pages.
- *
+ * Block 0 is always a metapage. It contains the block numbers of the other
+ * data structures stored within the file, like the per-attribute B-trees,
+ * and the UNDO log. In addition, if there are overly large datums in the
+ * the table, they are chopped into separate "toast" pages.
  */
 #define	ZS_META_PAGE_ID		0xF083
 #define	ZS_BTREE_PAGE_ID	0xF084
@@ -122,7 +120,7 @@ typedef struct ZSBtreePageOpaque
 #define ZSBtreePageGetOpaque(page) ((ZSBtreePageOpaque *) PageGetSpecialPointer(page))
 
 /*
- * Internal page layout.
+ * Internal B-tree page layout.
  *
  * The "contents" of the page is an array of ZSBtreeInternalPageItem. The number
  * of items can be deduced from pd_lower.
@@ -163,7 +161,7 @@ ZSBtreeInternalPageIsFull(Page page)
 }
 
 /*
- * Leaf page layout
+ * Leaf B-tree page layout
  *
  * Leaf pages are packed with ZSBtreeItems. There are two kinds of items:
  *
@@ -195,6 +193,13 @@ typedef struct ZSBtreeItem
 #define     ZSBT_NULL           0x0008
 
 /*
+ * Toast page layout.
+ *
+ * When an overly large datum is stored, it is divided into chunks, and each
+ * chunk is stored on a dedicated toast page. The toast pages of a datum form
+ * list, each page has a next/prev pointer.
+ */
+/*
  * Maximum size of an individual untoasted Datum stored in ZedStore. Datums
  * larger than this need to be toasted.
  *
@@ -220,13 +225,19 @@ typedef struct ZSToastPageOpaque
 } ZSToastPageOpaque;
 
 /*
+ * "Toast pointer" of a datum that's stored in zedstore toast pages.
+ *
+ * This looks somewhat like a normal TOAST pointer, but we mustn't let these
+ * escape out of zedstore code, because the rest of the system doesn't know
+ * how to deal with them.
+ *
  * This must look like varattrib_1b_e!
  */
 typedef struct varatt_zs_toastptr
 {
 	/* varattrib_1b_e */
 	uint8		va_header;
-	uint8		va_tag;
+	uint8		va_tag;			/* VARTAG_ZEDSTORE in zedstore toast datums */
 
 	/* first block */
 	BlockNumber	zst_block;
@@ -268,8 +279,7 @@ zs_datumCopy(Datum value, bool typByVal, int typLen)
 /*
  * Block 0 on every ZedStore table is a metapage.
  *
- * It contains a directory of b-tree roots for each attribute.
- * Probably lots more in the future...
+ * It contains a directory of b-tree roots for each attribute, and lots more.
  */
 #define ZS_META_BLK		0
 
