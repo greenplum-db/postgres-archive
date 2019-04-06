@@ -220,7 +220,7 @@ pg_zs_undo_pages(PG_FUNCTION_ARGS)
 		{
 			ZSUndoRec *undorec = (ZSUndoRec *) ptr;
 
-			Assert(undorec->blkno == blkno);
+			Assert(undorec->undorecptr.blkno == blkno);
 
 			lastptr = undorec->undorecptr;
 			if (nrecords == 0)

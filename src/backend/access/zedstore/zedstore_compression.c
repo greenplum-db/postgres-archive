@@ -98,7 +98,8 @@ zs_compress_add(ZSCompressContext *context, ZSUncompressedBtreeItem *item)
 {
 	ZSCompressedBtreeItem *chunk = (ZSCompressedBtreeItem *) context->buffer;
 
-	Assert ((item->t_flags & ZSBT_COMPRESSED) == 0);
+	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
+	Assert(item->t_tid != InvalidZSTid);
 
 	if (LZ4_COMPRESSBOUND(context->rawsize + item->t_size) > context->maxCompressedSize)
 		return false;

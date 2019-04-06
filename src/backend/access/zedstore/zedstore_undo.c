@@ -585,7 +585,7 @@ zsundo_trim(Relation rel, TransactionId OldestXmin, ZSVacRelStats *vacrelstats,
 			ZSUndoRec *undorec = (ZSUndoRec *) ptr;
 			bool		did_commit;
 
-			Assert(undorec->blkno == lastblk);
+			Assert(undorec->undorecptr.blkno == lastblk);
 
 			oldest_undorecptr = undorec->undorecptr;
 

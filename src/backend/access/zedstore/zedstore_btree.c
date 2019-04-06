@@ -810,6 +810,7 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 		return;
 
 	memset(&deaditem, 0, offsetof(ZSUncompressedBtreeItem, t_payload));
+	deaditem.t_tid = tid;
 	deaditem.t_size = sizeof(ZSUncompressedBtreeItem);
 	deaditem.t_flags = ZSBT_DEAD;
 	deaditem.t_undo_ptr = undoptr;
