@@ -56,7 +56,8 @@ static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
 						 Buffer leftchildbuf);
 static ZSBtreeItem *zsbt_scan_next_internal(ZSBtreeScan *scan);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
-							  ZSBtreeItem *olditem, ZSBtreeItem *replacementitem, ZSBtreeItem *newitem);
+							  ZSBtreeItem *olditem, ZSBtreeItem *replacementitem,
+							  ZSBtreeItem *newitem, List *newitems);
 
 static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems);
 
@@ -219,22 +220,9 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 	return tid;
 }
 
-/*
- * Insert a new datum to the given attribute's btree.
- *
- * Returns the TID of the new tuple.
- *
- * If 'tid' is valid, then that TID is used. It better not be in use already. If
- * it's invalid, then a new TID is allocated, as we see best. (When inserting the
- * first column of the row, pass invalid, and for other columns, pass the TID
- * you got for the first column.)
- */
-zstid
-zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
-			TransactionId xid, CommandId cid, zstid tid, ZSUndoRecPtr *undorecptr)
+ZSBtreeItem *
+zsbt_create_item(Form_pg_attribute attr, zstid tid, Datum datum, bool isnull)
 {
-	TupleDesc	desc = RelationGetDescr(rel);
-	Form_pg_attribute attr = &desc->attrs[attno - 1];
 	Size		datumsz;
 	Size		itemsz;
 	ZSBtreeItem	*newitem;
@@ -266,7 +254,28 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 			memcpy(dataptr, DatumGetPointer(datum), datumsz);
 	}
 
-	/* and then insert it */
+	return newitem;
+}
+
+/*
+ * Insert a new datum to the given attribute's btree.
+ *
+ * Returns the TID of the new tuple.
+ *
+ * If 'tid' is valid, then that TID is used. It better not be in use already. If
+ * it's invalid, then a new TID is allocated, as we see best. (When inserting the
+ * first column of the row, pass invalid, and for other columns, pass the TID
+ * you got for the first column.)
+ */
+zstid
+zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
+			TransactionId xid, CommandId cid, zstid tid, ZSUndoRecPtr *undorecptr)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	Form_pg_attribute attr = &desc->attrs[attno - 1];
+	ZSBtreeItem	*newitem;
+
+	newitem = zsbt_create_item(attr, tid, datum, isnull);
 	tid = zsbt_insert_item(rel, attno, newitem, xid, cid, undorecptr);
 
 	pfree(newitem);
@@ -341,6 +350,7 @@ zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = tid;
+		undorec.endtid = tid;
 		*undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
 
@@ -375,12 +385,178 @@ zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
 	else
 	{
 		/* recompress and possibly split the page */
-		zsbt_replace_item(rel, attno, buf, NULL, NULL, newitem);
+		zsbt_replace_item(rel, attno, buf, NULL, NULL, newitem, NIL);
 		/* zsbt_replace_item unlocked 'buf' */
 		ReleaseBuffer(buf);
 	}
 
 	return tid;
+}
+
+/*
+ * Insert a multiple items to the given attribute's btree.
+ *
+ * Populates the TIDs of the new tuples.
+ *
+ * If 'tid' in list is valid, then that TID is used. It better not be in use already. If
+ * it's invalid, then a new TID is allocated, as we see best. (When inserting the
+ * first column of the row, pass invalid, and for other columns, pass the TID
+ * you got for the first column.)
+ *
+ * TODO: this routine is very similar to zsbt_insert_item() can be easily combined.
+ */
+void
+zsbt_insert_multi_items(Relation rel, AttrNumber attno, List *newitems,
+						TransactionId xid, CommandId cid,
+						ZSUndoRecPtr *undorecptr, zstid *tid_return_list)
+{
+	ZSBtreeItem *firstItem = (ZSBtreeItem*) linitial(newitems);
+	zstid		tid = firstItem->t_tid;
+	zstid       firsttid;
+	BlockNumber	rootblk;
+	Buffer		buf;
+	Page		page;
+	ZSBtreePageOpaque *opaque;
+	OffsetNumber maxoff;
+	zstid		lasttid;
+	zstid		insert_target_key;
+	ZSUndoRec_Insert undorec;
+	int i;
+	ListCell   *lc;
+
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
+
+	/*
+	 * If TID was given, find the right place for it. Otherwise, insert to
+	 * the rightmost leaf.
+	 *
+	 * TODO: use a Free Space Map to find suitable target.
+	 */
+	if (tid != InvalidZSTid)
+		insert_target_key = tid;
+	else
+		insert_target_key = MaxZSTid;
+
+	buf = zsbt_descend(rel, rootblk, insert_target_key);
+	page = BufferGetPage(buf);
+	opaque = ZSBtreePageGetOpaque(page);
+
+	/*
+	 * Look at the last item, for its tid.
+	 */
+	maxoff = PageGetMaxOffsetNumber(page);
+	if (maxoff >= FirstOffsetNumber)
+	{
+		ItemId		iid = PageGetItemId(page, maxoff);
+		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
+
+		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
+			lasttid = hitup->t_lasttid;
+		else
+			lasttid = hitup->t_tid;
+
+		if (tid == InvalidZSTid)
+		{
+			tid = lasttid;
+			tid = ZSTidIncrementForInsert(tid);
+		}
+	}
+	else
+	{
+		lasttid = opaque->zs_lokey;
+		if (tid == InvalidZSTid)
+			tid = lasttid;
+	}
+
+	firsttid = tid;
+	lasttid = InvalidZSTid;
+	i = 0;
+
+	/* assign tids for all the items */
+	foreach(lc, newitems)
+	{
+		ZSBtreeItem *newitem = (ZSBtreeItem *) lfirst(lc);
+
+		/* fill in the remaining fields in the item */
+		newitem->t_undo_ptr = *undorecptr;
+
+		if (newitem->t_tid == InvalidZSTid)
+		{
+			newitem->t_tid = tid;
+			tid_return_list[i++] = tid;
+			lasttid = tid;
+
+			tid = ZSTidIncrementForInsert(tid);
+		}
+	}
+
+	/* Form an undo record */
+	if (!IsZSUndoRecPtrValid(undorecptr))
+	{
+		undorec.rec.size = sizeof(ZSUndoRec_Insert);
+		undorec.rec.type = ZSUNDO_TYPE_INSERT;
+		undorec.rec.attno = attno;
+		undorec.rec.xid = xid;
+		undorec.rec.cid = cid;
+		undorec.rec.tid = firsttid;
+		undorec.endtid = lasttid;
+		*undorecptr = zsundo_insert(rel, &undorec.rec);
+	}
+
+	/*
+	 * update undo record pointer for all the items.
+	 *
+	 * TODO: refactor later to avoid this loop. Can assign above with tids as
+	 * undo pointer is known similar to tid for rest of the columns, but just
+	 * not for first attribute.
+	 */
+	foreach(lc, newitems)
+	{
+		ZSBtreeItem *newitem = (ZSBtreeItem *) lfirst(lc);
+		newitem->t_undo_ptr = *undorecptr;
+	}
+
+	while (list_length(newitems))
+	{
+		ZSBtreeItem *newitem = (ZSBtreeItem *) linitial(newitems);
+
+		/*
+		 * If there's enough space on the page, insert it directly. Otherwise, try to
+		 * compress all existing items. If that still doesn't create enough space, we
+		 * have to split the page.
+		 *
+		 * TODO: We also resort to the slow way, if the new TID is not at the end of
+		 * the page. Things get difficult, if the new TID is covered by the range of
+		 * an existing compressed item.
+		 */
+		if (PageGetFreeSpace(page) >= MAXALIGN(newitem->t_size) &&
+			(maxoff > FirstOffsetNumber || tid > lasttid))
+		{
+			OffsetNumber off;
+			off = PageAddItemExtended(page, (Item) newitem, newitem->t_size, maxoff + 1, PAI_OVERWRITE);
+			if (off == InvalidOffsetNumber)
+				elog(ERROR, "didn't fit, after all?");
+
+			maxoff = PageGetMaxOffsetNumber(page);
+			newitems = list_delete_first(newitems);
+		}
+		else
+			break;
+	}
+
+	if (list_length(newitems))
+	{
+		/* recompress and possibly split the page */
+		zsbt_replace_item(rel, attno, buf, NULL, NULL, NULL, newitems);
+		/* zsbt_replace_item unlocked 'buf' */
+		ReleaseBuffer(buf);
+	}
+	else
+	{
+		MarkBufferDirty(buf);
+		/* TODO: WAL-log */
+		UnlockReleaseBuffer(buf);
+	}
 }
 
 TM_Result
@@ -436,7 +612,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	deleteditem->t_flags |= ZSBT_DELETED;
 	deleteditem->t_undo_ptr = undorecptr;
 
-	zsbt_replace_item(rel, attno, scan.lastbuf, item, deleteditem, NULL);
+	zsbt_replace_item(rel, attno, scan.lastbuf, item, deleteditem, NULL, NIL);
 	scan.lastbuf_is_locked = false;	/* zsbt_replace_item released */
 	zsbt_end_scan(&scan);
 
@@ -584,7 +760,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 			memcpy(dataptr, DatumGetPointer(newdatum), datumsz);
 	}
 
-	zsbt_replace_item(rel, attno, scan.lastbuf, olditem, deleteditem, newitem);
+	zsbt_replace_item(rel, attno, scan.lastbuf, olditem, deleteditem, newitem, NIL);
 	scan.lastbuf_is_locked = false;	/* zsbt_recompress_replace released */
 	zsbt_end_scan(&scan);
 
@@ -1109,7 +1285,8 @@ static void
 zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 				  ZSBtreeItem *olditem,
 				  ZSBtreeItem *replacementitem,
-				  ZSBtreeItem *newitem)
+				  ZSBtreeItem *newitem,
+				  List       *newitems)
 {
 	Page		page = BufferGetPage(buf);
 	OffsetNumber off;
@@ -1187,6 +1364,9 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 	/* if the new item was not added in the loop, it goes to the end */
 	if (newitem)
 		items = lappend(items, newitem);
+
+	if (newitems)
+		items = list_concat(items, newitems);
 
 	/* Now pass the list to the recompressor. */
 	IncrBufferRefCount(buf);

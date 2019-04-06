@@ -340,9 +340,14 @@ typedef struct ZSBtreeScan
 } ZSBtreeScan;
 
 /* prototypes for functions in zstore_btree.c */
+extern ZSBtreeItem *zsbt_create_item(Form_pg_attribute attr, zstid tid,
+									 Datum datum, bool isnull);
 extern zstid zsbt_insert(Relation rel, AttrNumber attno, Datum datum,
 						 bool isnull, TransactionId xmin, CommandId cmin,
 						 zstid tid, ZSUndoRecPtr *undorecptr);
+extern void zsbt_insert_multi_items(Relation rel, AttrNumber attno, List *newitems,
+									TransactionId xid, CommandId cid,
+									ZSUndoRecPtr *undorecptr, zstid *tid);
 extern TM_Result zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 			TransactionId xid, CommandId cid,
 			Snapshot snapshot, Snapshot crosscheck, bool wait,
@@ -355,6 +360,9 @@ extern void zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snap
 extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
+
+
+
 
 /* prototypes for functions in zstore_meta.c */
 extern Buffer zs_getnewbuf(Relation rel);

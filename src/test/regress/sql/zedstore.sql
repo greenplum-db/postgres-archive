@@ -71,3 +71,34 @@ select * from t_zednullvalues;
 select c2 from t_zednullvalues;
 update t_zednullvalues set c1 = 1, c2 = NULL;
 select * from t_zednullvalues;
+
+--
+-- Test COPY
+--
+create table t_zedcopy(a serial, b int, c text not null default 'stuff', d text,e text) USING zedstore;
+
+COPY t_zedcopy (a, b, c, d, e) from stdin;
+9999	\N	\\N	\NN	\N
+10000	21	31	41	51
+\.
+
+COPY t_zedcopy (b, d) from stdin;
+1	test_1
+\.
+
+COPY t_zedcopy (b, d) from stdin;
+2	test_2
+3	test_3
+4	test_4
+5	test_5
+\.
+
+COPY t_zedcopy (a, b, c, d, e) from stdin;
+10001	22	32	42	52
+10002	23	33	43	53
+10003	24	34	44	54
+10004	25	35	45	55
+10005	26	36	46	56
+\.
+
+select * from t_zedcopy;

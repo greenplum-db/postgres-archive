@@ -232,3 +232,28 @@ select * from t_zednullvalues;
   1 |   
 (2 rows)
 
+--
+-- Test COPY
+--
+create table t_zedcopy(a serial, b int, c text not null default 'stuff', d text,e text) USING zedstore;
+COPY t_zedcopy (a, b, c, d, e) from stdin;
+COPY t_zedcopy (b, d) from stdin;
+COPY t_zedcopy (b, d) from stdin;
+COPY t_zedcopy (a, b, c, d, e) from stdin;
+select * from t_zedcopy;
+   a   | b  |   c   |   d    | e  
+-------+----+-------+--------+----
+  9999 |    | \N    | NN     | 
+ 10000 | 21 | 31    | 41     | 51
+     1 |  1 | stuff | test_1 | 
+     2 |  2 | stuff | test_2 | 
+     3 |  3 | stuff | test_3 | 
+     4 |  4 | stuff | test_4 | 
+     5 |  5 | stuff | test_5 | 
+ 10001 | 22 | 32    | 42     | 52
+ 10002 | 23 | 33    | 43     | 53
+ 10003 | 24 | 34    | 44     | 54
+ 10004 | 25 | 35    | 45     | 55
+ 10005 | 26 | 36    | 46     | 56
+(12 rows)
+

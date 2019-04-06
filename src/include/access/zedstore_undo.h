@@ -58,6 +58,7 @@ typedef struct
 typedef struct
 {
 	ZSUndoRec	rec;
+	zstid       endtid; /* inclusive */
 } ZSUndoRec_Insert;
 
 typedef struct
