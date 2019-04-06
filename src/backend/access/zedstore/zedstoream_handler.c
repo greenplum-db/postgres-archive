@@ -807,8 +807,8 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	 */
 	if (!scan)
 	{
-		bool *proj;
-		int attno;
+		bool	   *proj;
+		int			attno;
 
 		/*
 		 * Serial index build.
@@ -841,6 +841,25 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 													  0, /* number of keys */
 													  NULL,	/* scan key */
 													  proj);
+
+		if (start_blockno != 0 || numblocks != InvalidBlockNumber)
+		{
+			ZedStoreDesc zscan = (ZedStoreDesc) scan;
+
+			zscan->cur_range_start = ZSTidFromBlkOff(start_blockno, 1);
+			zscan->cur_range_end = ZSTidFromBlkOff(numblocks, 1);
+
+			for (int i = 0; i < zscan->num_proj_atts; i++)
+			{
+				int			natt = zscan->proj_atts[i];
+
+				zsbt_begin_scan(zscan->rs_scan.rs_rd, natt + 1,
+								zscan->cur_range_start,
+								zscan->rs_scan.rs_snapshot,
+								&zscan->btree_scans[i]);
+			}
+			zscan->state = ZSSCAN_STATE_SCANNING;
+		}
 	}
 	else
 	{
@@ -853,6 +872,8 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 		 */
 		Assert(!IsBootstrapProcessingMode());
 		Assert(allow_sync);
+		Assert(start_blockno == 0);
+		Assert(numblocks == InvalidBlockNumber);
 		snapshot = scan->rs_snapshot;
 	}
 
@@ -867,16 +888,6 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 		   !TransactionIdIsValid(OldestXmin));
 	Assert(snapshot == SnapshotAny || !anyvisible);
 
-	/* set our scan endpoints */
-	if (!allow_sync)
-		heap_setscanlimits(scan, start_blockno, numblocks);
-	else
-	{
-		/* syncscan can only be requested on whole relation */
-		Assert(start_blockno == 0);
-		Assert(numblocks == InvalidBlockNumber);
-	}
-
 	reltuples = 0;
 
 	/*
@@ -886,6 +897,10 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	{
 		bool		tupleIsAlive;
 		HeapTuple	heapTuple;
+
+		if (numblocks != InvalidBlockNumber &&
+			ItemPointerGetBlockNumber(&slot->tts_tid) >= numblocks)
+			break;
 
 		CHECK_FOR_INTERRUPTS();
 
