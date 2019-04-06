@@ -582,8 +582,8 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		 * or should this be TM_Invisible? The heapam at least just throws
 		 * an error, I think..
 		 */
-		elog(ERROR, "could not find tuple to delete with TID (%u, %u)",
-			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid));
+		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
+			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
 	result = zs_SatisfiesUpdate(&scan, item);
 	if (result != TM_Ok)
@@ -620,7 +620,6 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 
 	return TM_Ok;
 }
-
 
 /*
  * If 'newtid' is valid, then that TID is used for the new item. It better not
@@ -665,8 +664,8 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 		 * or should this be TM_Invisible? The heapam at least just throws
 		 * an error, I think..
 		 */
-		elog(ERROR, "could not find tuple to delete with TID (%u, %u)",
-			 ZSTidGetBlockNumber(otid), ZSTidGetOffsetNumber(otid));
+		elog(ERROR, "could not find old tuple to update with TID (%u, %u) for attribute %d",
+			 ZSTidGetBlockNumber(otid), ZSTidGetOffsetNumber(otid), attno);
 	}
 
 	/*
@@ -769,6 +768,47 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 
 	*newtid_p = newtid;
 	return TM_Ok;
+}
+
+/*
+ * Mark item with given TID as dead.
+ *
+ * This is used during VACUUM.
+ */
+void
+zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undoptr)
+{
+	ZSBtreeScan scan;
+	ZSBtreeItem *item;
+	ZSBtreeItem deaditem;
+
+	zsbt_begin_scan(rel, attno, tid, NULL, &scan);
+	scan.for_update = true;
+
+	/* Find the item to delete. (It could be compressed) */
+	item = zsbt_scan_next_internal(&scan);
+	if (item->t_tid != tid)
+	{
+		zsbt_end_scan(&scan);
+		elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
+			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
+		return;
+	}
+
+	/* Replace the ZSBreeItem with a DEAD item. (Unless it's already dead) */
+	if ((item->t_flags & ZSBT_DEAD) != 0)
+		return;
+
+	memset(&deaditem, 0, offsetof(ZSBtreeItem, t_payload));
+	deaditem.t_size = sizeof(ZSBtreeItem);
+	deaditem.t_flags = ZSBT_DEAD;
+	deaditem.t_lasttid = 0;
+	deaditem.t_uncompressedsize = 0;
+	deaditem.t_undo_ptr = undoptr;
+
+	zsbt_replace_item(rel, attno, scan.lastbuf, item, &deaditem, NULL, NIL);
+	scan.lastbuf_is_locked = false;	/* zsbt_replace_item released */
+	zsbt_end_scan(&scan);
 }
 
 /* ----------------------------------------------------------------
@@ -1274,7 +1314,7 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
  * This helper function is used to implement INSERT, UPDATE and DELETE.
  *
  * If 'olditem' is not NULL, then 'olditem' on the page is replaced with
- * 'replacementitem'.
+ * 'replacementitem'. 'replacementitem' can be NULL, to remove an old item.
  *
  * If 'newitem' is not NULL, it is added to the page, to the correct position.
  *
@@ -1317,7 +1357,8 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 		{ \
 			Assert(!found_old_item); \
 			found_old_item = true; \
-			items = lappend(items, replacementitem); \
+			if (replacementitem) \
+				items = lappend(items, replacementitem); \
 		} \
 		else \
 			items = lappend(items, x); \
@@ -1500,6 +1541,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	ListCell   *lc2;
 	zsbt_recompress_context cxt;
 	ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(BufferGetPage(oldbuf));
+	ZSUndoRecPtr recent_oldest_undo = { 0 };
 	List	   *bufs;
 	int			i;
 	BlockNumber orignextblk;
@@ -1519,6 +1561,16 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	foreach(lc, items)
 	{
 		ZSBtreeItem *item = (ZSBtreeItem *) lfirst(lc);
+
+		/* We can leave out any old-enough DEAD items */
+		if ((item->t_flags & ZSBT_DEAD) != 0)
+		{
+			if (recent_oldest_undo.counter == 0)
+				recent_oldest_undo = zsmeta_get_oldest_undo_ptr(rel);
+
+			if (item->t_undo_ptr.counter < recent_oldest_undo.counter)
+				continue;
+		}
 
 		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 		{

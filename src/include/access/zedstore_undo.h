@@ -10,6 +10,7 @@
 #ifndef ZEDSTORE_UNDO_H
 #define ZEDSTORE_UNDO_H
 
+#include "commands/vacuum.h"
 #include "utils/relcache.h"
 
 /* this must match the definition in zedstore_internal.h */
@@ -34,6 +35,9 @@ typedef struct
 	BlockNumber blkno;
 	int32		offset;
 } ZSUndoRecPtr;
+
+/* TODO: assert that blkno and offset match, too, if counter matches */
+#define ZSUndoRecPtrEquals(a, b) ((a).counter == (b).counter)
 
 typedef struct
 {
@@ -111,6 +115,7 @@ IsZSUndoRecPtrValid(ZSUndoRecPtr *uptr)
 /* prototypes for functions in zstore_undo.c */
 extern ZSUndoRecPtr zsundo_insert(Relation rel, ZSUndoRec *rec);
 extern ZSUndoRec *zsundo_fetch(Relation rel, ZSUndoRecPtr undorecptr);
-extern void zsundo_trim(Relation rel, TransactionId OldestXmin);
+extern void zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy,
+			  TransactionId OldestXmin);
 
 #endif							/* ZEDSTORE_UNDO_H */

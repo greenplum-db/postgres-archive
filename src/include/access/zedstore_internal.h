@@ -164,11 +164,19 @@ ZSBtreeInternalPageIsFull(Page page)
 /*
  * Leaf B-tree page layout
  *
- * Leaf pages are packed with ZSBtreeItems. There are two kinds of items:
+ * Leaf pages are packed with ZSBtreeItems. There are three kinds of items:
  *
  * 1. plain item, holds one tuple (or rather, one datum).
  *
  * 2. A "container item", which holds multiple plain items, compressed.
+ *
+ * 3. A "dead item". A dead item prevents the TID from being reused. It's
+ *    used during VACUUM, to mark items for which there are no index pointers
+ *    anymore. But it cannot be removed until the undo record has been
+ *    trimmed away, because if the TID was reused for a new record, vacuum
+ *    might remove the new tuple version instead. After t_undo_ptr becomes
+ *    older than "oldest undo ptr", the item can be removed and the TID
+ *    recycled.
  *
  * TODO: some of the fields are only used on one or the other. Squeeze harder..
  */
@@ -188,10 +196,11 @@ typedef struct ZSBtreeItem
 	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
 } ZSBtreeItem;
 
-#define		ZSBT_COMPRESSED		0x0001
-#define		ZSBT_DELETED		0x0002
-#define		ZSBT_UPDATED		0x0004
-#define     ZSBT_NULL           0x0008
+#define ZSBT_COMPRESSED		0x0001
+#define ZSBT_DELETED		0x0002
+#define ZSBT_UPDATED		0x0004
+#define ZSBT_NULL			0x0008
+#define ZSBT_DEAD			0x0010
 
 /*
  * Toast page layout.
@@ -356,6 +365,7 @@ extern TM_Result zsbt_update(Relation rel, AttrNumber attno, zstid otid,
 							 Datum newdatum, bool newisnull, TransactionId xid,
 							 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 							 bool wait, TM_FailureData *hufd, zstid *newtid_p);
+extern void zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr);
 extern void zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapshot, ZSBtreeScan *scan);
 extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid);
 extern void zsbt_end_scan(ZSBtreeScan *scan);

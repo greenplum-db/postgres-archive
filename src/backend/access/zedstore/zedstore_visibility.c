@@ -187,6 +187,10 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
 	if (scan->recent_oldest_undo.counter == 0)
 		scan->recent_oldest_undo = zsmeta_get_oldest_undo_ptr(scan->rel);
 
+	/* dead items are never considered visible. */
+	if ((item->t_flags & ZSBT_DEAD) != 0)
+		return false;
+
 	switch (scan->snapshot->snapshot_type)
 	{
 		case SNAPSHOT_MVCC:

@@ -1327,7 +1327,7 @@ zedstoream_vacuum_rel(Relation onerel, VacuumParams *params,
 	 * TODO: we should scan the UNDO log for dead TIDs, and remove them
 	 * from indexes.
 	 */
-	zsundo_trim(onerel, GetOldestXmin(onerel, PROCARRAY_FLAGS_VACUUM));
+	zsundo_vacuum(onerel, params, bstrategy, GetOldestXmin(onerel, PROCARRAY_FLAGS_VACUUM));
 }
 
 static const TableAmRoutine zedstoream_methods = {
