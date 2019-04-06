@@ -238,6 +238,7 @@ zsbt_create_item(Form_pg_attribute attr, zstid tid, Datum datum, bool isnull)
 	itemsz = offsetof(ZSUncompressedBtreeItem, t_payload) + datumsz;
 
 	newitem = palloc(itemsz);
+	memset(newitem, 0, offsetof(ZSUncompressedBtreeItem, t_payload)); /* zero padding */
 	newitem->t_tid = tid;
 	newitem->t_flags = 0;
 	newitem->t_size = itemsz;
@@ -749,6 +750,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	newitemsz = offsetof(ZSUncompressedBtreeItem, t_payload) + datumsz;
 
 	newitem = palloc(newitemsz);
+	memset(newitem, 0, offsetof(ZSUncompressedBtreeItem, t_payload)); /* zero padding */
 	newitem->t_tid = newtid;
 	newitem->t_flags = 0;
 	newitem->t_size = newitemsz;
