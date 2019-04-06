@@ -529,8 +529,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		this_tid = InvalidZSTid;
 		for (int i = 0; i < scan->num_proj_atts; i++)
 		{
-			Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[i];
 			int			natt = scan->proj_atts[i];
+			Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[natt];
 			Datum		datum;
 			bool        isnull;
 			zstid		tid;

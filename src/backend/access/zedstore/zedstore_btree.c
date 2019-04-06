@@ -1239,7 +1239,7 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 	BlockNumber	next;
 
 	if (!scan->active)
-		return false;
+		return NULL;
 
 	for (;;)
 	{
@@ -1321,7 +1321,7 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 			scan->active = false;
 			ReleaseBuffer(scan->lastbuf);
 			scan->lastbuf = InvalidBuffer;
-			return false;
+			return NULL;
 		}
 
 		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
