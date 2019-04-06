@@ -109,6 +109,7 @@ ZSTidIncrementForInsert(zstid tid)
 
 typedef struct ZSBtreePageOpaque
 {
+	AttrNumber	zs_attno;
 	BlockNumber zs_next;
 	zstid		zs_lokey;		/* inclusive */
 	zstid		zs_hikey;		/* exclusive */

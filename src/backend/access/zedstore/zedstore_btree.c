@@ -981,6 +981,7 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level,
 	page = BufferGetPage(buf);
 	PageInit(page, BLCKSZ, sizeof(ZSBtreePageOpaque));
 	opaque = ZSBtreePageGetOpaque(page);
+	opaque->zs_attno = attno;
 	opaque->zs_next = InvalidBlockNumber;
 	opaque->zs_lokey = MinZSTid;
 	opaque->zs_hikey = MaxPlusOneZSTid;
@@ -1143,6 +1144,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer 
 	newitemonleft = (newkey < splittid);
 
 	/* Set up the page headers */
+	rightopaque->zs_attno = attno;
 	rightopaque->zs_next = leftopaque->zs_next;
 	rightopaque->zs_lokey = splittid;
 	rightopaque->zs_hikey = leftopaque->zs_hikey;
@@ -1440,6 +1442,7 @@ typedef struct
 	int			total_compressed_items;
 	int			total_already_compressed_items;
 
+	AttrNumber	attno;
 	zstid		hikey;
 } zsbt_recompress_context;
 
@@ -1463,6 +1466,7 @@ zsbt_recompress_newpage(zsbt_recompress_context *cxt, zstid nexttid)
 	cxt->currpage = newpage;
 
 	newopaque = ZSBtreePageGetOpaque(newpage);
+	newopaque->zs_attno = cxt->attno;
 	newopaque->zs_next = InvalidBlockNumber; /* filled in later */
 	newopaque->zs_lokey = nexttid;
 	newopaque->zs_hikey = cxt->hikey;		/* overwritten later, if this is not last page */
@@ -1550,6 +1554,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	zs_compress_init(&cxt.compressor);
 	cxt.compressed_items = 0;
 	cxt.pages = NIL;
+	cxt.attno = attno;
 	cxt.hikey = oldopaque->zs_hikey;
 
 	cxt.total_items = 0;
