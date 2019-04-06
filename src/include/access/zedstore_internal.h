@@ -179,23 +179,40 @@ ZSBtreeInternalPageIsFull(Page page)
  *    older than "oldest undo ptr", the item can be removed and the TID
  *    recycled.
  *
- * TODO: some of the fields are only used on one or the other. Squeeze harder..
+ * TODO: squeeze harder: eliminate padding, use high bits of t_tid for flags or size
  */
 typedef struct ZSBtreeItem
 {
+	zstid		t_tid;
 	uint16		t_size;
 	uint16		t_flags;
+} ZSBtreeItem;
+
+typedef struct ZSUncompressedBtreeItem
+{
+	/* these fields must match ZSBtreeItem */
 	zstid		t_tid;
+	uint16		t_size;
+	uint16		t_flags;
 
-	/* these are only used on compressed items */
-	zstid		t_lasttid;	/* inclusive */
-	uint16		t_uncompressedsize;
-
-	/* these are only used on uncompressed items. */
 	ZSUndoRecPtr t_undo_ptr;
 
 	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
-} ZSBtreeItem;
+} ZSUncompressedBtreeItem;
+
+typedef struct ZSCompressedBtreeItem
+{
+	/* these fields must match ZSBtreeItem */
+	zstid		t_tid;
+	uint16		t_size;
+	uint16		t_flags;
+
+	uint16		t_uncompressedsize;
+	zstid		t_lasttid;	/* inclusive */
+
+	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
+} ZSCompressedBtreeItem;
+
 
 #define ZSBT_COMPRESSED		0x0001
 #define ZSBT_DELETED		0x0002
@@ -350,7 +367,7 @@ typedef struct ZSBtreeScan
 } ZSBtreeScan;
 
 /* prototypes for functions in zstore_btree.c */
-extern ZSBtreeItem *zsbt_create_item(Form_pg_attribute attr, zstid tid,
+extern ZSUncompressedBtreeItem *zsbt_create_item(Form_pg_attribute attr, zstid tid,
 									 Datum datum, bool isnull);
 extern zstid zsbt_insert(Relation rel, AttrNumber attno, Datum datum,
 						 bool isnull, TransactionId xmin, CommandId cmin,
@@ -382,8 +399,8 @@ extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buf
 extern ZSUndoRecPtr zsmeta_get_oldest_undo_ptr(Relation rel);
 
 /* prototypes for functions in zstore_visibility.c */
-extern TM_Result zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSBtreeItem *item);
-extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item);
+extern TM_Result zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item);
+extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item);
 
 /* prototypes for functions in zstore_toast.c */
 extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);

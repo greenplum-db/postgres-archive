@@ -382,8 +382,10 @@ pg_zs_btree_pages(PG_FUNCTION_ARGS)
 
 				if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 				{
+					ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) PageGetItem(page, iid);
+
 					ncompressed++;
-					uncompressedsz += item->t_uncompressedsize;
+					uncompressedsz += citem->t_uncompressedsize;
 				}
 				else
 					uncompressedsz += item->t_size;

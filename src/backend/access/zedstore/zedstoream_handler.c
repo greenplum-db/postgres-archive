@@ -196,7 +196,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		for (i = 0; i < ntuples; i++)
 		{
-			ZSBtreeItem *zitem;
+			ZSUncompressedBtreeItem *zitem;
 			Datum datum = slots[i]->tts_values[attno - 1];
 			bool isnull = slots[i]->tts_isnull[attno - 1];
 

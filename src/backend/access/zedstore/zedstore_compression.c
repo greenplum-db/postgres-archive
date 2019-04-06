@@ -79,7 +79,7 @@ zs_compress_begin(ZSCompressContext *context, int maxCompressedSize)
 {
 	context->buffer = repalloc(context->buffer, maxCompressedSize);
 
-	maxCompressedSize -= offsetof(ZSBtreeItem, t_payload);
+	maxCompressedSize -= offsetof(ZSCompressedBtreeItem, t_payload);
 	if (maxCompressedSize < 0)
 		maxCompressedSize = 0;
 
@@ -94,9 +94,9 @@ zs_compress_begin(ZSCompressContext *context, int maxCompressedSize)
  * If it wouldn't fit, return false.
  */
 bool
-zs_compress_add(ZSCompressContext *context, ZSBtreeItem *item)
+zs_compress_add(ZSCompressContext *context, ZSUncompressedBtreeItem *item)
 {
-	ZSBtreeItem *chunk = (ZSBtreeItem *) context->buffer;
+	ZSCompressedBtreeItem *chunk = (ZSCompressedBtreeItem *) context->buffer;
 
 	Assert ((item->t_flags & ZSBT_COMPRESSED) == 0);
 
@@ -113,10 +113,10 @@ zs_compress_add(ZSCompressContext *context, ZSBtreeItem *item)
 	return true;
 }
 
-ZSBtreeItem *
+ZSCompressedBtreeItem *
 zs_compress_finish(ZSCompressContext *context)
 {
-	ZSBtreeItem *chunk = (ZSBtreeItem *) context->buffer;
+	ZSCompressedBtreeItem *chunk = (ZSCompressedBtreeItem *) context->buffer;
 	int32		compressed_size;
 
 	compressed_size = LZ4_compress_default(context->uncompressedbuffer,
@@ -126,7 +126,7 @@ zs_compress_finish(ZSCompressContext *context)
 	if (compressed_size < 0)
 		elog(ERROR, "compression failed. what now?");
 
-	chunk->t_size = offsetof(ZSBtreeItem, t_payload) + compressed_size;
+	chunk->t_size = offsetof(ZSCompressedBtreeItem, t_payload) + compressed_size;
 	chunk->t_flags = ZSBT_COMPRESSED;
 	chunk->t_uncompressedsize = context->rawsize;
 
@@ -149,7 +149,7 @@ zs_decompress_init(ZSDecompressContext *context)
 }
 
 void
-zs_decompress_chunk(ZSDecompressContext *context, ZSBtreeItem *chunk)
+zs_decompress_chunk(ZSDecompressContext *context, ZSCompressedBtreeItem *chunk)
 {
 	Assert((chunk->t_flags & ZSBT_COMPRESSED) != 0);
 	Assert(chunk->t_uncompressedsize > 0);
@@ -164,26 +164,26 @@ zs_decompress_chunk(ZSDecompressContext *context, ZSBtreeItem *chunk)
 
 	if (LZ4_decompress_safe(chunk->t_payload,
 							context->buffer,
-							chunk->t_size - offsetof(ZSBtreeItem, t_payload),
+							chunk->t_size - offsetof(ZSCompressedBtreeItem, t_payload),
 							context->uncompressedsize) != context->uncompressedsize)
 		elog(ERROR, "could not decompress chunk");
 
 	context->bytesread = 0;
 }
 
-ZSBtreeItem *
+ZSUncompressedBtreeItem *
 zs_decompress_read_item(ZSDecompressContext *context)
 {
-	ZSBtreeItem *next;
+	ZSUncompressedBtreeItem *next;
 
 	if (context->bytesread == context->uncompressedsize)
 		return NULL;
-	next = (ZSBtreeItem *) (context->buffer + context->bytesread);
+	next = (ZSUncompressedBtreeItem *) (context->buffer + context->bytesread);
 	if (context->bytesread + next->t_size > context->uncompressedsize)
 		elog(ERROR, "invalid compressed item");
 	context->bytesread += next->t_size;
 
-	Assert(next->t_size >= sizeof(ZSBtreeItem));
+	Assert(next->t_size >= sizeof(ZSUncompressedBtreeItem));
 	Assert(next->t_tid != InvalidZSTid);
 
 	return next;

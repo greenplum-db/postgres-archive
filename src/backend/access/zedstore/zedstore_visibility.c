@@ -20,7 +20,7 @@
  * Like HeapTupleSatisfiesUpdate.
  */
 TM_Result
-zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSBtreeItem *item)
+zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -97,7 +97,7 @@ zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSBtreeItem *item)
  * Like HeapTupleSatisfiesAny
  */
 static bool
-zs_SatisfiesAny(ZSBtreeScan *scan, ZSBtreeItem *item)
+zs_SatisfiesAny(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 {
 	return true;
 }
@@ -106,7 +106,7 @@ zs_SatisfiesAny(ZSBtreeScan *scan, ZSBtreeItem *item)
  * Like HeapTupleSatisfiesMVCC
  */
 static bool
-zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item)
+zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -177,7 +177,7 @@ zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item)
  * Like HeapTupleSatisfiesVisibility
  */
 bool
-zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
+zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 {
 	/*
 	 * If we don't have a cached oldest-undo-ptr value yet, fetch it

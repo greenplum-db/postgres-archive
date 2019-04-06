@@ -38,7 +38,7 @@
 #include "utils/rel.h"
 
 /* prototypes for local functions */
-static zstid zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
+static zstid zsbt_insert_item(Relation rel, AttrNumber attno, ZSUncompressedBtreeItem *newitem,
 							  TransactionId xid, CommandId cid, ZSUndoRecPtr *undorecptr);
 static Buffer zsbt_descend(Relation rel, BlockNumber rootblk, zstid key);
 static Buffer zsbt_find_downlink(Relation rel, AttrNumber attno,
@@ -54,7 +54,7 @@ static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
 						 zstid key1, BlockNumber blk1,
 						 zstid key2, BlockNumber blk2,
 						 Buffer leftchildbuf);
-static ZSBtreeItem *zsbt_scan_next_internal(ZSBtreeScan *scan);
+static ZSUncompressedBtreeItem *zsbt_scan_next_internal(ZSBtreeScan *scan);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 							  ZSBtreeItem *olditem, ZSBtreeItem *replacementitem,
 							  ZSBtreeItem *newitem, List *newitems);
@@ -138,7 +138,7 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 {
 	TupleDesc	desc;
 	Form_pg_attribute attr;
-	ZSBtreeItem *item;
+	ZSUncompressedBtreeItem *item;
 
 	if (!scan->active)
 		return false;
@@ -206,7 +206,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 
 		/* COMPRESSED items cover a range of TIDs */
 		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
-			tid = hitup->t_lasttid;
+			tid = ((ZSCompressedBtreeItem *) hitup)->t_lasttid;
 		else
 			tid = hitup->t_tid;
 		tid = ZSTidIncrementForInsert(tid);
@@ -220,12 +220,12 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 	return tid;
 }
 
-ZSBtreeItem *
+ZSUncompressedBtreeItem *
 zsbt_create_item(Form_pg_attribute attr, zstid tid, Datum datum, bool isnull)
 {
 	Size		datumsz;
 	Size		itemsz;
-	ZSBtreeItem	*newitem;
+	ZSUncompressedBtreeItem *newitem;
 	char	   *dataptr;
 
 	/*
@@ -235,7 +235,7 @@ zsbt_create_item(Form_pg_attribute attr, zstid tid, Datum datum, bool isnull)
 		datumsz = 0;
 	else
 		datumsz = zs_datumGetSize(datum, attr->attbyval, attr->attlen);
-	itemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
+	itemsz = offsetof(ZSUncompressedBtreeItem, t_payload) + datumsz;
 
 	newitem = palloc(itemsz);
 	newitem->t_tid = tid;
@@ -247,7 +247,7 @@ zsbt_create_item(Form_pg_attribute attr, zstid tid, Datum datum, bool isnull)
 		newitem->t_flags |= ZSBT_NULL;
 	else
 	{
-		dataptr = ((char *) newitem) + offsetof(ZSBtreeItem, t_payload);
+		dataptr = ((char *) newitem) + offsetof(ZSUncompressedBtreeItem, t_payload);
 		if (attr->attbyval)
 			store_att_byval(dataptr, datum, attr->attlen);
 		else
@@ -273,7 +273,7 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 {
 	TupleDesc	desc = RelationGetDescr(rel);
 	Form_pg_attribute attr = &desc->attrs[attno - 1];
-	ZSBtreeItem	*newitem;
+	ZSUncompressedBtreeItem *newitem;
 
 	newitem = zsbt_create_item(attr, tid, datum, isnull);
 	tid = zsbt_insert_item(rel, attno, newitem, xid, cid, undorecptr);
@@ -284,7 +284,7 @@ zsbt_insert(Relation rel, AttrNumber attno, Datum datum, bool isnull,
 }
 
 static zstid
-zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
+zsbt_insert_item(Relation rel, AttrNumber attno, ZSUncompressedBtreeItem *newitem,
 				 TransactionId xid, CommandId cid, ZSUndoRecPtr *undorecptr)
 {
 	zstid		tid = newitem->t_tid;
@@ -324,7 +324,7 @@ zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
 		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
 
 		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
-			lasttid = hitup->t_lasttid;
+			lasttid = ((ZSCompressedBtreeItem *) hitup)->t_lasttid;
 		else
 			lasttid = hitup->t_tid;
 
@@ -385,7 +385,9 @@ zsbt_insert_item(Relation rel, AttrNumber attno, ZSBtreeItem *newitem,
 	else
 	{
 		/* recompress and possibly split the page */
-		zsbt_replace_item(rel, attno, buf, NULL, NULL, newitem, NIL);
+		zsbt_replace_item(rel, attno, buf,
+						  NULL, NULL,
+						  (ZSBtreeItem *) newitem, NIL);
 		/* zsbt_replace_item unlocked 'buf' */
 		ReleaseBuffer(buf);
 	}
@@ -410,7 +412,7 @@ zsbt_insert_multi_items(Relation rel, AttrNumber attno, List *newitems,
 						TransactionId xid, CommandId cid,
 						ZSUndoRecPtr *undorecptr, zstid *tid_return_list)
 {
-	ZSBtreeItem *firstItem = (ZSBtreeItem*) linitial(newitems);
+	ZSUncompressedBtreeItem *firstItem = (ZSUncompressedBtreeItem *) linitial(newitems);
 	zstid		tid = firstItem->t_tid;
 	zstid       firsttid;
 	BlockNumber	rootblk;
@@ -451,7 +453,7 @@ zsbt_insert_multi_items(Relation rel, AttrNumber attno, List *newitems,
 		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
 
 		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
-			lasttid = hitup->t_lasttid;
+			lasttid = ((ZSCompressedBtreeItem *) hitup)->t_lasttid;
 		else
 			lasttid = hitup->t_tid;
 
@@ -475,7 +477,7 @@ zsbt_insert_multi_items(Relation rel, AttrNumber attno, List *newitems,
 	/* assign tids for all the items */
 	foreach(lc, newitems)
 	{
-		ZSBtreeItem *newitem = (ZSBtreeItem *) lfirst(lc);
+		ZSUncompressedBtreeItem *newitem = (ZSUncompressedBtreeItem *) lfirst(lc);
 
 		/* fill in the remaining fields in the item */
 		newitem->t_undo_ptr = *undorecptr;
@@ -512,13 +514,13 @@ zsbt_insert_multi_items(Relation rel, AttrNumber attno, List *newitems,
 	 */
 	foreach(lc, newitems)
 	{
-		ZSBtreeItem *newitem = (ZSBtreeItem *) lfirst(lc);
+		ZSUncompressedBtreeItem *newitem = (ZSUncompressedBtreeItem *) lfirst(lc);
 		newitem->t_undo_ptr = *undorecptr;
 	}
 
 	while (list_length(newitems))
 	{
-		ZSBtreeItem *newitem = (ZSBtreeItem *) linitial(newitems);
+		ZSUncompressedBtreeItem *newitem = (ZSUncompressedBtreeItem *) linitial(newitems);
 
 		/*
 		 * If there's enough space on the page, insert it directly. Otherwise, try to
@@ -547,7 +549,9 @@ zsbt_insert_multi_items(Relation rel, AttrNumber attno, List *newitems,
 	if (list_length(newitems))
 	{
 		/* recompress and possibly split the page */
-		zsbt_replace_item(rel, attno, buf, NULL, NULL, NULL, newitems);
+		zsbt_replace_item(rel, attno, buf,
+						  NULL, NULL,
+						  NULL, newitems);
 		/* zsbt_replace_item unlocked 'buf' */
 		ReleaseBuffer(buf);
 	}
@@ -566,10 +570,10 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 			TM_FailureData *hufd, bool changingPart)
 {
 	ZSBtreeScan scan;
-	ZSBtreeItem *item;
+	ZSUncompressedBtreeItem *item;
 	TM_Result	result;
 	ZSUndoRecPtr undorecptr;
-	ZSBtreeItem *deleteditem;
+	ZSUncompressedBtreeItem *deleteditem;
 
 	zsbt_begin_scan(rel, attno, tid, snapshot, &scan);
 	scan.for_update = true;
@@ -612,7 +616,9 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	deleteditem->t_flags |= ZSBT_DELETED;
 	deleteditem->t_undo_ptr = undorecptr;
 
-	zsbt_replace_item(rel, attno, scan.lastbuf, item, deleteditem, NULL, NIL);
+	zsbt_replace_item(rel, attno, scan.lastbuf,
+					  (ZSBtreeItem *) item, (ZSBtreeItem *) deleteditem,
+					  NULL, NIL);
 	scan.lastbuf_is_locked = false;	/* zsbt_replace_item released */
 	zsbt_end_scan(&scan);
 
@@ -636,11 +642,11 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	TupleDesc	desc = RelationGetDescr(rel);
 	Form_pg_attribute attr = &desc->attrs[attno - 1];
 	ZSBtreeScan scan;
-	ZSBtreeItem *olditem;
+	ZSUncompressedBtreeItem *olditem;
 	TM_Result	result;
 	ZSUndoRecPtr undorecptr;
-	ZSBtreeItem *deleteditem;
-	ZSBtreeItem *newitem;
+	ZSUncompressedBtreeItem *deleteditem;
+	ZSUncompressedBtreeItem *newitem;
 	OffsetNumber maxoff;
 	Buffer		buf;
 	Page		page;
@@ -692,7 +698,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
 
 		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
-			newtid = hitup->t_lasttid;
+			newtid = ((ZSCompressedBtreeItem *) hitup)->t_lasttid;
 		else
 			newtid = hitup->t_tid;
 		newtid = ZSTidIncrementForInsert(newtid);
@@ -740,7 +746,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 		datumsz = 0;
 	else
 		datumsz = zs_datumGetSize(newdatum, attr->attbyval, attr->attlen);
-	newitemsz = offsetof(ZSBtreeItem, t_payload) + datumsz;
+	newitemsz = offsetof(ZSUncompressedBtreeItem, t_payload) + datumsz;
 
 	newitem = palloc(newitemsz);
 	newitem->t_tid = newtid;
@@ -752,14 +758,16 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 		newitem->t_flags |= ZSBT_NULL;
 	else
 	{
-		dataptr = ((char *) newitem) + offsetof(ZSBtreeItem, t_payload);
+		dataptr = ((char *) newitem) + offsetof(ZSUncompressedBtreeItem, t_payload);
 		if (attr->attbyval)
 			store_att_byval(dataptr, newdatum, attr->attlen);
 		else
 			memcpy(dataptr, DatumGetPointer(newdatum), datumsz);
 	}
 
-	zsbt_replace_item(rel, attno, scan.lastbuf, olditem, deleteditem, newitem, NIL);
+	zsbt_replace_item(rel, attno, scan.lastbuf,
+					  (ZSBtreeItem *) olditem, (ZSBtreeItem *) deleteditem,
+					  (ZSBtreeItem *) newitem, NIL);
 	scan.lastbuf_is_locked = false;	/* zsbt_recompress_replace released */
 	zsbt_end_scan(&scan);
 
@@ -779,8 +787,8 @@ void
 zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undoptr)
 {
 	ZSBtreeScan scan;
-	ZSBtreeItem *item;
-	ZSBtreeItem deaditem;
+	ZSUncompressedBtreeItem *item;
+	ZSUncompressedBtreeItem deaditem;
 
 	zsbt_begin_scan(rel, attno, tid, NULL, &scan);
 	scan.for_update = true;
@@ -799,14 +807,14 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 	if ((item->t_flags & ZSBT_DEAD) != 0)
 		return;
 
-	memset(&deaditem, 0, offsetof(ZSBtreeItem, t_payload));
-	deaditem.t_size = sizeof(ZSBtreeItem);
+	memset(&deaditem, 0, offsetof(ZSUncompressedBtreeItem, t_payload));
+	deaditem.t_size = sizeof(ZSUncompressedBtreeItem);
 	deaditem.t_flags = ZSBT_DEAD;
-	deaditem.t_lasttid = 0;
-	deaditem.t_uncompressedsize = 0;
 	deaditem.t_undo_ptr = undoptr;
 
-	zsbt_replace_item(rel, attno, scan.lastbuf, item, &deaditem, NULL, NIL);
+	zsbt_replace_item(rel, attno, scan.lastbuf,
+					  (ZSBtreeItem *) item, (ZSBtreeItem *) &deaditem,
+					  NULL, NIL);
 	scan.lastbuf_is_locked = false;	/* zsbt_replace_item released */
 	zsbt_end_scan(&scan);
 }
@@ -1216,7 +1224,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer 
  * palloc'd copy. If it points to a buffer, scan->lastbuf_is_locked is true,
  * otherwise false.
  */
-static ZSBtreeItem *
+static ZSUncompressedBtreeItem *
 zsbt_scan_next_internal(ZSBtreeScan *scan)
 {
 	Buffer		buf;
@@ -1233,7 +1241,7 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 	{
 		while (scan->has_decompressed)
 		{
-			ZSBtreeItem *item = zs_decompress_read_item(&scan->decompressor);
+			ZSUncompressedBtreeItem *item = zs_decompress_read_item(&scan->decompressor);
 
 			if (item == NULL)
 			{
@@ -1267,9 +1275,11 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 
 			if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 			{
-				if (item->t_lasttid >= scan->nexttid)
+				ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+
+				if (citem->t_lasttid >= scan->nexttid)
 				{
-					zs_decompress_chunk(&scan->decompressor, item);
+					zs_decompress_chunk(&scan->decompressor, citem);
 					scan->has_decompressed = true;
 					if (!scan->for_update)
 					{
@@ -1281,11 +1291,13 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 			}
 			else
 			{
-				if (item->t_tid >= scan->nexttid)
+				ZSUncompressedBtreeItem *uitem = (ZSUncompressedBtreeItem *) item;
+
+				if (uitem->t_tid >= scan->nexttid)
 				{
-					scan->nexttid = item->t_tid;
+					scan->nexttid = uitem->t_tid;
 					scan->nexttid = ZSTidIncrement(scan->nexttid);
-					return item;
+					return uitem;
 				}
 			}
 		}
@@ -1376,19 +1388,23 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 
 		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 		{
-			if ((olditem && item->t_tid <= olditem->t_tid && olditem->t_tid <= item->t_lasttid) ||
-				(newitem && item->t_tid <= newitem->t_tid && newitem->t_tid <= item->t_lasttid))
+			ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+
+			if ((olditem && citem->t_tid <= olditem->t_tid && olditem->t_tid <= citem->t_lasttid) ||
+				(newitem && citem->t_tid <= newitem->t_tid && newitem->t_tid <= citem->t_lasttid))
 			{
 				/* Found it, this compressed item covers the target or the new TID. */
 				/* We have to decompress it, and recompress */
 				ZSDecompressContext *decompressor = &decompressors[numdecompressors++];
+				ZSUncompressedBtreeItem *uitem;
+
 				Assert(numdecompressors <= 2);
 
 				zs_decompress_init(decompressor);
-				zs_decompress_chunk(decompressor, item);
+				zs_decompress_chunk(decompressor, citem);
 
-				while ((item = zs_decompress_read_item(decompressor)) != NULL)
-					PROCESS_ITEM(item);
+				while ((uitem = zs_decompress_read_item(decompressor)) != NULL)
+					PROCESS_ITEM(uitem);
 			}
 			else
 			{
@@ -1430,8 +1446,6 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
  */
 typedef struct
 {
-	ZSBtreeItem *newitem;
-
 	Page		currpage;
 	ZSCompressContext compressor;
 	int			compressed_items;
@@ -1491,7 +1505,7 @@ zsbt_recompress_add_to_page(zsbt_recompress_context *cxt, ZSBtreeItem *item)
 }
 
 static bool
-zsbt_recompress_add_to_compressor(zsbt_recompress_context *cxt, ZSBtreeItem *item)
+zsbt_recompress_add_to_compressor(zsbt_recompress_context *cxt, ZSUncompressedBtreeItem *item)
 {
 	bool		result;
 
@@ -1512,14 +1526,14 @@ zsbt_recompress_add_to_compressor(zsbt_recompress_context *cxt, ZSBtreeItem *ite
 static void
 zsbt_recompress_flush(zsbt_recompress_context *cxt)
 {
-	ZSBtreeItem *item;
+	ZSCompressedBtreeItem *citem;
 
 	if (cxt->compressed_items == 0)
 		return;
 
-	item = zs_compress_finish(&cxt->compressor);
+	citem = zs_compress_finish(&cxt->compressor);
 
-	zsbt_recompress_add_to_page(cxt, item);
+	zsbt_recompress_add_to_page(cxt, (ZSBtreeItem *) citem);
 	cxt->compressed_items = 0;
 }
 
@@ -1570,10 +1584,12 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 		/* We can leave out any old-enough DEAD items */
 		if ((item->t_flags & ZSBT_DEAD) != 0)
 		{
+			ZSUncompressedBtreeItem *uitem = (ZSUncompressedBtreeItem *) item;
+
 			if (recent_oldest_undo.counter == 0)
 				recent_oldest_undo = zsmeta_get_oldest_undo_ptr(rel);
 
-			if (item->t_undo_ptr.counter < recent_oldest_undo.counter)
+			if (uitem->t_undo_ptr.counter < recent_oldest_undo.counter)
 				continue;
 		}
 
@@ -1587,14 +1603,16 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 		else
 		{
 			/* try to add this item to the compressor */
-			if (!zsbt_recompress_add_to_compressor(&cxt, item))
+			ZSUncompressedBtreeItem *uitem = (ZSUncompressedBtreeItem *) item;
+
+			if (!zsbt_recompress_add_to_compressor(&cxt, uitem))
 			{
 				if (cxt.compressed_items > 0)
 				{
 					/* flush, and retry */
 					zsbt_recompress_flush(&cxt);
 
-					if (!zsbt_recompress_add_to_compressor(&cxt, item))
+					if (!zsbt_recompress_add_to_compressor(&cxt, uitem))
 					{
 						/* could not compress, even on its own. Store it uncompressed, then */
 						zsbt_recompress_add_to_page(&cxt, item);
@@ -1631,6 +1649,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	for (i = 0; i < list_length(cxt.pages) - 1; i++)
 	{
 		Buffer		newbuf = zs_getnewbuf(rel);
+
 		bufs = lappend_int(bufs, newbuf);
 	}
 
