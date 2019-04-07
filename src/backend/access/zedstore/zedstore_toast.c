@@ -2,8 +2,8 @@
  * zedstore_toast.c
  *		Routines for Toasting oversized tuples in Zedstore
  *
- *
- * Copyright (c) 2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
  *	  src/backend/access/zedstore/zedstore_toast.c

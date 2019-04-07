@@ -3,7 +3,7 @@
  * zedstoream_handler.c
  *	  ZedStore table access method code
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -106,10 +106,6 @@ zedstoream_fetch_row_version(Relation relation,
 	return false;
 }
 
-/*
- * Insert a heap tuple from a slot, which may contain an OID and speculative
- * insertion token.
- */
 static void
 zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 				  int options, BulkInsertState bistate)
@@ -813,7 +809,7 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 		/*
 		 * Serial index build.
 		 *
-		 * Must begin our own heap scan in this case.  We may also need to
+		 * Must begin our own zedstore scan in this case.  We may also need to
 		 * register a snapshot whose lifetime is under our direct control.
 		 */
 		if (!TransactionIdIsValid(OldestXmin))
@@ -867,7 +863,7 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 		 * Parallel index build.
 		 *
 		 * Parallel case never registers/unregisters own snapshot.  Snapshot
-		 * is taken from parallel heap scan, and is SnapshotAny or an MVCC
+		 * is taken from parallel zedstore scan, and is SnapshotAny or an MVCC
 		 * snapshot, based on same criteria as serial case.
 		 */
 		Assert(!IsBootstrapProcessingMode());
@@ -965,7 +961,7 @@ static void
 zedstoream_finish_bulk_insert(Relation relation, int options)
 {
 	/*
-	 * If we skipped writing WAL, then we need to sync the heap (but not
+	 * If we skipped writing WAL, then we need to sync the zedstore (but not
 	 * indexes since those use WAL anyway / don't go through tableam)
 	 */
 	if (options & HEAP_INSERT_SKIP_WAL)
@@ -1405,8 +1401,6 @@ zedstore_tableam_handler(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_POINTER(&zedstoream_methods);
 }
-
-
 
 
 /*

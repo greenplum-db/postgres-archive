@@ -2,10 +2,11 @@
  * zedstore_compression.c
  *		Routines for compression
  *
- * The current implementation uses Postgre's pglz_compress's. It's not ideal, but gets
- * us started..
+ * There are two implementations at the moment: LZ4, and the Postgres
+ * pg_lzcompress(). LZ4 support requires that the server was compiled
+ * with --with-lz4.
  *
- * The compressor works on ZSBtreeItems.
+ * The compressor works on ZSUncompressedBtreeItems.
  *
  * Compression interface
  * ---------------------
@@ -18,14 +19,14 @@
  * Feed them to the compressor one by one with zs_compress_add(), until it
  * returns false.
  *
- * Finally, call zs_compress_finish(). It returns a compressed ZSBtreeItem,
+ * Finally, call zs_compress_finish(). It returns a ZSCompressedBtreeItem,
  * which contains all the plain items that were added (except for the last one
  * for which zs_compress_add() returned false)
  *
  * Decompression interface
  * -----------------------
  *
- * zs_decompress_chunk() takes a compressed ZSBtreeItem as argument. It
+ * zs_decompress_chunk() takes a ZSCompressedBtreeItem as argument. It
  * initializes a "context" with the given chunk.
  *
  * Call zs_decompress_read_item() to return the uncompressed items one by one.
@@ -37,7 +38,8 @@
  * the *compressed* size available. I.e it assumes that the compressed size is never
  * larger than uncompressed size.
  *
- * Copyright (c) 2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
  *	  src/backend/access/zedstore/zedstore_compression.c

@@ -4,9 +4,9 @@
  *	  Debugging functions, for viewing ZedStore page contents
  *
  * These should probably be moved to contrib/, but it's handy to have them
- * here during development..
+ * here during development.
  *
- * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -170,18 +170,10 @@ pg_zs_undo_pages(PG_FUNCTION_ARGS)
 
 	firstblk = metaopaque->zs_undo_head;
 
-	/*
-	 * If we assume that only one process can call TRIM at a time, then we
-	 * don't need to hold the metapage locked. Alternatively, if multiple
-	 * concurrent trims is possible, we could check after reading the head
-	 * page, that it is the page we expect, and re-read the metapage if it's
-	 * not.
-	 */
 	UnlockReleaseBuffer(metabuf);
 
 	/*
-	 * Loop through UNDO records, starting from the oldest page, until we
-	 * hit a record that we cannot remove.
+	 * Loop through UNDO records, starting from the oldest page.
 	 */
 	blkno = firstblk;
 	while (blkno != InvalidBlockNumber)
