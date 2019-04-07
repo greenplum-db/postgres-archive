@@ -372,7 +372,7 @@ zsbt_insert_item(Relation rel, AttrNumber attno, ZSUncompressedBtreeItem *newite
 	 * an existing compressed item.
 	 */
 	if (PageGetFreeSpace(page) >= MAXALIGN(newitem->t_size) &&
-		(maxoff > FirstOffsetNumber || tid > lasttid))
+		(maxoff == InvalidOffsetNumber || tid > lasttid))
 	{
 		OffsetNumber off;
 
