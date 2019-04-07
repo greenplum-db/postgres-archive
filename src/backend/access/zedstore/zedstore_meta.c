@@ -9,7 +9,8 @@
  * - if there are too many attributes, so that the the root block directory
  *   doesn't fit in the metapage, you get segfaults or other nastiness
  *
- * Copyright (c) 2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
  *	  src/backend/access/zedstore/zedstore_meta.c
