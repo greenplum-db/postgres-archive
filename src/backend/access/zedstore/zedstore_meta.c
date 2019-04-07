@@ -27,8 +27,10 @@ static void zs_initmetapage(Relation rel, int nattributes);
 /*
  * Allocate a new page.
  *
- * Currently, this just extends the relation, but we should have a free space map
- * of some kind.
+ * The page is exclusive-locked, but not initialized.
+ *
+ * Currently, this just extends the relation, but we should have a free space
+ * map of some kind.
  */
 Buffer
 zs_getnewbuf(Relation rel)
@@ -180,7 +182,8 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
  * Caller is responsible for WAL-logging this.
  */
 void
-zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk)
+zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno,
+								 Buffer metabuf, BlockNumber rootblk)
 {
 	ZSMetaPage *metapg;
 
@@ -194,6 +197,12 @@ zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf,
 	MarkBufferDirty(metabuf);
 }
 
+/*
+ * Return the current "Oldest undo pointer". The effects of any actions with
+ * undo pointer older than this is known to be visible to everyone. (i.e.
+ * an inserted tuple is known to be visible, and a deleted tuple is known to
+ * be invisible.)
+ */
 ZSUndoRecPtr
 zsmeta_get_oldest_undo_ptr(Relation rel)
 {

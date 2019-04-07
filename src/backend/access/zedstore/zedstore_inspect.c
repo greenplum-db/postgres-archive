@@ -6,6 +6,30 @@
  * These should probably be moved to contrib/, but it's handy to have them
  * here during development.
  *
+ * Example queries
+ * ---------------
+ *
+ * How many pages of each type a table has?
+ *
+ * select count(*), pg_zs_page_type('t_zedstore', g)
+ *   from generate_series(0, pg_table_size('t_zedstore') / 8192 - 1) g group by 2;
+ *
+ *  count | pg_zs_page_type 
+ * -------+-----------------
+ *      1 | META
+ *   3701 | BTREE
+ *      6 | UNDO
+ * (3 rows)
+ *
+ * Compression ratio of B-tree leaf pages (other pages are not compressed):
+ *
+ * select sum(uncompressedsz::numeric) / sum(totalsz) as compratio
+ *   from pg_zs_btree_pages('t_zedstore') ;
+ *      compratio      
+ * --------------------
+ *  3.6623829559208134
+ * (1 row)
+ *
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
