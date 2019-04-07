@@ -135,6 +135,7 @@ test: sysviews
 test: tsrf
 test: tidscan
 test: stats_ext
+test: zedstore
 test: rules
 test: psql_crosstab
 test: select_parallel
