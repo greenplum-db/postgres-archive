@@ -31,7 +31,6 @@
 #include "catalog/storage_xlog.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
-#include "executor/nodeSeqscan.h"
 #include "optimizer/plancat.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
