@@ -6,8 +6,9 @@
  * column.
  *
  * TODO:
- * - if there are too many attributes, so that the the root block directory
- *   doesn't fit in the metapage, you get segfaults or other nastiness
+ * - support ALTER TABLE ADD COLUMN.
+ * - extend the root block dir to an overflow page if there are too many
+ *   attributes to fit on one page
  *
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -23,7 +24,7 @@
 #include "storage/lmgr.h"
 #include "utils/rel.h"
 
-static void zs_initmetapage(Relation rel, int nattributes);
+static void zs_initmetapage(Relation rel);
 
 /*
  * Allocate a new page.
@@ -73,12 +74,15 @@ zs_getnewbuf(Relation rel)
  * Initialize the metapage for an empty relation.
  */
 static void
-zs_initmetapage(Relation rel, int nattributes)
+zs_initmetapage(Relation rel)
 {
+	int			natts = RelationGetNumberOfAttributes(rel);
 	Buffer		buf;
 	Page		page;
 	ZSMetaPage *metapg;
 	ZSMetaPageOpaque *opaque;
+	Size		freespace;
+	int			maxatts;
 
 	buf = ReadBuffer(rel, P_NEW);
 	if (BufferGetBlockNumber(buf) != ZS_META_BLK)
@@ -87,10 +91,25 @@ zs_initmetapage(Relation rel, int nattributes)
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
 	PageInit(page, BLCKSZ, sizeof(ZSMetaPageOpaque));
+
+	/* Initialize the attribute root dir */
+	freespace = PageGetExactFreeSpace(page);
+	maxatts = freespace / sizeof(BlockNumber);
+	if (natts > maxatts)
+	{
+		/*
+		 * The root block directory must fit on the metapage.
+		 *
+		 * TODO: We could extend this by overflowing to another page.
+		 */
+		elog(ERROR, "too many attributes for zedstore");
+	}
+
 	metapg = (ZSMetaPage *) PageGetContents(page);
-	metapg->nattributes = nattributes;
-	for (int i = 0; i < nattributes; i++)
+	metapg->nattributes = natts;
+	for (int i = 0; i < natts; i++)
 		metapg->roots[i] = InvalidBlockNumber;
+	((PageHeader) page)->pd_lower += natts * sizeof(BlockNumber);
 
 	opaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(page);
 	opaque->zs_flags = 0;
@@ -127,7 +146,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
 		if (!forupdate)
 			return InvalidBlockNumber;
 
-		zs_initmetapage(rel, RelationGetNumberOfAttributes(rel));
+		zs_initmetapage(rel);
 	}
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
