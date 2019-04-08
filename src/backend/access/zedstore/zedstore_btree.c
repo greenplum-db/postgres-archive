@@ -26,7 +26,6 @@
  */
 #include "postgres.h"
 
-#include "access/htup_details.h"
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "access/zedstore_compression.h"
@@ -49,7 +48,8 @@ static void zsbt_recompress_replace(Relation rel, AttrNumber attno,
 									Buffer oldbuf, List *items);
 static void zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
 								 zstid rightlokey, BlockNumber rightblkno);
-static void zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer childbuf,
+static void zsbt_split_internal_page(Relation rel, AttrNumber attno,
+									 Buffer leftbuf, Buffer childbuf,
 									 OffsetNumber newoff, zstid newkey, BlockNumber childblk);
 static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
 						 zstid key1, BlockNumber blk1,
@@ -425,7 +425,7 @@ zsbt_insert_multi_items(Relation rel, AttrNumber attno, List *newitems,
 	zstid		lasttid;
 	zstid		insert_target_key;
 	ZSUndoRec_Insert undorec;
-	int i;
+	int			i;
 	ListCell   *lc;
 
 	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
@@ -537,7 +537,9 @@ zsbt_insert_multi_items(Relation rel, AttrNumber attno, List *newitems,
 			(maxoff > FirstOffsetNumber || tid > lasttid))
 		{
 			OffsetNumber off;
-			off = PageAddItemExtended(page, (Item) newitem, newitem->t_size, maxoff + 1, PAI_OVERWRITE);
+
+			off = PageAddItemExtended(page, (Item) newitem, newitem->t_size,
+									  maxoff + 1, PAI_OVERWRITE);
 			if (off == InvalidOffsetNumber)
 				elog(ERROR, "didn't fit, after all?");
 
@@ -687,8 +689,8 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	}
 
 	/*
-	 * Look at the last item, for its tid. We will use that + 1, as the TID of
-	 * the new item.
+	 * Look at the last item on the page, for its tid. We will use that + 1,
+	 * as the TID of the new item.
 	 */
 	buf = scan.lastbuf;
 	page = BufferGetPage(buf);
@@ -914,7 +916,7 @@ zsbt_find_downlink(Relation rel, AttrNumber attno,
 		return InvalidBuffer;
 
 	/* XXX: this is mostly the same as zsbt_descend, but we stop at an internal
-	 * page instead of descending all the way down to root */
+	 * page instead of descending all the way down to leaf */
 	next = rootblk;
 	for (;;)
 	{
@@ -1663,7 +1665,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 		/* TODO: WAL-log */
 		if (lnext(lc2))
 		{
-			Buffer nextbuf = (Buffer) lfirst_int(lnext(lc2));
+			Buffer		nextbuf = (Buffer) lfirst_int(lnext(lc2));
 
 			opaque->zs_next = BufferGetBlockNumber(nextbuf);
 			opaque->zs_flags |= ZS_FOLLOW_RIGHT;
@@ -1683,8 +1685,8 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	/* If we had to split, insert downlinks for the new pages. */
 	while (list_length(bufs) > 1)
 	{
-		Buffer leftbuf = (Buffer) linitial_int(bufs);
-		Buffer rightbuf = (Buffer) lsecond_int(bufs);
+		Buffer		leftbuf = (Buffer) linitial_int(bufs);
+		Buffer		rightbuf = (Buffer) lsecond_int(bufs);
 
 		zsbt_insert_downlink(rel, attno, leftbuf,
 							 ZSBtreePageGetOpaque(BufferGetPage(leftbuf))->zs_hikey,

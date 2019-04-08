@@ -26,7 +26,6 @@
 #include "access/zedstore_undo.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
-#include "catalog/pg_am_d.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
 #include "commands/vacuum.h"
@@ -117,7 +116,7 @@ zedstoream_get_latest_tid(Relation relation,
 
 static void
 zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
-				  int options, BulkInsertState bistate)
+				  int options, struct BulkInsertStateData *bistate)
 {
 	AttrNumber	attno;
 	Datum	   *d;
@@ -179,13 +178,13 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 						CommandId cid, int options, BulkInsertState bistate)
 {
 	AttrNumber	attno;
-	zstid		*tid;
+	zstid	   *tid;
 	ZSUndoRecPtr undorecptr;
-	int i;
-	bool slotgetandset = true;
+	int			i;
+	bool		slotgetandset = true;
 	TransactionId xid = GetCurrentTransactionId();
-	int *tupletoasted;
-	Datum *toastdatum;
+	int		   *tupletoasted;
+	Datum	   *toastdatum;
 
 	tid = palloc(ntuples * sizeof(zstid));
 	tupletoasted = palloc(ntuples * sizeof(int));
@@ -196,14 +195,14 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
 		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
-		int ntupletoasted = 0;
-		List *zitems = NIL;
+		int			ntupletoasted = 0;
+		List	   *zitems = NIL;
 
 		for (i = 0; i < ntuples; i++)
 		{
 			ZSUncompressedBtreeItem *zitem;
-			Datum datum = slots[i]->tts_values[attno - 1];
-			bool isnull = slots[i]->tts_isnull[attno - 1];
+			Datum		datum = slots[i]->tts_values[attno - 1];
+			bool		isnull = slots[i]->tts_isnull[attno - 1];
 
 			if (slotgetandset)
 			{
@@ -303,8 +302,8 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	zstid		otid = ZSTidFromItemPointer(*otid_p);
 	TransactionId xid = GetCurrentTransactionId();
 	AttrNumber	attno;
-	Datum		*d;
-	bool		*isnulls;
+	Datum	   *d;
+	bool	   *isnulls;
 	TM_Result	result;
 	zstid		newtid;
 
@@ -376,7 +375,6 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 											bool is_samplescan,
 											bool temp_snap)
 {
-	int i;
 	ZedStoreDesc scan;
 
 	/*
@@ -419,7 +417,7 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	 * convert booleans array into an array of the attribute numbers of the
 	 * required columns.
 	 */
-	for (i = 0; i < relation->rd_att->natts; i++)
+	for (int i = 0; i < relation->rd_att->natts; i++)
 	{
 		/* project_columns empty also conveys need all the columns */
 		if (project_columns == NULL || project_columns[i])
@@ -436,7 +434,7 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 
 		scan->bmscan_datums = palloc(scan->num_proj_atts * sizeof(Datum *));
 		scan->bmscan_isnulls = palloc(scan->num_proj_atts * sizeof(bool *));
-		for (i = 0; i < scan->num_proj_atts; i++)
+		for (int i = 0; i < scan->num_proj_atts; i++)
 		{
 			scan->bmscan_datums[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(Datum));
 			scan->bmscan_isnulls[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(bool));
@@ -465,15 +463,13 @@ zedstoream_beginscan(Relation relation, Snapshot snapshot,
 static void
 zedstoream_endscan(TableScanDesc sscan)
 {
-	int i;
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+
 	if (scan->proj_atts)
 		pfree(scan->proj_atts);
 
-	for (i = 0; i < sscan->rs_rd->rd_att->natts; i++)
-	{
+	for (int i = 0; i < sscan->rs_rd->rd_att->natts; i++)
 		zsbt_end_scan(&scan->btree_scans[i]);
-	}
 
 	if (scan->rs_scan.rs_temp_snap)
 		UnregisterSnapshot(scan->rs_scan.rs_snapshot);
@@ -629,7 +625,7 @@ zedstoream_begin_index_fetch(Relation rel)
 	zscan->proj_atts = palloc(rel->rd_att->natts * sizeof(int));
 	zscan->num_proj_atts = 0;
 
-	return (IndexFetchTableData*) zscan;
+	return (IndexFetchTableData *) zscan;
 }
 
 static void
@@ -637,7 +633,7 @@ zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
 									   bool *project_column)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch)scan;
-	Relation rel = zscan->idx_fetch_data.rel;
+	Relation	rel = zscan->idx_fetch_data.rel;
 
 	zscan->num_proj_atts = 0;
 
@@ -663,7 +659,8 @@ zedstoream_reset_index_fetch(IndexFetchTableData *scan)
 static void
 zedstoream_end_index_fetch(IndexFetchTableData *scan)
 {
-	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch)scan;
+	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
+
 	pfree(zscan->proj_atts);
 	pfree(zscan);
 }
@@ -1355,11 +1352,8 @@ static void
 zedstoream_vacuum_rel(Relation onerel, VacuumParams *params,
 					  BufferAccessStrategy bstrategy)
 {
-	/*
-	 * TODO: we should scan the UNDO log for dead TIDs, and remove them
-	 * from indexes.
-	 */
-	zsundo_vacuum(onerel, params, bstrategy, GetOldestXmin(onerel, PROCARRAY_FLAGS_VACUUM));
+	zsundo_vacuum(onerel, params, bstrategy,
+				  GetOldestXmin(onerel, PROCARRAY_FLAGS_VACUUM));
 }
 
 static const TableAmRoutine zedstoream_methods = {
