@@ -664,9 +664,6 @@ zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumb
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
 
-	//elog(NOTICE, "advancing undo pointer from "UINT64_FORMAT" to "UINT64_FORMAT", blk %u",
-	//	 metaopaque->zs_undo_oldestptr.counter, oldest_undorecptr.counter, lastblk);
-
 	metaopaque->zs_undo_oldestptr = oldest_undorecptr;
 	if (oldest_undopage == InvalidBlockNumber)
 	{

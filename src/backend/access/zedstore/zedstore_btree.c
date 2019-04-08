@@ -1021,8 +1021,6 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level,
 	/* Before exiting, update the metapage */
 	zsmeta_update_root_for_attribute(rel, attno, metabuf, BufferGetBlockNumber(buf));
 
-	//elog(NOTICE, "new root %u (%u and %u)", BufferGetBlockNumber(buf), blk1, blk2);
-
 	UnlockReleaseBuffer(leftchildbuf);
 	UnlockReleaseBuffer(buf);
 	UnlockReleaseBuffer(metabuf);
@@ -1204,8 +1202,6 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer 
 	Assert(leftnitems + rightnitems == orignitems + 1);
 
 	PageRestoreTempPage(leftpage, origpage);
-
-	//elog(NOTICE, "split internal %u to %u", BufferGetBlockNumber(leftbuf), rightblkno);
 
 	/* TODO: WAL-logging */
 	MarkBufferDirty(leftbuf);
@@ -1635,12 +1631,6 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	zsbt_recompress_flush(&cxt);
 
 	zs_compress_free(&cxt.compressor);
-
-	//elog(NOTICE, "recompressing att %d: %d already, %d compressed, %d items on %d pages, firsttid %ld",
-	//	 attno,
-	//	 cxt.total_already_compressed_items, cxt.total_compressed_items, cxt.total_items,
-	//	 list_length(cxt.pages),
-	//	 ((ZSBtreeItem *) linitial(items))->t_tid);
 
 	/*
 	 * Ok, we now have a list of pages, to replace the original page, as private
