@@ -2545,6 +2545,7 @@ static const TableAmRoutine heapam_methods = {
 	.scan_sample_next_tuple = heapam_scan_sample_next_tuple
 };
 
+
 const TableAmRoutine *
 GetHeapamTableAmRoutine(void)
 {
