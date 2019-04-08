@@ -933,7 +933,7 @@ CREATE VIEW pg_stat_progress_cluster AS
                       WHEN 6 THEN 'rebuilding index'
                       WHEN 7 THEN 'performing final cleanup'
                       END AS phase,
-        S.param3 AS cluster_index_relid,
+        CAST(S.param3 AS oid) AS cluster_index_relid,
         S.param4 AS heap_tuples_scanned,
         S.param5 AS heap_tuples_written,
         S.param6 AS heap_blks_total,
@@ -946,16 +946,19 @@ CREATE VIEW pg_stat_progress_create_index AS
 	SELECT
 		S.pid AS pid, S.datid AS datid, D.datname AS datname,
 		S.relid AS relid,
+		CAST(S.param7 AS oid) AS index_relid,
 		CASE S.param10 WHEN 0 THEN 'initializing'
-					  WHEN 1 THEN 'waiting for old snapshots'
+					  WHEN 1 THEN 'waiting for writers before build'
 					  WHEN 2 THEN 'building index' ||
 						COALESCE((': ' || pg_indexam_progress_phasename(S.param9::oid, S.param11)),
 							'')
-					  WHEN 3 THEN 'waiting for writer snapshots'
+					  WHEN 3 THEN 'waiting for writers before validation'
 					  WHEN 4 THEN 'index validation: scanning index'
 					  WHEN 5 THEN 'index validation: sorting tuples'
 					  WHEN 6 THEN 'index validation: scanning table'
-					  WHEN 7 THEN 'waiting for reader snapshots'
+					  WHEN 7 THEN 'waiting for old snapshots'
+					  WHEN 8 THEN 'waiting for readers before marking dead'
+					  WHEN 9 THEN 'waiting for readers before dropping'
 					  END as phase,
 		S.param4 AS lockers_total,
 		S.param5 AS lockers_done,
