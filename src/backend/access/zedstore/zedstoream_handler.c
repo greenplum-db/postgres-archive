@@ -106,6 +106,16 @@ zedstoream_fetch_row_version(Relation relation,
 }
 
 static void
+zedstoream_get_latest_tid(Relation relation,
+							 Snapshot snapshot,
+							 ItemPointer tid)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("function %s not implemented yet", __func__)));
+}
+
+static void
 zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 				  int options, BulkInsertState bistate)
 {
@@ -590,11 +600,23 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 }
 
 static bool
-zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot, Snapshot snapshot)
+zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
+									Snapshot snapshot)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("function %s not implemented yet", __func__)));
+}
+
+static TransactionId
+zedstoream_compute_xid_horizon_for_tuples(Relation rel,
+										  ItemPointerData *items,
+										  int nitems)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("function %s not implemented yet", __func__)));
+
 }
 
 static IndexFetchTableData *
@@ -1074,9 +1096,9 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
  * TODO fix to tune it based on zedstore storage.
  */
 static void
-zedstoream_estimate_rel_size(Relation rel, int32 *attr_widths,
-							 BlockNumber *pages, double *tuples,
-							 double *allvisfrac)
+zedstoream_relation_estimate_size(Relation rel, int32 *attr_widths,
+								  BlockNumber *pages, double *tuples,
+								  double *allvisfrac)
 {
 	BlockNumber curpages;
 	BlockNumber relpages;
@@ -1372,9 +1394,9 @@ static const TableAmRoutine zedstoream_methods = {
 	.finish_bulk_insert = zedstoream_finish_bulk_insert,
 
 	.tuple_fetch_row_version = zedstoream_fetch_row_version,
-	.tuple_get_latest_tid = heap_get_latest_tid,
+	.tuple_get_latest_tid = zedstoream_get_latest_tid,
 	.tuple_satisfies_snapshot = zedstoream_tuple_satisfies_snapshot,
-	.compute_xid_horizon_for_tuples = heap_compute_xid_horizon_for_tuples,
+	.compute_xid_horizon_for_tuples = zedstoream_compute_xid_horizon_for_tuples,
 
 	.relation_set_new_filenode = zedstoream_relation_set_new_filenode,
 	.relation_nontransactional_truncate = zedstoream_relation_nontransactional_truncate,
@@ -1387,7 +1409,7 @@ static const TableAmRoutine zedstoream_methods = {
 	.index_build_range_scan = zedstoream_index_build_range_scan,
 	.index_validate_scan = zedstoream_index_validate_scan,
 
-	.relation_estimate_size = zedstoream_estimate_rel_size,
+	.relation_estimate_size = zedstoream_relation_estimate_size,
 
 	.scan_bitmap_next_block = zedstoream_scan_bitmap_next_block,
 	.scan_bitmap_next_tuple = zedstoream_scan_bitmap_next_tuple,

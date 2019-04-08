@@ -396,7 +396,6 @@ extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
 extern Buffer zs_getnewbuf(Relation rel);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
-extern ZSUndoRecPtr zsmeta_get_oldest_undo_ptr(Relation rel);
 
 /* prototypes for functions in zstore_visibility.c */
 extern TM_Result zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item);

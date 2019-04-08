@@ -197,34 +197,3 @@ zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno,
 
 	MarkBufferDirty(metabuf);
 }
-
-/*
- * Return the current "Oldest undo pointer". The effects of any actions with
- * undo pointer older than this is known to be visible to everyone. (i.e.
- * an inserted tuple is known to be visible, and a deleted tuple is known to
- * be invisible.)
- */
-ZSUndoRecPtr
-zsmeta_get_oldest_undo_ptr(Relation rel)
-{
-	Buffer		metabuf;
-	ZSMetaPageOpaque *opaque;
-	ZSUndoRecPtr result;
-
-	if (RelationGetNumberOfBlocks(rel) == 0)
-	{
-		memset(&result, 0, sizeof(ZSUndoRecPtr));
-	}
-	else
-	{
-		metabuf = ReadBuffer(rel, ZS_META_BLK);
-		LockBuffer(metabuf, BUFFER_LOCK_SHARE);
-		opaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(BufferGetPage(metabuf));
-		Assert(opaque->zs_page_id == ZS_META_PAGE_ID);
-
-		result = opaque->zs_undo_oldestptr;
-
-		UnlockReleaseBuffer(metabuf);
-	}
-	return result;
-}

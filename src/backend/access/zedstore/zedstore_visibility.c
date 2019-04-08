@@ -138,7 +138,9 @@ zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 		else if (XidInMVCCSnapshot(undorec->xid, snapshot))
 			return false;
 		else if (TransactionIdDidCommit(undorec->xid))
+		{
 			return true;
+		}
 		else
 		{
 			/* it must have aborted or crashed */
@@ -185,7 +187,7 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 	 * this will probably be just a global variable, like RecentGlobalXmin.)
 	 */
 	if (scan->recent_oldest_undo.counter == 0)
-		scan->recent_oldest_undo = zsmeta_get_oldest_undo_ptr(scan->rel);
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(scan->rel);
 
 	/* dead items are never considered visible. */
 	if ((item->t_flags & ZSBT_DEAD) != 0)

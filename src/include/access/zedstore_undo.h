@@ -116,6 +116,7 @@ IsZSUndoRecPtrValid(ZSUndoRecPtr *uptr)
 extern ZSUndoRecPtr zsundo_insert(Relation rel, ZSUndoRec *rec);
 extern ZSUndoRec *zsundo_fetch(Relation rel, ZSUndoRecPtr undorecptr);
 extern void zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy,
-						  TransactionId OldestXmin);
+			  TransactionId OldestXmin);
+extern ZSUndoRecPtr zsundo_get_oldest_undo_ptr(Relation rel);
 
 #endif							/* ZEDSTORE_UNDO_H */

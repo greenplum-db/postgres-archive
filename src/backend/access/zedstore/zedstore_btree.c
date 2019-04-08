@@ -1587,7 +1587,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 			ZSUncompressedBtreeItem *uitem = (ZSUncompressedBtreeItem *) item;
 
 			if (recent_oldest_undo.counter == 0)
-				recent_oldest_undo = zsmeta_get_oldest_undo_ptr(rel);
+				recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 
 			if (uitem->t_undo_ptr.counter < recent_oldest_undo.counter)
 				continue;
