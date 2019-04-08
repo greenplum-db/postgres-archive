@@ -610,6 +610,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = tid;
+		undorec.prevundorec = item->t_undo_ptr;
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
@@ -732,6 +733,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = newtid;
+		undorec.prevundorec = olditem->t_undo_ptr;
 		undorec.otid = otid;
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);

@@ -43,7 +43,7 @@ typedef struct
 {
 	int16		size;			/* size of this record, including header */
 	uint8		type;			/* ZSUNDO_TYPE_* */
-	AttrNumber      attno;
+	AttrNumber	attno;
 	ZSUndoRecPtr undorecptr;
 	TransactionId xid;
 	CommandId	cid;
@@ -70,6 +70,13 @@ typedef struct
 	ZSUndoRec	rec;
 
 	/*
+	 * UNDO-record of the inserter. This is needed if a row is inserted, and
+	 * deleted, and there are some snapshots active don't don't consider even
+	 * the insertion as visible.
+	 */
+	ZSUndoRecPtr prevundorec;
+
+	/*
 	 * TODO: It might be good to move the deleted tuple to the undo-log, so
 	 * that the space can immediately be reused. But currently, we don't do
 	 * that. (or even better, move the old tuple to the undo-log lazily, if
@@ -82,12 +89,16 @@ typedef struct
 {
 	ZSUndoRec	rec;
 
+	/* Like in ZSUndoRec_Delete. */
+	ZSUndoRecPtr prevundorec;
+
 	/* old version of the datum */
 	/* TODO: currently, we only do "cold" updates, so the old tuple is
 	 * left in the old place. Once we start supporting in-place updates,
 	 * the old tuple should be stored here.
 	 */
 	zstid		otid;
+
 } ZSUndoRec_Update;
 
 typedef struct
