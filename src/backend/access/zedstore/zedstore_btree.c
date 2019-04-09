@@ -72,15 +72,19 @@ void
 zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapshot, ZSBtreeScan *scan)
 {
 	BlockNumber	rootblk;
+	int16		attlen;
+	bool		attbyval;
 	Buffer		buf;
 
-	rootblk = zsmeta_get_root_for_attribute(rel, attno, false);
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, false, &attlen, &attbyval);
 
 	if (rootblk == InvalidBlockNumber)
 	{
 		/* completely empty tree */
 		scan->rel = NULL;
 		scan->attno = InvalidAttrNumber;
+		scan->attlen = 0;
+		scan->attbyval = false;
 		scan->active = false;
 		scan->lastbuf = InvalidBuffer;
 		scan->lastbuf_is_locked = false;
@@ -97,6 +101,8 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapsho
 
 	scan->rel = rel;
 	scan->attno = attno;
+	scan->attlen = attlen;
+	scan->attbyval = attbyval;
 	scan->snapshot = snapshot;
 	scan->for_update = false;		/* caller can change this */
 
@@ -138,15 +144,10 @@ zsbt_end_scan(ZSBtreeScan *scan)
 bool
 zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 {
-	TupleDesc	desc;
-	Form_pg_attribute attr;
 	ZSUncompressedBtreeItem *item;
 
 	if (!scan->active)
 		return false;
-
-	desc = RelationGetDescr(scan->rel);
-	attr = &desc->attrs[scan->attno - 1];
 
 	while ((item = zsbt_scan_next_internal(scan)) != NULL)
 	{
@@ -160,8 +161,8 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 			else
 			{
 				*isnull = false;
-				*datum = fetchatt(attr, ptr);
-				*datum = zs_datumCopy(*datum, attr->attbyval, attr->attlen);
+				*datum = fetch_att(ptr, scan->attbyval, scan->attlen);
+				*datum = zs_datumCopy(*datum, scan->attbyval, scan->attlen);
 			}
 
 			if (scan->lastbuf_is_locked)
@@ -189,9 +190,11 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 	Page		page;
 	ZSBtreePageOpaque *opaque;
 	OffsetNumber maxoff;
+	int16		attlen;
+	bool		attbyval;
 
 	/* Find the rightmost leaf */
-	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, true, &attlen, &attbyval);
 	rightmostkey = MaxZSTid;
 	buf = zsbt_descend(rel, rootblk, rightmostkey);
 	page = BufferGetPage(buf);
@@ -223,7 +226,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 }
 
 static ZSUncompressedBtreeItem *
-zsbt_create_item(Form_pg_attribute attr, zstid tid, Datum datum, bool isnull)
+zsbt_create_item(int16 attlen, bool attbyval, zstid tid, Datum datum, bool isnull)
 {
 	Size		datumsz;
 	Size		itemsz;
@@ -236,7 +239,7 @@ zsbt_create_item(Form_pg_attribute attr, zstid tid, Datum datum, bool isnull)
 	if (isnull)
 		datumsz = 0;
 	else
-		datumsz = zs_datumGetSize(datum, attr->attbyval, attr->attlen);
+		datumsz = zs_datumGetSize(datum, attbyval, attlen);
 	itemsz = offsetof(ZSUncompressedBtreeItem, t_payload) + datumsz;
 
 	newitem = palloc(itemsz);
@@ -251,8 +254,8 @@ zsbt_create_item(Form_pg_attribute attr, zstid tid, Datum datum, bool isnull)
 	else
 	{
 		dataptr = ((char *) newitem) + offsetof(ZSUncompressedBtreeItem, t_payload);
-		if (attr->attbyval)
-			store_att_byval(dataptr, datum, attr->attlen);
+		if (attbyval)
+			store_att_byval(dataptr, datum, attlen);
 		else
 			memcpy(dataptr, DatumGetPointer(datum), datumsz);
 	}
@@ -276,6 +279,8 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 				  TransactionId xid, CommandId cid, ZSUndoRecPtr *undorecptr)
 {
 	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
+	int16		attlen;
+	bool		attbyval;
 	bool		assign_tids;
 	zstid		tid = tids[0];
 	BlockNumber	rootblk;
@@ -289,7 +294,10 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 	int			i;
 	List	   *newitems;
 
-	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, true, &attlen, &attbyval);
+
+	if (attr->attbyval != attbyval || attr->attlen != attlen)
+		elog(ERROR, "attribute information stored in root dir doesn't match with rel");
 
 	/*
 	 * If TID was given, find the right place for it. Otherwise, insert to
@@ -364,7 +372,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 	{
 		ZSUncompressedBtreeItem *newitem;
 
-		newitem = zsbt_create_item(attr, tid, datums[i], isnulls[i]);
+		newitem = zsbt_create_item(attlen, attbyval, tid, datums[i], isnulls[i]);
 
 		/* fill in the remaining fields in the item */
 		newitem->t_undo_ptr = *undorecptr;
@@ -526,6 +534,9 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	 */
 	zsbt_begin_scan(rel, attno, otid, snapshot, &scan);
 	scan.for_update = true;
+
+	if (attr->attbyval != scan.attbyval || attr->attlen != scan.attlen)
+		elog(ERROR, "attribute information stored in root dir doesn't match with rel");
 
 	olditem = zsbt_scan_next_internal(&scan);
 	if (olditem->t_tid != otid)
@@ -765,6 +776,8 @@ zsbt_find_downlink(Relation rel, AttrNumber attno,
 				   int *itemno_p)
 {
 	BlockNumber rootblk;
+	int16		attlen;
+	bool		attbyval;
 	BlockNumber next;
 	Buffer		buf;
 	Page		page;
@@ -775,7 +788,7 @@ zsbt_find_downlink(Relation rel, AttrNumber attno,
 	int			nextlevel = -1;
 
 	/* start from root */
-	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, true, &attlen, &attbyval);
 	if (rootblk == childblk)
 		return InvalidBuffer;
 

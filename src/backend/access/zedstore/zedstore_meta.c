@@ -92,7 +92,7 @@ zsmeta_initmetapage(Relation rel)
 
 	/* Initialize the attribute root dir */
 	freespace = PageGetExactFreeSpace(page);
-	maxatts = freespace / sizeof(BlockNumber);
+	maxatts = freespace / sizeof(ZSRootDirItem);
 	if (natts > maxatts)
 	{
 		/*
@@ -106,8 +106,12 @@ zsmeta_initmetapage(Relation rel)
 	metapg = (ZSMetaPage *) PageGetContents(page);
 	metapg->nattributes = natts;
 	for (int i = 0; i < natts; i++)
-		metapg->roots[i] = InvalidBlockNumber;
-	((PageHeader) page)->pd_lower += natts * sizeof(BlockNumber);
+	{
+		metapg->tree_root_dir[i].root = InvalidBlockNumber;
+		metapg->tree_root_dir[i].attlen = rel->rd_att->attrs[i].attlen;
+		metapg->tree_root_dir[i].attbyval = rel->rd_att->attrs[i].attbyval;
+	}
+	((PageHeader) page)->pd_lower += natts * sizeof(ZSRootDirItem);
 
 	opaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(page);
 	opaque->zs_flags = 0;
@@ -133,16 +137,23 @@ zsmeta_initmetapage(Relation rel)
  * the root doesn't exist.
  */
 BlockNumber
-zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
+zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
+							  int16 *attlen_p, bool *attbyval_p)
 {
 	Buffer		metabuf;
 	ZSMetaPage *metapg;
 	BlockNumber	rootblk;
+	int16		attlen;
+	bool		attbyval;
 
 	if (RelationGetNumberOfBlocks(rel) == 0)
 	{
 		if (!forupdate)
+		{
+			*attlen_p = 0;
+			*attbyval_p = false;
 			return InvalidBlockNumber;
+		}
 
 		zsmeta_initmetapage(rel);
 	}
@@ -156,7 +167,9 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
 	if (attno <= 0 || attno > metapg->nattributes)
 		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
 
-	rootblk = metapg->roots[attno - 1];
+	rootblk = metapg->tree_root_dir[attno - 1].root;
+	attlen = metapg->tree_root_dir[attno - 1].attlen;
+	attbyval = metapg->tree_root_dir[attno - 1].attbyval;
 
 	if (forupdate && rootblk == InvalidBlockNumber)
 	{
@@ -169,7 +182,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
 		rootbuf = zs_getnewbuf(rel);
 		rootblk = BufferGetBlockNumber(rootbuf);
 
-		metapg->roots[attno - 1] = rootblk;
+		metapg->tree_root_dir[attno - 1].root = rootblk;
 
 		/* initialize the page to look like a root leaf */
 		rootpage = BufferGetPage(rootbuf);
@@ -192,6 +205,8 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
 
 	UnlockReleaseBuffer(metabuf);
 
+	*attlen_p = attlen;
+	*attbyval_p = attbyval;
 	return rootblk;
 }
 
@@ -210,7 +225,7 @@ zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno,
 	if (attno <= 0 || attno > metapg->nattributes)
 		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
 
-	metapg->roots[attno - 1] = rootblk;
+	metapg->tree_root_dir[attno - 1].root = rootblk;
 
 	MarkBufferDirty(metabuf);
 }

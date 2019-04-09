@@ -313,10 +313,29 @@ zs_datumCopy(Datum value, bool typByVal, int typLen)
  */
 #define ZS_META_BLK		0
 
+/*
+ * The metapage stores one of these for each attribute.
+ *
+ * We have copy the atributes 'attlen' and 'attbyval' here, because we need
+ * them when reading the rows. Normally, they match the values in the
+ * relcache, of course, but there is a time during ALTER TABLE SET TYPE
+ * where the tuple descriptor in the relcache entry already shows the new
+ * type, but we're still reading the old relfile, which must happen using
+ * the old type. We work around that by not relying on the relcache entry,
+ * but on these copied values. And it seems like a good sanity check,
+ * anyway.
+ */
+typedef struct ZSRootDirItem
+{
+	BlockNumber root;
+	int16		attlen;
+	bool		attbyval;
+} ZSRootDirItem;
+
 typedef struct ZSMetaPage
 {
 	int			nattributes;
-	BlockNumber	roots[FLEXIBLE_ARRAY_MEMBER];	/* one for each attribute */
+	ZSRootDirItem tree_root_dir[FLEXIBLE_ARRAY_MEMBER];	/* one for each attribute */
 } ZSMetaPage;
 
 /*
@@ -345,6 +364,8 @@ typedef struct ZSBtreeScan
 {
 	Relation	rel;
 	AttrNumber	attno;
+	int16		attlen;
+	bool		attbyval;
 
 	/*
 	 * memory context that should be used for any allocations that go with the scan,
@@ -397,7 +418,7 @@ extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
 /* prototypes for functions in zedstore_meta.c */
 extern void zsmeta_initmetapage(Relation rel);
 extern Buffer zs_getnewbuf(Relation rel);
-extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
+extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update, int16 *attlen_p, bool *attbyval_p);
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
 
 /* prototypes for functions in zedstore_visibility.c */
