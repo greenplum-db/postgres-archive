@@ -366,7 +366,7 @@ typedef struct ZSBtreeScan
 	bool		has_decompressed;
 } ZSBtreeScan;
 
-/* prototypes for functions in zstore_btree.c */
+/* prototypes for functions in zedstore_btree.c */
 extern ZSUncompressedBtreeItem *zsbt_create_item(Form_pg_attribute attr, zstid tid,
 												 Datum datum, bool isnull);
 extern zstid zsbt_insert(Relation rel, AttrNumber attno, Datum datum,
@@ -390,18 +390,16 @@ extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
 
 
-
-
-/* prototypes for functions in zstore_meta.c */
+/* prototypes for functions in zedstore_meta.c */
 extern Buffer zs_getnewbuf(Relation rel);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
 
-/* prototypes for functions in zstore_visibility.c */
+/* prototypes for functions in zedstore_visibility.c */
 extern TM_Result zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item);
 extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item);
 
-/* prototypes for functions in zstore_toast.c */
+/* prototypes for functions in zedstore_toast.c */
 extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);
 extern void zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, zstid tid);
 extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted);
