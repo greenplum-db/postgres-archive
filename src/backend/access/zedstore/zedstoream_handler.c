@@ -1067,9 +1067,30 @@ zedstoream_relation_nontransactional_truncate(Relation rel)
 static void
 zedstoream_relation_copy_data(Relation rel, RelFileNode newrnode)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("function %s not implemented yet", __func__)));
+	SMgrRelation dstrel;
+
+	dstrel = smgropen(newrnode, rel->rd_backend);
+	RelationOpenSmgr(rel);
+
+	/*
+	 * Create and copy all the relation, and schedule unlinking of the
+	 * old physical file.
+	 *
+	 * NOTE: any conflict in relfilenode value will be caught in
+	 * RelationCreateStorage().
+	 *
+	 * NOTE: There is only the main fork in zedstore. Otherwise
+	 * this would need to copy other forkst, too.
+	 */
+	RelationCreateStorage(newrnode, rel->rd_rel->relpersistence);
+
+	/* copy main fork */
+	RelationCopyStorage(rel->rd_smgr, dstrel, MAIN_FORKNUM,
+						rel->rd_rel->relpersistence);
+
+	/* drop old relation, and close new one */
+	RelationDropStorage(rel);
+	smgrclose(dstrel);
 }
 
 static void
