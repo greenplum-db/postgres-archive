@@ -687,7 +687,10 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 
 	/* Replace the ZSBreeItem with a DEAD item. (Unless it's already dead) */
 	if ((item->t_flags & ZSBT_DEAD) != 0)
+	{
+		zsbt_end_scan(&scan);
 		return;
+	}
 
 	memset(&deaditem, 0, offsetof(ZSUncompressedBtreeItem, t_payload));
 	deaditem.t_tid = tid;

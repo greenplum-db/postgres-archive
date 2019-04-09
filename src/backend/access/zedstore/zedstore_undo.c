@@ -422,7 +422,13 @@ lazy_space_alloc(ZSVacRelStats *vacrelstats, BlockNumber relblocks)
 	}
 	else
 	{
-		maxtuples = MaxHeapTuplesPerPage;
+		/*
+		 * TODO: In heap vacuum code, this is MaxHeapTuplesPerPage. We have no
+		 * particular reason to size this by that, but the same principle applies:
+		 * without indexes, it's pretty cheap to do multiple iterations, so let's
+		 * avoid making a huge allocation
+		 */
+		maxtuples = 1000;
 	}
 
 	vacrelstats->trimstats.num_dead_tuples = 0;
