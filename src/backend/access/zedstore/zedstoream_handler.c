@@ -487,11 +487,21 @@ static bool
 zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	int			i;
 
 	Assert(scan->num_proj_atts <= slot->tts_tupleDescriptor->natts);
 
+	/*
+	 * Initialize the slot.
+	 *
+	 * We initialize all columns to NULL. The values for columns that are projected
+	 * will be set to the actual values below, but it's important that non-projected
+	 * columns are NULL.
+	 */
 	slot->tts_nvalid = 0;
 	slot->tts_flags |= TTS_FLAG_EMPTY;
+	for (i = 0; i < slot->tts_tupleDescriptor->natts; i++)
+		slot->tts_isnull[i] = true;
 
 	while (scan->state != ZSSCAN_STATE_FINISHED)
 	{
