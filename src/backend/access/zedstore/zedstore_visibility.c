@@ -232,6 +232,157 @@ zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 }
 
 /*
+ * Like HeapTupleSatisfiesSelf
+ */
+static bool
+zs_SatisfiesSelf(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
+{
+	Relation	rel = scan->rel;
+	Snapshot	snapshot = scan->snapshot;
+	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
+	ZSUndoRec  *undorec;
+	bool		is_deleted;
+
+	Assert (snapshot->snapshot_type == SNAPSHOT_SELF);
+
+	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
+
+	if (item->t_undo_ptr.counter < recent_oldest_undo.counter)
+	{
+		if (!is_deleted)
+			return true;
+		else
+			return false;
+	}
+
+	/* have to fetch the UNDO record */
+	undorec = zsundo_fetch(rel, item->t_undo_ptr);
+
+	if (!is_deleted)
+	{
+		/* Inserted tuple */
+		Assert(undorec->type == ZSUNDO_TYPE_INSERT ||
+			   undorec->type == ZSUNDO_TYPE_UPDATE);
+
+		if (TransactionIdIsCurrentTransactionId(undorec->xid))
+			return true;		/* inserted by me */
+		else if (TransactionIdIsInProgress(undorec->xid))
+			return false;
+		else if (TransactionIdDidCommit(undorec->xid))
+			return true;
+		else
+		{
+			/* it must have aborted or crashed */
+			return false;
+		}
+	}
+	else
+	{
+		/* deleted or updated-away tuple */
+		Assert(undorec->type == ZSUNDO_TYPE_DELETE ||
+			   undorec->type == ZSUNDO_TYPE_UPDATE);
+
+		if (TransactionIdIsCurrentTransactionId(undorec->xid))
+		{
+			/* deleted by me */
+			return false;
+		}
+
+		if (TransactionIdIsInProgress(undorec->xid))
+			return true;
+
+		if (!TransactionIdDidCommit(undorec->xid))
+		{
+			/* deleter aborted or crashed */
+			return true;
+		}
+
+		return false;
+	}
+}
+
+/*
+ * Like HeapTupleSatisfiesDirty
+ */
+static bool
+zs_SatisfiesDirty(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
+{
+	Relation	rel = scan->rel;
+	Snapshot	snapshot = scan->snapshot;
+	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
+	ZSUndoRec  *undorec;
+	bool		is_deleted;
+
+	Assert (snapshot->snapshot_type == SNAPSHOT_DIRTY);
+
+	snapshot->xmin = snapshot->xmax = InvalidTransactionId;
+	snapshot->speculativeToken = 0;
+
+	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
+
+	if (item->t_undo_ptr.counter < recent_oldest_undo.counter)
+	{
+		if (!is_deleted)
+			return true;
+		else
+			return false;
+	}
+
+	/* have to fetch the UNDO record */
+	undorec = zsundo_fetch(rel, item->t_undo_ptr);
+
+	if (!is_deleted)
+	{
+		/* Inserted tuple */
+		Assert(undorec->type == ZSUNDO_TYPE_INSERT ||
+			   undorec->type == ZSUNDO_TYPE_UPDATE);
+
+		if (TransactionIdIsCurrentTransactionId(undorec->xid))
+			return true;		/* inserted by me */
+		else if (TransactionIdIsInProgress(undorec->xid))
+		{
+			snapshot->xmin = undorec->xid;
+			return true;
+		}
+		else if (TransactionIdDidCommit(undorec->xid))
+		{
+			return true;
+		}
+		else
+		{
+			/* it must have aborted or crashed */
+			return false;
+		}
+	}
+	else
+	{
+		/* deleted or updated-away tuple */
+		Assert(undorec->type == ZSUNDO_TYPE_DELETE ||
+			   undorec->type == ZSUNDO_TYPE_UPDATE);
+
+		if (TransactionIdIsCurrentTransactionId(undorec->xid))
+		{
+			/* deleted by me */
+			return false;
+		}
+
+		if (TransactionIdIsInProgress(undorec->xid))
+		{
+			snapshot->xmax = undorec->xid;
+			return true;
+		}
+
+		if (!TransactionIdDidCommit(undorec->xid))
+		{
+			/* deleter aborted or crashed */
+			return true;
+		}
+
+		return false;
+	}
+}
+
+/*
  * Like HeapTupleSatisfiesVisibility
  */
 bool
@@ -253,22 +404,24 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 	{
 		case SNAPSHOT_MVCC:
 			return zs_SatisfiesMVCC(scan, item);
-			break;
+
 		case SNAPSHOT_SELF:
-			elog(ERROR, "SnapshotSelf not implemented in zedstore yet");
-			break;
+			return zs_SatisfiesSelf(scan, item);
+
 		case SNAPSHOT_ANY:
 			return zs_SatisfiesAny(scan, item);
-			break;
+
 		case SNAPSHOT_TOAST:
 			elog(ERROR, "SnapshotToast not implemented in zedstore");
 			break;
+
 		case SNAPSHOT_DIRTY:
-			elog(ERROR, "SnapshotDirty not implemented in zedstore yet");
-			break;
+			return zs_SatisfiesDirty(scan, item);
+
 		case SNAPSHOT_HISTORIC_MVCC:
 			elog(ERROR, "SnapshotHistoricMVCC not implemented in zedstore yet");
 			break;
+
 		case SNAPSHOT_NON_VACUUMABLE:
 			elog(ERROR, "SnapshotNonVacuumable not implemented in zedstore yet");
 			break;
