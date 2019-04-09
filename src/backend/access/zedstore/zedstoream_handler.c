@@ -506,9 +506,7 @@ zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
 
 	for (int i = 0; i < scan->num_proj_atts; i++)
 	{
-		int			natt = scan->proj_atts[i];
-
-		zsbt_end_scan(&scan->btree_scans[natt]);
+		zsbt_end_scan(&scan->btree_scans[i]);
 	}
 	scan->state = ZSSCAN_STATE_UNSTARTED;
 }

@@ -82,6 +82,9 @@ zsmeta_initmetapage(Relation rel)
 	Size		freespace;
 	int			maxatts;
 
+	if (natts == 0)
+		elog(ERROR, "tables with zero columns not supported in zedstore");
+
 	buf = ReadBuffer(rel, P_NEW);
 	if (BufferGetBlockNumber(buf) != ZS_META_BLK)
 		elog(ERROR, "index is not empty");
