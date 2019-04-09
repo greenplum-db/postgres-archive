@@ -18,15 +18,22 @@
 
 /*
  * Like HeapTupleSatisfiesUpdate.
+ *
+ * When returns TM_Ok, this also returns a flag in *undo_record_needed, to indicate
+ * whether the old UNDO record is still of interest to anyone. If the old record
+ * belonged to an aborted deleting transaction, for example, it can be ignored.
  */
 TM_Result
-zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
+zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item,
+				   bool *undo_record_needed)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
 	ZSUndoRecPtr recent_oldest_undo;
 	bool		is_deleted;
 	ZSUndoRec  *undorec;
+
+	*undo_record_needed = true;
 
 	if (scan->recent_oldest_undo.counter == 0)
 		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(scan->rel);
@@ -43,7 +50,14 @@ zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 			return  TM_Invisible;
 		}
 		else
+		{
+			/*
+			 * the old UNDO record is no longer visible to anyone, so we don't
+			 * need to keep it.
+			 */
+			*undo_record_needed = false;
 			return  TM_Ok;
+		}
 	}
 
 	/* have to fetch the UNDO record */
@@ -59,12 +73,16 @@ zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 		{
 			if (undorec->cid >= snapshot->curcid)
 				return TM_Invisible;	/* inserted after scan started */
+			*undo_record_needed = true;
 			return TM_Ok;
 		}
 		else if (TransactionIdIsInProgress(undorec->xid))
 			return TM_Invisible;		/* inserter has not committed yet */
 		else if (TransactionIdDidCommit(undorec->xid))
+		{
+			*undo_record_needed = true;
 			return TM_Ok;
+		}
 		else
 		{
 			/* it must have aborted or crashed */
@@ -91,6 +109,7 @@ zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 		if (!TransactionIdDidCommit(undorec->xid))
 		{
 			/* deleter must have aborted or crashed */
+			*undo_record_needed = false;
 			return TM_Ok;
 		}
 

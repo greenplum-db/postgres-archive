@@ -401,7 +401,8 @@ extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno,
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
 
 /* prototypes for functions in zedstore_visibility.c */
-extern TM_Result zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item);
+extern TM_Result zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item,
+				   bool *undo_record_needed);
 extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item);
 
 /* prototypes for functions in zedstore_toast.c */

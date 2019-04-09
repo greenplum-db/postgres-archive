@@ -429,6 +429,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	ZSBtreeScan scan;
 	ZSUncompressedBtreeItem *item;
 	TM_Result	result;
+	bool		keep_old_undo_ptr = true;
 	ZSUndoRecPtr undorecptr;
 	ZSUncompressedBtreeItem *deleteditem;
 
@@ -446,7 +447,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
-	result = zs_SatisfiesUpdate(&scan, item);
+	result = zs_SatisfiesUpdate(&scan, item, &keep_old_undo_ptr);
 	if (result != TM_Ok)
 	{
 		zsbt_end_scan(&scan);
@@ -463,7 +464,11 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = tid;
-		undorec.prevundorec = item->t_undo_ptr;
+
+		if (keep_old_undo_ptr)
+			undorec.prevundorec = item->t_undo_ptr;
+		else
+			ZSUndoRecPtrInitialize(&undorec.prevundorec);
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
@@ -502,6 +507,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	ZSBtreeScan scan;
 	ZSUncompressedBtreeItem *olditem;
 	TM_Result	result;
+	bool		keep_old_undo_ptr = true;
 	ZSUndoRecPtr undorecptr;
 	ZSUncompressedBtreeItem *deleteditem;
 	ZSUncompressedBtreeItem *newitem;
@@ -535,7 +541,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	/*
 	 * Is it visible to us?
 	 */
-	result = zs_SatisfiesUpdate(&scan, olditem);
+	result = zs_SatisfiesUpdate(&scan, olditem, &keep_old_undo_ptr);
 	if (result != TM_Ok)
 	{
 		zsbt_end_scan(&scan);
@@ -586,7 +592,10 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = newtid;
-		undorec.prevundorec = olditem->t_undo_ptr;
+		if (keep_old_undo_ptr)
+			undorec.prevundorec = olditem->t_undo_ptr;
+		else
+			ZSUndoRecPtrInitialize(&undorec.prevundorec);
 		undorec.otid = otid;
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
