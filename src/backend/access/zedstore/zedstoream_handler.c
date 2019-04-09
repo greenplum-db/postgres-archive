@@ -356,7 +356,8 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, newtid);
 	}
-	slot->tts_tid = ItemPointerFromZSTid(newtid);
+	if (result == TM_Ok)
+		slot->tts_tid = ItemPointerFromZSTid(newtid);
 
 	/* TODO: could we do HOT udates? */
 	/* TODO: What should we set lockmode to? */

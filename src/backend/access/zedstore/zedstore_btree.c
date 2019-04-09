@@ -459,6 +459,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	if (result != TM_Ok)
 	{
 		zsbt_end_scan(&scan);
+		/* FIXME: We should fill TM_FailureData *hufd correctly */
 		return result;
 	}
 
@@ -556,6 +557,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	if (result != TM_Ok)
 	{
 		zsbt_end_scan(&scan);
+		/* FIXME: We should fill TM_FailureData *hufd correctly */
 		return result;
 	}
 
