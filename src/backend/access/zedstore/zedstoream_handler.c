@@ -488,6 +488,31 @@ zedstoream_endscan(TableScanDesc sscan)
 	pfree(scan);
 }
 
+static void
+zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
+				  bool set_params, bool allow_strat,
+				  bool allow_sync, bool allow_pagemode)
+{
+	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+
+	/* these params don't do much in zedstore yet, but whatever */
+	if (set_params)
+	{
+		scan->rs_scan.rs_allow_strat = allow_strat;
+		scan->rs_scan.rs_allow_sync = allow_sync;
+		scan->rs_scan.rs_pageatatime =
+			allow_pagemode && IsMVCCSnapshot(scan->rs_scan.rs_snapshot);
+	}
+
+	for (int i = 0; i < scan->num_proj_atts; i++)
+	{
+		int			natt = scan->proj_atts[i];
+
+		zsbt_end_scan(&scan->btree_scans[natt]);
+	}
+	scan->state = ZSSCAN_STATE_UNSTARTED;
+}
+
 static bool
 zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
@@ -1409,7 +1434,7 @@ static const TableAmRoutine zedstoream_methods = {
 	.scan_begin = zedstoream_beginscan,
 	.scan_begin_with_column_projection = zedstoream_beginscan_with_column_projection,
 	.scan_end = zedstoream_endscan,
-	.scan_rescan = heap_rescan,
+	.scan_rescan = zedstoream_rescan,
 	.scan_getnextslot = zedstoream_getnextslot,
 
 	.parallelscan_estimate = zs_parallelscan_estimate,
