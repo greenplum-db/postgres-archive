@@ -387,6 +387,7 @@ extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
 
 
 /* prototypes for functions in zedstore_meta.c */
+extern void zsmeta_initmetapage(Relation rel);
 extern Buffer zs_getnewbuf(Relation rel);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);

@@ -24,8 +24,6 @@
 #include "storage/lmgr.h"
 #include "utils/rel.h"
 
-static void zs_initmetapage(Relation rel);
-
 /*
  * Allocate a new page.
  *
@@ -73,8 +71,8 @@ zs_getnewbuf(Relation rel)
 /*
  * Initialize the metapage for an empty relation.
  */
-static void
-zs_initmetapage(Relation rel)
+void
+zsmeta_initmetapage(Relation rel)
 {
 	int			natts = RelationGetNumberOfAttributes(rel);
 	Buffer		buf;
@@ -146,7 +144,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
 		if (!forupdate)
 			return InvalidBlockNumber;
 
-		zs_initmetapage(rel);
+		zsmeta_initmetapage(rel);
 	}
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
