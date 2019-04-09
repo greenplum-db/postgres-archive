@@ -86,6 +86,7 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapsho
 		scan->lastbuf_is_locked = false;
 		scan->lastoff = InvalidOffsetNumber;
 		scan->snapshot = NULL;
+		scan->context = NULL;
 		memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 		scan->nexttid = InvalidZSTid;
 		return;
@@ -104,6 +105,8 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapsho
 	scan->lastbuf_is_locked = false;
 	scan->lastoff = InvalidOffsetNumber;
 	scan->nexttid = starttid;
+
+	scan->context = CurrentMemoryContext;
 
 	scan->has_decompressed = false;
 	zs_decompress_init(&scan->decompressor);
@@ -1133,7 +1136,10 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 
 				if (citem->t_lasttid >= scan->nexttid)
 				{
+					MemoryContext oldcxt = MemoryContextSwitchTo(scan->context);
+
 					zs_decompress_chunk(&scan->decompressor, citem);
+					MemoryContextSwitchTo(oldcxt);
 					scan->has_decompressed = true;
 					if (!scan->for_update)
 					{

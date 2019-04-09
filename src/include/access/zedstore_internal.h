@@ -346,6 +346,14 @@ typedef struct ZSBtreeScan
 	Relation	rel;
 	AttrNumber	attno;
 
+	/*
+	 * memory context that should be used for any allocations that go with the scan,
+	 * like the decompression buffers. This isn't a dedicated context, you must still
+	 * free everything to avoid leaking! We need this because the getnext function
+	 * might be called in a short-lived memory context that is reset between calls.
+	 */
+	MemoryContext context;
+
 	bool		for_update;
 
 	bool		active;

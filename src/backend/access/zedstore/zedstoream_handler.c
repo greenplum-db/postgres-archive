@@ -57,6 +57,8 @@ typedef struct ZedStoreDescData
 	zstid		cur_range_end;
 	bool		finished;
 
+	MemoryContext context;
+
 	/* These fields are used for bitmap scans, to hold a "block's" worth of data */
 #define	MAX_ITEMS_PER_LOGICAL_BLOCK		MaxHeapTuplesPerPage
 	int			bmscan_ntuples;
@@ -397,6 +399,8 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	scan->rs_scan.rs_temp_snap = temp_snap;
 	scan->rs_scan.rs_parallel = parallel_scan;
 
+	scan->context = CurrentMemoryContext;
+
 	/*
 	 * we can use page-at-a-time mode if it's an MVCC-safe snapshot
 	 */
@@ -486,6 +490,7 @@ zedstoream_endscan(TableScanDesc sscan)
 static bool
 zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
+	MemoryContext oldcontext = CurrentMemoryContext;
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 	int			i;
 
@@ -532,6 +537,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				scan->cur_range_end = MaxPlusOneZSTid;
 			}
 
+			MemoryContextSwitchTo(scan->context);
 			for (int i = 0; i < scan->num_proj_atts; i++)
 			{
 				int			natt = scan->proj_atts[i];
@@ -541,6 +547,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 								scan->rs_scan.rs_snapshot,
 								&scan->btree_scans[i]);
 			}
+			MemoryContextSwitchTo(oldcontext);
 			scan->state = ZSSCAN_STATE_SCANNING;
 		}
 
