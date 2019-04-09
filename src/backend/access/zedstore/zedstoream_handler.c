@@ -385,6 +385,13 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 {
 	ZedStoreDesc scan;
 
+	/* Sample scans have no snapshot, but we need one */
+	if (!snapshot)
+	{
+		Assert(is_samplescan);
+		snapshot = SnapshotAny;
+	}
+
 	/*
 	 * allocate and initialize scan descriptor
 	 */
@@ -436,8 +443,8 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 		}
 	}
 
-	/* Extra setup for bitmap scans */
-	if (is_bitmapscan)
+	/* Extra setup for bitmap and sample scans */
+	if (is_bitmapscan || is_samplescan)
 	{
 		scan->bmscan_ntuples = 0;
 		scan->bmscan_tids = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(zstid));
@@ -580,13 +587,13 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		this_tid = InvalidZSTid;
 		for (int i = 0; i < scan->num_proj_atts; i++)
 		{
+			ZSBtreeScan	*btscan = &scan->btree_scans[i];
 			int			natt = scan->proj_atts[i];
-			Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[natt];
 			Datum		datum;
 			bool        isnull;
 			zstid		tid;
 
-			if (!zsbt_scan_next(&scan->btree_scans[i], &datum, &isnull, &tid))
+			if (!zsbt_scan_next(btscan, &datum, &isnull, &tid))
 			{
 				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
 				break;
@@ -608,7 +615,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			 * flatten any ZS-TOASTed values, becaue the rest of the system
 			 * doesn't know how to deal with them.
 			 */
-			if (!isnull && att->attlen == -1 &&
+			if (!isnull && btscan->attlen == -1 &&
 				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 			{
 				datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt + 1, tid, datum);
@@ -759,6 +766,8 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 		}
 		else
 			found = false;
+
+		/* FIXME: detoasting */
 
 		zsbt_end_scan(&btree_scan);
 	}
@@ -1129,25 +1138,127 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 {
 }
 
+/*
+ * FIXME: The ANALYZE API is problematic for us. acquire_sample_rows() calls
+ * RelationGetNumberOfBlocks() directly on the relation, and chooses the
+ * block numbers to sample based on that. But the logical block numbers
+ * have little to do with physical ones in zedstore.
+ */
 static bool
-zedstoream_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
+zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 								   BufferAccessStrategy bstrategy)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("function %s not implemented yet", __func__)));
-	return false;
+	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	int			ntuples;
+	int			first_ntuples = 0;
+	bool		firstcol;
+
+	/*
+	 * Our strategy for a bitmap scan is to scan the tree of each attribute,
+	 * starting at the given logical block number, and store all the datums
+	 * in the scan struct. zedstoream_scan_bitmap_next_tuple() then just
+	 * needs to store the datums of the next TID in the slot.
+	 *
+	 * An alternative would be to keep the scans of each attribute open,
+	 * like in a sequential scan. I'm not sure which is better.
+	 */
+	firstcol = true;
+	for (int i = 0; i < scan->num_proj_atts; i++)
+	{
+		int			natt = scan->proj_atts[i];
+		ZSBtreeScan	btree_scan;
+		Datum		datum;
+		bool        isnull;
+		zstid		tid;
+		Datum	   *datums = scan->bmscan_datums[natt];
+		bool	   *isnulls = scan->bmscan_isnulls[natt];
+
+		zsbt_begin_scan(scan->rs_scan.rs_rd, natt + 1,
+						ZSTidFromBlkOff(blockno, 1),
+						scan->rs_scan.rs_snapshot,
+						&btree_scan);
+
+		/*
+		 * TODO: it would be good to pass the next expected TID down to zsbt_scan_next,
+		 * so that it could skip over to it more efficiently.
+		 */
+		ntuples = 0;
+		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+		{
+			if (ZSTidGetBlockNumber(tid) != blockno)
+			{
+				Assert(ZSTidGetBlockNumber(tid) > blockno);
+				break;
+			}
+
+			datums[ntuples] = datum;
+			isnulls[ntuples] = isnull;
+			if (firstcol)
+				scan->bmscan_tids[ntuples] = tid;
+			else if (tid != scan->bmscan_tids[ntuples])
+				elog(ERROR, "scans on different attributes out of sync");
+
+			ntuples++;
+		}
+		if (firstcol)
+			first_ntuples = ntuples;
+		else if (ntuples != first_ntuples)
+			elog(ERROR, "scans on different attributes out of sync");
+
+		zsbt_end_scan(&btree_scan);
+
+		firstcol = false;
+	}
+
+	scan->bmscan_nexttuple = 0;
+	scan->bmscan_ntuples = first_ntuples;
+
+	return true;
 }
 
 static bool
-zedstoream_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
+zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin,
 								   double *liverows, double *deadrows,
 								   TupleTableSlot *slot)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("function %s not implemented yet", __func__)));
-	return false;
+	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	zstid		tid;
+
+	if (scan->bmscan_nexttuple >= scan->bmscan_ntuples)
+		return false;
+
+	tid = scan->bmscan_tids[scan->bmscan_nexttuple];
+	for (int i = 0; i < scan->num_proj_atts; i++)
+	{
+		Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[i];
+		int			natt = scan->proj_atts[i];
+		Datum		datum;
+		bool        isnull;
+
+		datum = (scan->bmscan_datums[i])[scan->bmscan_nexttuple];
+		isnull = (scan->bmscan_isnulls[i])[scan->bmscan_nexttuple];
+
+		/*
+		 * flatten any ZS-TOASTed values, becaue the rest of the system
+		 * doesn't know how to deal with them.
+		 */
+		if (!isnull && att->attlen == -1 &&
+			VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+		{
+			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt + 1, tid, datum);
+		}
+
+		slot->tts_values[natt] = datum;
+		slot->tts_isnull[natt] = isnull;
+	}
+	slot->tts_tid = ItemPointerFromZSTid(tid);
+	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
+	slot->tts_flags &= ~TTS_FLAG_EMPTY;
+
+	scan->bmscan_nexttuple++;
+	(*liverows)++;
+
+	return true;
 }
 
 /* ------------------------------------------------------------------------
@@ -1278,8 +1389,8 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 
 	/*
 	 * Our strategy for a bitmap scan is to scan the tree of each attribute,
-	 * starting at the give logical block number, and store all the datums
-	 * in the scan struct. zedstoream_scan_bitmap_next_tuple() then just
+	 * starting at the given logical block number, and store all the datums
+	 * in the scan struct. zedstoream_scan_analyze_next_tuple() then just
 	 * needs to store the datums of the next TID in the slot.
 	 *
 	 * An alternative would be to keep the scans of each attribute open,

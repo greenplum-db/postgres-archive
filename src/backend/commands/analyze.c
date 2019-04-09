@@ -1057,7 +1057,11 @@ acquire_sample_rows(Relation onerel, int elevel,
 			 * done.
 			 */
 			if (numrows < targrows)
-				rows[numrows++] = ExecCopySlotHeapTuple(slot);
+			{
+				rows[numrows] = ExecCopySlotHeapTuple(slot);
+				rows[numrows]->t_self = slot->tts_tid;
+				numrows++;
+			}
 			else
 			{
 				/*
@@ -1079,6 +1083,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 					Assert(k >= 0 && k < targrows);
 					heap_freetuple(rows[k]);
 					rows[k] = ExecCopySlotHeapTuple(slot);
+					rows[k]->t_self = slot->tts_tid;
 				}
 
 				rowstoskip -= 1;

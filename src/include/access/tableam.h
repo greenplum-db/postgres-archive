@@ -1407,7 +1407,7 @@ table_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
 }
 
 /*
- * Iterate over tuples tuples in the block selected with
+ * Iterate over tuples in the block selected with
  * table_scan_analyze_next_block() (which needs to have returned true, and
  * this routine may not have returned false for the same block before). If a
  * tuple that's suitable for sampling is found, true is returned and a tuple
