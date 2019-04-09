@@ -367,14 +367,10 @@ typedef struct ZSBtreeScan
 } ZSBtreeScan;
 
 /* prototypes for functions in zedstore_btree.c */
-extern ZSUncompressedBtreeItem *zsbt_create_item(Form_pg_attribute attr, zstid tid,
-												 Datum datum, bool isnull);
-extern zstid zsbt_insert(Relation rel, AttrNumber attno, Datum datum,
-						 bool isnull, TransactionId xmin, CommandId cmin,
-						 zstid tid, ZSUndoRecPtr *undorecptr);
-extern void zsbt_insert_multi_items(Relation rel, AttrNumber attno, List *newitems,
-									TransactionId xid, CommandId cid,
-									ZSUndoRecPtr *undorecptr, zstid *tid);
+extern void zsbt_multi_insert(Relation rel, AttrNumber attno,
+						Datum *datums, bool *isnulls, zstid *tids, int ndatums,
+						TransactionId xid, CommandId cid,
+						ZSUndoRecPtr *undorecptr);
 extern TM_Result zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 							 TransactionId xid, CommandId cid,
 							 Snapshot snapshot, Snapshot crosscheck, bool wait,

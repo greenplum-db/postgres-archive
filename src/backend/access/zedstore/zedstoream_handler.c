@@ -145,7 +145,9 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 			toastptr = datum = zedstore_toast_datum(relation, attno, datum);
 		}
 
-		tid = zsbt_insert(relation, attno, datum, isnull, xid, cid, tid, &undorecptr);
+		zsbt_multi_insert(relation, attno,
+						  &datum, &isnull, &tid, 1,
+						  xid, cid, &undorecptr);
 
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, tid);
@@ -178,17 +180,19 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 						CommandId cid, int options, BulkInsertState bistate)
 {
 	AttrNumber	attno;
-	zstid	   *tid;
 	ZSUndoRecPtr undorecptr;
 	int			i;
 	bool		slotgetandset = true;
 	TransactionId xid = GetCurrentTransactionId();
 	int		   *tupletoasted;
-	Datum	   *toastdatum;
+	Datum	   *datums;
+	bool	   *isnulls;
+	zstid	   *tids;
 
-	tid = palloc(ntuples * sizeof(zstid));
 	tupletoasted = palloc(ntuples * sizeof(int));
-	toastdatum = palloc(ntuples * sizeof(Datum));
+	datums = palloc(ntuples * sizeof(Datum));
+	isnulls = palloc(ntuples * sizeof(bool));
+	tids = palloc(ntuples * sizeof(zstid));
 
 	ZSUndoRecPtrInitialize(&undorecptr);
 
@@ -196,38 +200,38 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	{
 		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
 		int			ntupletoasted = 0;
-		List	   *zitems = NIL;
 
 		for (i = 0; i < ntuples; i++)
 		{
-			ZSUncompressedBtreeItem *zitem;
 			Datum		datum = slots[i]->tts_values[attno - 1];
 			bool		isnull = slots[i]->tts_isnull[attno - 1];
 
 			if (slotgetandset)
 			{
 				slot_getallattrs(slots[i]);
-				tid[i] = InvalidZSTid;
+				tids[i] = InvalidZSTid;
 			}
 
 			/* If this datum is too large, toast it */
 			if (!isnull && attr->attlen < 0 &&
 				VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
 			{
-				datum = toastdatum[ntupletoasted] = zedstore_toast_datum(relation, attno, datum);
+				datum = zedstore_toast_datum(relation, attno, datum);
 				tupletoasted[ntupletoasted++] = i;
 			}
-
-			zitem = zsbt_create_item(attr, tid[i], datum, isnull);
-			zitems = lappend(zitems, zitem);
+			datums[i] = datum;
+			isnulls[i] = isnull;
 		}
 
-		zsbt_insert_multi_items(relation, attno, zitems, xid, cid, &undorecptr, tid);
+		zsbt_multi_insert(relation, attno,
+						  datums, isnulls, tids, ntuples,
+						  xid, cid, &undorecptr);
 
 		for (i = 0; i < ntupletoasted; i++)
 		{
-			zedstore_toast_finish(relation, attno, toastdatum[tupletoasted[i]],
-								  tid[tupletoasted[i]]);
+			int		idx = tupletoasted[i];
+
+			zedstore_toast_finish(relation, attno, datums[idx], tids[idx]);
 		}
 
 		slotgetandset = false;
@@ -236,12 +240,13 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	for (i = 0; i < ntuples; i++)
 	{
 		slots[i]->tts_tableOid = RelationGetRelid(relation);
-		slots[i]->tts_tid = ItemPointerFromZSTid(tid[i]);
+		slots[i]->tts_tid = ItemPointerFromZSTid(tids[i]);
 	}
 
-	pfree(tid);
+	pfree(tids);
 	pfree(tupletoasted);
-	pfree(toastdatum);
+	pfree(datums);
+	pfree(isnulls);
 }
 
 static TM_Result
