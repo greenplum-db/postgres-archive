@@ -1136,6 +1136,9 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 									 double *tups_vacuumed,
 									 double *tups_recently_dead)
 {
+	ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("function %s not implemented yet", __func__)));
 }
 
 /*
