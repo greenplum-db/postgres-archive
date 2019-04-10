@@ -82,6 +82,13 @@ typedef struct ZedStoreIndexFetchData *ZedStoreIndexFetch;
 
 typedef struct ParallelZSScanDescData *ParallelZSScanDesc;
 
+static bool zedstoream_fetch_row(Relation rel,
+							 ItemPointer tid_p,
+							 Snapshot snapshot,
+							 TupleTableSlot *slot,
+							 int num_proj_atts,
+							 int *proj_atts);
+
 static Size zs_parallelscan_estimate(Relation rel);
 static Size zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan);
 static void zs_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan);
@@ -95,15 +102,12 @@ static bool zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
  */
 
 static bool
-zedstoream_fetch_row_version(Relation relation,
-							 ItemPointer tid,
+zedstoream_fetch_row_version(Relation rel,
+							 ItemPointer tid_p,
 							 Snapshot snapshot,
 							 TupleTableSlot *slot)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function %s not implemented yet", __func__)));
-	return false;
+	return zedstoream_fetch_row(rel, tid_p, snapshot, slot, 0, NULL);
 }
 
 static void
@@ -669,9 +673,28 @@ static bool
 zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 									Snapshot snapshot)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function %s not implemented yet", __func__)));
+	/*
+	 * TODO: we didn't keep any visibility information about the tuple in the
+	 * slot, so we have to fetch it again. A custom slot type might be a
+	 * good idea..
+	 */
+	zstid		tid = ZSTidFromItemPointer(slot->tts_tid);
+	zstid		ftid;
+	ZSBtreeScan btree_scan;
+	bool		found;
+	Datum		datum;
+	bool		isnull;
+
+	/* Use the first column for the visibility information. */
+	zsbt_begin_scan(rel, 1, tid, snapshot, &btree_scan);
+
+	found = zsbt_scan_next(&btree_scan, &datum, &isnull, &ftid);
+	if (found && tid != ftid)
+		found = false;
+
+	zsbt_end_scan(&btree_scan);
+
+	return found;
 }
 
 static TransactionId
@@ -743,35 +766,51 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 							 bool *call_again, bool *all_dead)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
-	Relation	rel = zscan->idx_fetch_data.rel;
+
+	/*
+	 * we don't do in-place updates, so this is essentially the same as
+	 * fetch_row_version.
+	 */
+	*call_again = false;
+	*all_dead = false;
+	return zedstoream_fetch_row(scan->rel, tid_p, snapshot, slot,
+								zscan->num_proj_atts, zscan->proj_atts);
+}
+
+/*
+ * Shared implementation of fetch_row_version and index_fetch_tuple callbacks.
+ */
+static bool
+zedstoream_fetch_row(Relation rel,
+							 ItemPointer tid_p,
+							 Snapshot snapshot,
+							 TupleTableSlot *slot,
+							 int num_proj_atts,
+							 int *proj_atts)
+{
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	bool		found = true;
 
 	/*
-	 * if executor didn't set the column projections, need to return all the
-	 * columns.
+	 * Initialize the slot.
+	 *
+	 * If we're not fetching all columns, initialize the unfetched values
+	 * in the slot to NULL. (Actually, this initializes all to NULL, and the
+	 * code below will overwrite them for the columns that are projected)
 	 */
-	if (zscan->num_proj_atts == 0)
+	slot->tts_nvalid = 0;
+	slot->tts_flags |= TTS_FLAG_EMPTY;
+	if (proj_atts)
 	{
-		for (int i = 0; i < rel->rd_att->natts; i++)
-			zscan->proj_atts[zscan->num_proj_atts++] = i;
-	}
-	else
-	{
-		/*
-		 * Initialize all columns to NULL. The values for columns that are projected
-		 * will be set to the actual values below, but it's important that non-projected
-		 * columns are NULL.
-		 */
-		slot->tts_nvalid = 0;
-		slot->tts_flags |= TTS_FLAG_EMPTY;
 		for (int i = 0; i < slot->tts_tupleDescriptor->natts; i++)
 			slot->tts_isnull[i] = true;
 	}
+	else
+		num_proj_atts = slot->tts_tupleDescriptor->natts;
 
-	for (int i = 0; i < zscan->num_proj_atts && found; i++)
+	for (int i = 0; i < num_proj_atts && found; i++)
 	{
-		int         natt = zscan->proj_atts[i];
+		int         natt = proj_atts ? proj_atts[i] : i;
 		Form_pg_attribute att = &rel->rd_att->attrs[natt];
 		ZSBtreeScan btree_scan;
 		Datum		datum;
