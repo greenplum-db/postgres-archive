@@ -952,10 +952,12 @@ zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
 	itemno = zsbt_binsrch_internal(rightlokey, items, nitems);
 
 	/* sanity checks */
-	if (itemno < 1 || items[itemno].tid != leftlokey ||
+	if (itemno < 0 || items[itemno].tid != leftlokey ||
 		items[itemno].childblk != leftblkno)
 	{
-		elog(ERROR, "could not find downlink");
+		elog(ERROR, "could not find downlink for block %u TID (%u, %u)",
+			 leftblkno, ZSTidGetBlockNumber(leftlokey),
+			 ZSTidGetOffsetNumber(leftlokey));
 	}
 	itemno++;
 
