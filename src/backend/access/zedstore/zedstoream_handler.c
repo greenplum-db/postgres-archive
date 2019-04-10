@@ -525,7 +525,15 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 	int			i;
 
-	Assert(scan->num_proj_atts <= slot->tts_tupleDescriptor->natts);
+	if (scan->num_proj_atts > slot->tts_tupleDescriptor->natts)
+	{
+		/*
+		 * FIXME: This actually happens sometimes, during DROP COLUMN. When no
+		 * column list was given, zedstore_beginscan creates it from the
+		 * relation's descriptor, which is out of sync with the slot.
+		 */
+		elog(ERROR, "scan has more projected attributes than slot");
+	}
 
 	/*
 	 * Initialize the slot.
