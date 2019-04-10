@@ -895,7 +895,7 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level,
 
 	/* clear the follow-right flag on left child */
 	leftchildopaque = ZSBtreePageGetOpaque(BufferGetPage(leftchildbuf));
-	leftchildopaque->zs_flags &= ZS_FOLLOW_RIGHT;
+	leftchildopaque->zs_flags &= ~ZS_FOLLOW_RIGHT;
 
 	/* TODO: wal-log all, including metapage */
 
