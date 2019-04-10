@@ -53,6 +53,7 @@ typedef struct
 #define ZSUNDO_TYPE_INSERT		1
 #define ZSUNDO_TYPE_DELETE		2
 #define ZSUNDO_TYPE_UPDATE		3
+#define ZSUNDO_TYPE_TUPLE_LOCK	4
 
 /*
  * Type-specific record formats.
@@ -103,6 +104,32 @@ typedef struct
 	zstid		newtid;
 
 } ZSUndoRec_Update;
+
+/*
+ * This is used when a tuple is locked e.g. with SELECT FOR UPDATE.
+ * The tuple isn't really changed in any way, but the undo record gives
+ * a place to store the XID of the locking transaction.
+ *
+ * In case of a FOR SHARE lock, there can be multiple lockers. Each locker
+ * will create a new undo record with its own XID that points to the previous
+ * record. So the records will form a chain, leading finally to the insertion
+ * record (or beyond the UNDO horizon, meaning the tuple's insertion is visible
+ * to everyone)
+ */
+typedef struct
+{
+	ZSUndoRec	rec;
+
+	/*
+	 * XXX: Is it OK to store this on disk? The enum values could change. Then
+	 * again, no one should care about old locks that were acquired before
+	 * last restart. Except with two-phase commit prepared transactions.
+	 */
+	LockTupleMode	lockmode;
+
+	/* Like in ZSUndoRec_Delete. */
+	ZSUndoRecPtr prevundorec;
+} ZSUndoRec_TupleLock;
 
 typedef struct
 {

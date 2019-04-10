@@ -464,7 +464,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
-	result = zs_SatisfiesUpdate(&scan, item, &keep_old_undo_ptr);
+	result = zs_SatisfiesUpdate(&scan, item, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
 		zsbt_end_scan(&scan);
@@ -583,7 +583,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 	/*
 	 * Is it visible to us?
 	 */
-	result = zs_SatisfiesUpdate(&scan, olditem, &keep_old_undo_ptr);
+	result = zs_SatisfiesUpdate(&scan, olditem, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
 		zsbt_end_scan(&scan);
@@ -630,6 +630,7 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	ZSUncompressedBtreeItem *olditem;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
+	TM_FailureData tmfd;
 	ZSUndoRecPtr undorecptr;
 	ZSUncompressedBtreeItem *deleteditem;
 
@@ -657,7 +658,7 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	/*
 	 * Is it visible to us?
 	 */
-	result = zs_SatisfiesUpdate(&scan, olditem, &keep_old_undo_ptr);
+	result = zs_SatisfiesUpdate(&scan, olditem, &keep_old_undo_ptr, &tmfd);
 	if (result != TM_Ok)
 	{
 		zsbt_end_scan(&scan);
@@ -696,6 +697,82 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	zsbt_end_scan(&scan);
 
 	pfree(deleteditem);
+}
+
+TM_Result
+zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
+			   TransactionId xid, CommandId cid, Snapshot snapshot,
+			   LockTupleMode lockmode, LockWaitPolicy wait_policy,
+			   TM_FailureData *hufd)
+{
+	ZSBtreeScan scan;
+	ZSUncompressedBtreeItem *item;
+	TM_Result	result;
+	bool		keep_old_undo_ptr = true;
+	ZSUndoRecPtr undorecptr;
+	ZSUncompressedBtreeItem *newitem;
+
+	zsbt_begin_scan(rel, attno, tid, snapshot, &scan);
+	scan.for_update = true;
+
+	/* Find the item to delete. (It could be compressed) */
+	item = zsbt_scan_next_internal(&scan);
+	if (item->t_tid != tid)
+	{
+		/*
+		 * or should this be TM_Invisible? The heapam at least just throws
+		 * an error, I think..
+		 */
+		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
+			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
+	}
+	result = zs_SatisfiesUpdate(&scan, item, &keep_old_undo_ptr, hufd);
+	if (result != TM_Ok)
+	{
+		zsbt_end_scan(&scan);
+		/* FIXME: We should fill TM_FailureData *hufd correctly */
+		return result;
+	}
+
+	if ((item->t_flags & ZSBT_DELETED) != 0)
+		elog(ERROR, "cannot lock deleted tuple");
+
+	if ((item->t_flags & ZSBT_UPDATED) != 0)
+		elog(ERROR, "cannot lock updated tuple");
+
+	/* Create UNDO record. */
+	{
+		ZSUndoRec_TupleLock undorec;
+
+		undorec.rec.size = sizeof(ZSUndoRec_TupleLock);
+		undorec.rec.type = ZSUNDO_TYPE_TUPLE_LOCK;
+		undorec.rec.attno = attno;
+		undorec.rec.xid = xid;
+		undorec.rec.cid = cid;
+		undorec.rec.tid = tid;
+		undorec.lockmode = lockmode;
+		if (keep_old_undo_ptr)
+			undorec.prevundorec = item->t_undo_ptr;
+		else
+			ZSUndoRecPtrInitialize(&undorec.prevundorec);
+
+		undorecptr = zsundo_insert(rel, &undorec.rec);
+	}
+
+	/* Replace the item with an identical one, but with updated undo pointer. */
+	newitem = palloc(item->t_size);
+	memcpy(newitem, item, item->t_size);
+	newitem->t_undo_ptr = undorecptr;
+
+	zsbt_replace_item(rel, attno, scan.lastbuf,
+					  (ZSBtreeItem *) item, (ZSBtreeItem *) newitem,
+					  NULL, NIL);
+	scan.lastbuf_is_locked = false;	/* zsbt_replace_item released */
+	zsbt_end_scan(&scan);
+
+	pfree(newitem);
+
+	return TM_Ok;
 }
 
 /*

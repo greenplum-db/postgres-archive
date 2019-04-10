@@ -31,6 +31,7 @@
 #include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "optimizer/plancat.h"
+#include "storage/lmgr.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
@@ -131,8 +132,10 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	ZSUndoRecPtr undorecptr;
 	TransactionId xid = GetCurrentTransactionId();
 
-	if (relation->rd_att->natts == 0)
+	if (slot->tts_tupleDescriptor->natts == 0)
 		elog(ERROR, "zero-column tables not supported in zedstore yet");
+	if (slot->tts_tupleDescriptor->natts != relation->rd_att->natts)
+		elog(ERROR, "slot's attribute count doesn't match relcache entry");
 
 	slot_getallattrs(slot);
 	d = slot->tts_values;
@@ -142,7 +145,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	ZSUndoRecPtrInitialize(&undorecptr);
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
-		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
+		Form_pg_attribute attr = &slot->tts_tupleDescriptor->attrs[attno - 1];
 		Datum		datum = d[attno - 1];
 		bool		isnull = isnulls[attno - 1];
 		Datum		toastptr = (Datum) 0;
@@ -210,7 +213,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
-		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
+		Form_pg_attribute attr = &(slots[0])->tts_tupleDescriptor->attrs[attno - 1];
 		int			ntupletoasted = 0;
 
 		for (i = 0; i < ntuples; i++)
@@ -269,44 +272,91 @@ zedstoream_delete(Relation relation, ItemPointer tid_p, CommandId cid,
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	TransactionId xid = GetCurrentTransactionId();
 	AttrNumber	attno;
+	TM_Result result = TM_Ok;
 
+retry:
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
-		TM_Result result;
-
 		result = zsbt_delete(relation, attno, tid, xid, cid,
 							 snapshot, crosscheck, wait, hufd, changingPart);
-
-		/*
-		 * TODO: Here, we should check for TM_BeingModified, like heap_delete()
-		 * does
-		 */
-
 		if (result != TM_Ok)
+			break;
+	}
+
+	if (result != TM_Ok)
+	{
+		if (attno != 1)
 		{
-			if (attno != 1)
+			/* failed to delete this attribute, but we might already have
+			 * deleted other attributes. */
+			elog(ERROR, "could not delete all columns of row");
+		}
+
+		if (result == TM_Invisible)
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("attempted to delete invisible tuple")));
+		else if (result == TM_BeingModified && wait)
+		{
+			TransactionId	xwait = hufd->xmax;
+
+			/* TODO: use something like heap_acquire_tuplock() for priority */
+			if (!TransactionIdIsCurrentTransactionId(xwait))
 			{
-				/* failed to delete this attribute, but we might already have
-				 * deleted other attributes. */
-				elog(ERROR, "could not delete all columns of row");
+				XactLockTableWait(xwait, relation, tid_p, XLTW_Delete);
+				goto retry;
 			}
-			return result;
 		}
 	}
 
-	return TM_Ok;
+	return result;
 }
 
 
 static TM_Result
-zedstoream_lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
+zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 					  TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
 					  LockWaitPolicy wait_policy, uint8 flags,
 					  TM_FailureData *hufd)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function %s not implemented yet", __func__)));
+	zstid		tid = ZSTidFromItemPointer(*tid_p);
+	TransactionId xid = GetCurrentTransactionId();
+	TM_Result result;
+
+	/*
+	 * For now, we lock just the first attribute. As long as everyone
+	 * does that, that's enough.
+	 */
+	result = zsbt_lock_item(relation, 1 /* attno */, tid, xid, cid,
+							snapshot, mode, wait_policy, hufd);
+
+	if (result != TM_Ok)
+	{
+		if (result == TM_Invisible)
+		{
+			/*
+			 * This is possible, but only when locking a tuple for ON CONFLICT
+			 * UPDATE.  We return this value here rather than throwing an error in
+			 * order to give that case the opportunity to throw a more specific
+			 * error.
+			 */
+		}
+		else if (result == TM_BeingModified ||
+				 result == TM_Updated ||
+				 result == TM_Deleted)
+		{
+			elog(ERROR, "tuple-lock conflict handling not implemented yet");
+		}
+
+		/* TODO: do we need to fill in the slot if we fail to lock? */
+		return result;
+	}
+
+	/* Fetch the tuple, too. */
+	if (!zedstoream_fetch_row(relation, tid_p, snapshot, slot, 0, NULL))
+		elog(ERROR, "could not fetch locked tuple");
+
+	return TM_Ok;
 }
 
 
@@ -332,7 +382,7 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	 * TODO: Since we have visibility information on each column, we could skip
 	 * updating columns whose value didn't change.
 	 */
-
+retry:
 	result = TM_Ok;
 	newtid = InvalidZSTid;
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
@@ -341,7 +391,6 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 		Datum		newdatum = d[attno - 1];
 		bool		newisnull = isnulls[attno - 1];
 		Datum		toastptr = (Datum) 0;
-		TM_Result this_result;
 
 		/* If this datum is too large, toast it */
 		if (!newisnull && attr->attlen < 0 &&
@@ -350,23 +399,43 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 			toastptr = newdatum = zedstore_toast_datum(relation, attno, newdatum);
 		}
 
-		this_result = zsbt_update(relation, attno, otid, newdatum, newisnull,
-								  xid, cid, snapshot, crosscheck,
-								  wait, hufd, &newtid);
+		result = zsbt_update(relation, attno, otid, newdatum, newisnull,
+							 xid, cid, snapshot, crosscheck,
+							 wait, hufd, &newtid);
 
-		if (this_result != TM_Ok)
-		{
-			/* FIXME: hmm, failed to delete this attribute, but we might already have
-			 * deleted other attributes. Error? */
-			/* FIXME: this leaks the toast chain on failure */
-			result = this_result;
+		if (result != TM_Ok)
 			break;
-		}
 
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, newtid);
 	}
-	if (result == TM_Ok)
+
+	if (result != TM_Ok)
+	{
+		if (attno != 1)
+		{
+			/* failed to delete this attribute, but we might already have
+			 * deleted other attributes. */
+			elog(ERROR, "could not delete all columns of row");
+		}
+
+		if (result == TM_Invisible)
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("attempted to update invisible tuple")));
+		else if (result == TM_BeingModified && wait)
+		{
+			TransactionId	xwait = hufd->xmax;
+
+			/* TODO: use something like heap_acquire_tuplock() for priority */
+			if (!TransactionIdIsCurrentTransactionId(xwait))
+			{
+				XactLockTableWait(xwait, relation, otid_p, XLTW_Delete);
+				goto retry;
+			}
+		}
+	}
+	else
 		slot->tts_tid = ItemPointerFromZSTid(newtid);
 
 	/* TODO: could we do HOT udates? */
@@ -715,7 +784,7 @@ zedstoream_begin_index_fetch(Relation rel)
 
 	zscan->idx_fetch_data.rel = rel;
 
-	zscan->proj_atts = palloc(rel->rd_att->natts * sizeof(int));
+	zscan->proj_atts = NULL;
 	zscan->num_proj_atts = 0;
 
 	return (IndexFetchTableData *) zscan;
@@ -728,6 +797,7 @@ zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch)scan;
 	Relation	rel = zscan->idx_fetch_data.rel;
 
+	zscan->proj_atts = palloc(rel->rd_att->natts * sizeof(int));
 	zscan->num_proj_atts = 0;
 
 	/*
@@ -754,7 +824,8 @@ zedstoream_end_index_fetch(IndexFetchTableData *scan)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
 
-	pfree(zscan->proj_atts);
+	if (zscan->proj_atts)
+		pfree(zscan->proj_atts);
 	pfree(zscan);
 }
 
@@ -771,8 +842,10 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 	 * we don't do in-place updates, so this is essentially the same as
 	 * fetch_row_version.
 	 */
-	*call_again = false;
-	*all_dead = false;
+	if (call_again)
+		*call_again = false;
+	if (all_dead)
+		*all_dead = false;
 	return zedstoream_fetch_row(scan->rel, tid_p, snapshot, slot,
 								zscan->num_proj_atts, zscan->proj_atts);
 }
@@ -782,11 +855,11 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
  */
 static bool
 zedstoream_fetch_row(Relation rel,
-							 ItemPointer tid_p,
-							 Snapshot snapshot,
-							 TupleTableSlot *slot,
-							 int num_proj_atts,
-							 int *proj_atts)
+					 ItemPointer tid_p,
+					 Snapshot snapshot,
+					 TupleTableSlot *slot,
+					 int num_proj_atts,
+					 int *proj_atts)
 {
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	bool		found = true;
@@ -818,7 +891,11 @@ zedstoream_fetch_row(Relation rel,
 		zstid		this_tid;
 
 		if (att->attisdropped)
+		{
+			slot->tts_values[natt] = (Datum) 0;
+			slot->tts_isnull[natt] = true;
 			continue;
+		}
 
 		zsbt_begin_scan(rel, natt + 1, tid, snapshot, &btree_scan);
 
@@ -828,14 +905,21 @@ zedstoream_fetch_row(Relation rel,
 				found = false;
 			else
 			{
+				/*
+				 * flatten any ZS-TOASTed values, becaue the rest of the system
+				 * doesn't know how to deal with them.
+				 */
+				if (!isnull && btree_scan.attlen == -1 &&
+					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+				{
+					datum = zedstore_toast_flatten(rel, natt + 1, tid, datum);
+				}
 				slot->tts_values[natt] = datum;
 				slot->tts_isnull[natt] = isnull;
 			}
 		}
 		else
 			found = false;
-
-		/* FIXME: detoasting */
 
 		zsbt_end_scan(&btree_scan);
 	}

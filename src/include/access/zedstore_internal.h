@@ -409,6 +409,10 @@ extern TM_Result zsbt_update(Relation rel, AttrNumber attno, zstid otid,
 							 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 							 bool wait, TM_FailureData *hufd, zstid *newtid_p);
 extern void zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr);
+extern TM_Result zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
+			   TransactionId xid, CommandId cid, Snapshot snapshot,
+			   LockTupleMode lockmode, LockWaitPolicy wait_policy,
+			   TM_FailureData *hufd);
 extern void zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapshot, ZSBtreeScan *scan);
 extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
@@ -423,7 +427,7 @@ extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buf
 
 /* prototypes for functions in zedstore_visibility.c */
 extern TM_Result zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item,
-				   bool *undo_record_needed);
+				   bool *undo_record_needed, TM_FailureData *tmfd);
 extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item);
 
 /* prototypes for functions in zedstore_toast.c */
