@@ -1347,7 +1347,7 @@ table_relation_copy_data(Relation rel, RelFileNode newrnode)
  * is copied in that index's order; if use_sort is false and OidIndex is
  * InvalidOid, no sorting is performed.
  *
- * OldestXmin, FreezeXid, MultiXactCutoff need to currently valid values for
+ * OldestXmin, FreezeXid, MultiXactCutoff need to be currently valid values for
  * the table.
  *
  * *num_tuples, *tups_vacuumed, *tups_recently_dead will contain statistics

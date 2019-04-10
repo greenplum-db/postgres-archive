@@ -60,6 +60,15 @@ static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 
 static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems);
 
+static TM_Result zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
+					 TransactionId xid, CommandId cid, Snapshot snapshot,
+					 Snapshot crosscheck, bool wait, TM_FailureData *hufd);
+static void zsbt_update_insert_new(Relation rel, AttrNumber attno,
+					   Datum newdatum, bool newisnull, zstid *newtid,
+					   TransactionId xid, CommandId cid);
+static void zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
+					  TransactionId xid, CommandId cid);
+
 /* ----------------------------------------------------------------
  *						 Public interface
  * ----------------------------------------------------------------
@@ -511,23 +520,44 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 			Snapshot crosscheck, bool wait, TM_FailureData *hufd,
 			zstid *newtid_p)
 {
+	TM_Result	result;
+
+	/*
+	 * Find and lock the old item.
+	 *
+	 * TODO: If there's free TID space left on the same page, we should keep the
+	 * buffer locked, and use the same page for the new tuple.
+	 */
+	result = zsbt_update_lock_old(rel, attno, otid,
+								  xid, cid, snapshot,
+								  crosscheck, wait, hufd);
+
+	if (result != TM_Ok)
+		return result;
+
+	/* insert new version */
+	zsbt_update_insert_new(rel, attno, newdatum, newisnull, newtid_p, xid, cid);
+
+	/* update the old item with the "t_ctid pointer" for the new item */
+	zsbt_mark_old_updated(rel, attno, otid, *newtid_p, xid, cid);
+
+	return TM_Ok;
+}
+
+/*
+ * Subroutine of zsbt_update(): locks the old item for update.
+ */
+static TM_Result
+zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
+					 TransactionId xid, CommandId cid, Snapshot snapshot,
+					 Snapshot crosscheck, bool wait, TM_FailureData *hufd)
+{
 	TupleDesc	desc = RelationGetDescr(rel);
 	Form_pg_attribute attr = &desc->attrs[attno - 1];
 	ZSBtreeScan scan;
 	ZSUncompressedBtreeItem *olditem;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
-	ZSUndoRecPtr undorecptr;
-	ZSUncompressedBtreeItem *deleteditem;
-	ZSUncompressedBtreeItem *newitem;
-	OffsetNumber maxoff;
-	Buffer		buf;
-	Page		page;
-	ZSBtreePageOpaque *opaque;
-	zstid		newtid = *newtid_p;
-	Size		datumsz;
-	Size		newitemsz;
-	char	   *dataptr;
 
 	/*
 	 * Find the item to delete.  It could be part of a compressed item,
@@ -562,37 +592,76 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	}
 
 	/*
-	 * Look at the last item on the page, for its tid. We will use that + 1,
-	 * as the TID of the new item.
+	 * TODO: tuple-locking not implemented. Pray that there is no competing
+	 * concurrent update!
 	 */
-	buf = scan.lastbuf;
-	page = BufferGetPage(buf);
-	opaque = ZSBtreePageGetOpaque(page);
-	maxoff = PageGetMaxOffsetNumber(page);
-	if (maxoff >= FirstOffsetNumber)
-	{
-		ItemId		iid = PageGetItemId(page, maxoff);
-		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
 
-		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
-			newtid = ((ZSCompressedBtreeItem *) hitup)->t_lasttid;
-		else
-			newtid = hitup->t_tid;
-		newtid = ZSTidIncrementForInsert(newtid);
-	}
-	else
-	{
-		newtid = opaque->zs_lokey;
-	}
+	/* transfer ownership of the buffer, and free the scan. */
+	zsbt_end_scan(&scan);
 
-	if (newtid >= opaque->zs_hikey)
+	return TM_Ok;
+}
+
+/*
+ * Subroutine of zsbt_update(): inserts the new, updated, item.
+ */
+static void
+zsbt_update_insert_new(Relation rel, AttrNumber attno,
+					   Datum newdatum, bool newisnull, zstid *newtid,
+					   TransactionId xid, CommandId cid)
+{
+	ZSUndoRecPtr undorecptr;
+
+	ZSUndoRecPtrInitialize(&undorecptr);
+	zsbt_multi_insert(rel, attno, &newdatum, &newisnull, newtid, 1,
+					  xid, cid, &undorecptr);
+}
+
+/*
+ * Subroutine of zsbt_update(): mark old item as updated.
+ */
+static void
+zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
+					  TransactionId xid, CommandId cid)
+{
+	TupleDesc	desc = RelationGetDescr(rel);
+	Form_pg_attribute attr = &desc->attrs[attno - 1];
+	ZSBtreeScan scan;
+	ZSUncompressedBtreeItem *olditem;
+	TM_Result	result;
+	bool		keep_old_undo_ptr = true;
+	ZSUndoRecPtr undorecptr;
+	ZSUncompressedBtreeItem *deleteditem;
+
+	/*
+	 * Find the item to delete.  It could be part of a compressed item,
+	 * we let zsbt_scan_next_internal() handle that.
+	 */
+	zsbt_begin_scan(rel, attno, otid, SnapshotAny, &scan);
+	scan.for_update = true;
+
+	if (attr->attbyval != scan.attbyval || attr->attlen != scan.attlen)
+		elog(ERROR, "attribute information stored in root dir doesn't match with rel");
+
+	olditem = zsbt_scan_next_internal(&scan);
+	if (olditem->t_tid != otid)
 	{
-		/* no more free TIDs on the page. Bail out */
 		/*
-		 * TODO: what we should do, is to find another target page for the
-		 * new tuple.
+		 * or should this be TM_Invisible? The heapam at least just throws
+		 * an error, I think..
 		 */
-		elog(ERROR, "out of TID space on page");
+		elog(ERROR, "could not find old tuple to update with TID (%u, %u) for attribute %d",
+			 ZSTidGetBlockNumber(otid), ZSTidGetOffsetNumber(otid), attno);
+	}
+
+	/*
+	 * Is it visible to us?
+	 */
+	result = zs_SatisfiesUpdate(&scan, olditem, &keep_old_undo_ptr);
+	if (result != TM_Ok)
+	{
+		zsbt_end_scan(&scan);
+		elog(ERROR, "tuple concurrently updated - not implemented");
 	}
 
 	/* Create UNDO record. */
@@ -604,12 +673,12 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 		undorec.rec.attno = attno;
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
-		undorec.rec.tid = newtid;
+		undorec.rec.tid = otid;
 		if (keep_old_undo_ptr)
 			undorec.prevundorec = olditem->t_undo_ptr;
 		else
 			ZSUndoRecPtrInitialize(&undorec.prevundorec);
-		undorec.otid = otid;
+		undorec.newtid = newtid;
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
@@ -620,44 +689,13 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	deleteditem->t_flags |= ZSBT_UPDATED;
 	deleteditem->t_undo_ptr = undorecptr;
 
-	/*
-	 * Form a ZSBtreeItem to insert.
-	 */
-	if (newisnull)
-		datumsz = 0;
-	else
-		datumsz = zs_datumGetSize(newdatum, attr->attbyval, attr->attlen);
-	newitemsz = offsetof(ZSUncompressedBtreeItem, t_payload) + datumsz;
-
-	newitem = palloc(newitemsz);
-	memset(newitem, 0, offsetof(ZSUncompressedBtreeItem, t_payload)); /* zero padding */
-	newitem->t_tid = newtid;
-	newitem->t_flags = 0;
-	newitem->t_size = newitemsz;
-	newitem->t_undo_ptr = undorecptr;
-
-	if (newisnull)
-		newitem->t_flags |= ZSBT_NULL;
-	else
-	{
-		dataptr = ((char *) newitem) + offsetof(ZSUncompressedBtreeItem, t_payload);
-		if (attr->attbyval)
-			store_att_byval(dataptr, newdatum, attr->attlen);
-		else
-			memcpy(dataptr, DatumGetPointer(newdatum), datumsz);
-	}
-
 	zsbt_replace_item(rel, attno, scan.lastbuf,
 					  (ZSBtreeItem *) olditem, (ZSBtreeItem *) deleteditem,
-					  (ZSBtreeItem *) newitem, NIL);
+					  NULL, NIL);
 	scan.lastbuf_is_locked = false;	/* zsbt_recompress_replace released */
 	zsbt_end_scan(&scan);
 
 	pfree(deleteditem);
-	pfree(newitem);
-
-	*newtid_p = newtid;
-	return TM_Ok;
 }
 
 /*

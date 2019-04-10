@@ -85,6 +85,14 @@ typedef struct
 	 */
 } ZSUndoRec_Delete;
 
+/*
+ * This is used for an UPDATE, to mark the old tuple version as updated.
+ * It's the same as a deletion, except this stores the TID of the new tuple
+ * version, so it can be followed in READ COMMITTED mode.
+ *
+ * The ZSUndoRec_Insert record is used for the insertion of the new tuple
+ * version.
+ */
 typedef struct
 {
 	ZSUndoRec	rec;
@@ -92,12 +100,7 @@ typedef struct
 	/* Like in ZSUndoRec_Delete. */
 	ZSUndoRecPtr prevundorec;
 
-	/* old version of the datum */
-	/* TODO: currently, we only do "cold" updates, so the old tuple is
-	 * left in the old place. Once we start supporting in-place updates,
-	 * the old tuple should be stored here.
-	 */
-	zstid		otid;
+	zstid		newtid;
 
 } ZSUndoRec_Update;
 

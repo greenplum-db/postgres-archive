@@ -660,8 +660,6 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 					break;
 				case ZSUNDO_TYPE_UPDATE:
 					if (did_commit)
-						zsundo_record_dead_tuple(trimstats, ((ZSUndoRec_Update *) undorec)->otid);
-					else
 						zsundo_record_dead_tuple(trimstats, undorec->tid);
 					break;
 			}

@@ -66,8 +66,7 @@ zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item,
 	if (!is_deleted)
 	{
 		/* Inserted tuple */
-		Assert(undorec->type == ZSUNDO_TYPE_INSERT ||
-			   undorec->type == ZSUNDO_TYPE_UPDATE);
+		Assert(undorec->type == ZSUNDO_TYPE_INSERT);
 
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
@@ -186,8 +185,7 @@ zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 	if (!is_deleted)
 	{
 		/* Inserted tuple */
-		Assert(undorec->type == ZSUNDO_TYPE_INSERT ||
-			   undorec->type == ZSUNDO_TYPE_UPDATE);
+		Assert(undorec->type == ZSUNDO_TYPE_INSERT);
 
 		return xid_is_visible(snapshot, undorec->xid, undorec->cid);
 	}
@@ -221,8 +219,7 @@ zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 
 			undorec = zsundo_fetch(rel, prevptr);
 
-			Assert(undorec->type == ZSUNDO_TYPE_INSERT ||
-				   undorec->type == ZSUNDO_TYPE_UPDATE);
+			Assert(undorec->type == ZSUNDO_TYPE_INSERT);
 			if (xid_is_visible(snapshot, undorec->xid, undorec->cid))
 				return true;	/* we can see the insert, but not the delete */
 			else
@@ -261,8 +258,7 @@ zs_SatisfiesSelf(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 	if (!is_deleted)
 	{
 		/* Inserted tuple */
-		Assert(undorec->type == ZSUNDO_TYPE_INSERT ||
-			   undorec->type == ZSUNDO_TYPE_UPDATE);
+		Assert(undorec->type == ZSUNDO_TYPE_INSERT);
 
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 			return true;		/* inserted by me */
@@ -334,8 +330,7 @@ zs_SatisfiesDirty(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 	if (!is_deleted)
 	{
 		/* Inserted tuple */
-		Assert(undorec->type == ZSUNDO_TYPE_INSERT ||
-			   undorec->type == ZSUNDO_TYPE_UPDATE);
+		Assert(undorec->type == ZSUNDO_TYPE_INSERT);
 
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 			return true;		/* inserted by me */
