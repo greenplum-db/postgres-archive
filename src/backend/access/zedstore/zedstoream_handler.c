@@ -127,6 +127,9 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	ZSUndoRecPtr undorecptr;
 	TransactionId xid = GetCurrentTransactionId();
 
+	if (relation->rd_att->natts == 0)
+		elog(ERROR, "zero-column tables not supported in zedstore yet");
+
 	slot_getallattrs(slot);
 	d = slot->tts_values;
 	isnulls = slot->tts_isnull;
@@ -190,6 +193,9 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	Datum	   *datums;
 	bool	   *isnulls;
 	zstid	   *tids;
+
+	if (relation->rd_att->natts == 0)
+		elog(ERROR, "zero-column tables not supported in zedstore yet");
 
 	tupletoasted = palloc(ntuples * sizeof(int));
 	datums = palloc(ntuples * sizeof(Datum));
@@ -524,6 +530,9 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	MemoryContext oldcontext = CurrentMemoryContext;
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 	int			i;
+
+	if (slot->tts_tupleDescriptor->natts == 0)
+		elog(ERROR, "zero-column tables not supported in zedstore yet");
 
 	if (scan->num_proj_atts > slot->tts_tupleDescriptor->natts)
 	{
