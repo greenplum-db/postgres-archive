@@ -353,12 +353,27 @@ GetNeededColumnsForNode(Node *expr, bool *mask, int n)
 bool *
 GetNeededColumnsForScan(ScanState *scanstate, int ncol)
 {
-	bool *proj;
-	int i;
+	Plan	   *plan = scanstate->ps.plan;
+	bool	   *proj;
+	int			i;
 
 	proj = palloc0(ncol * sizeof(bool));
-	GetNeededColumnsForNode((Node*) scanstate->ps.plan->targetlist, proj, ncol);
-	GetNeededColumnsForNode((Node*) scanstate->ps.plan->qual, proj, ncol);
+	GetNeededColumnsForNode((Node *) plan->targetlist, proj, ncol);
+	GetNeededColumnsForNode((Node *) plan->qual, proj, ncol);
+
+	/*
+	 * Some node types have more fields with expressions. FIXME: This list
+	 * surely very incomplete. Should teach the planner to do this for us.
+	 */
+	if (IsA(plan, IndexScan))
+	{
+		GetNeededColumnsForNode((Node *) ((IndexScan *) plan)->indexqualorig, proj, ncol);
+		GetNeededColumnsForNode((Node *) ((IndexScan *) plan)->indexorderbyorig, proj, ncol);
+	}
+	else if (IsA(plan, BitmapHeapScan))
+	{
+		GetNeededColumnsForNode((Node *) ((BitmapHeapScan *) plan)->bitmapqualorig, proj, ncol);
+	}
 
 	for (i = 0; i < ncol; i++)
 	{
