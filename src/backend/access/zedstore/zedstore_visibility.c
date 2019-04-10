@@ -378,6 +378,33 @@ zs_SatisfiesDirty(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 }
 
 /*
+ * True if tuple might be visible to some transaction; false if it's
+ * surely dead to everyone, ie, vacuumable.
+ */
+static bool
+zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
+{
+	Snapshot	snapshot = scan->snapshot;
+	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
+	bool		is_deleted;
+
+	Assert (snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE);
+
+	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
+
+	if (item->t_undo_ptr.counter < recent_oldest_undo.counter)
+	{
+		if (!is_deleted)
+			return true;
+		else
+			return false;
+	}
+
+	/* we could fetch the UNDO record and inspect closer, but we won't bother */
+	return true;
+}
+
+/*
  * Like HeapTupleSatisfiesVisibility
  */
 bool
@@ -418,8 +445,7 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 			break;
 
 		case SNAPSHOT_NON_VACUUMABLE:
-			elog(ERROR, "SnapshotNonVacuumable not implemented in zedstore yet");
-			break;
+			return zs_SatisfiesNonVacuumable(scan, item);
 	}
 
 	return false;				/* keep compiler quiet */
