@@ -67,7 +67,7 @@ static void zsbt_update_insert_new(Relation rel, AttrNumber attno,
 					   Datum newdatum, bool newisnull, zstid *newtid,
 					   TransactionId xid, CommandId cid);
 static void zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
-					  TransactionId xid, CommandId cid);
+					  TransactionId xid, CommandId cid, Snapshot snapshot);
 
 /* ----------------------------------------------------------------
  *						 Public interface
@@ -539,7 +539,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	zsbt_update_insert_new(rel, attno, newdatum, newisnull, newtid_p, xid, cid);
 
 	/* update the old item with the "t_ctid pointer" for the new item */
-	zsbt_mark_old_updated(rel, attno, otid, *newtid_p, xid, cid);
+	zsbt_mark_old_updated(rel, attno, otid, *newtid_p, xid, cid, snapshot);
 
 	return TM_Ok;
 }
@@ -622,7 +622,7 @@ zsbt_update_insert_new(Relation rel, AttrNumber attno,
  */
 static void
 zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
-					  TransactionId xid, CommandId cid)
+					  TransactionId xid, CommandId cid, Snapshot snapshot)
 {
 	TupleDesc	desc = RelationGetDescr(rel);
 	Form_pg_attribute attr = &desc->attrs[attno - 1];
@@ -638,7 +638,7 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	 * Find the item to delete.  It could be part of a compressed item,
 	 * we let zsbt_scan_next_internal() handle that.
 	 */
-	zsbt_begin_scan(rel, attno, otid, SnapshotAny, &scan);
+	zsbt_begin_scan(rel, attno, otid, snapshot, &scan);
 	scan.for_update = true;
 
 	if (attr->attbyval != scan.attbyval || attr->attlen != scan.attlen)
