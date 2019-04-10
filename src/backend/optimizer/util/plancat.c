@@ -121,6 +121,8 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 	 */
 	relation = table_open(relationObjectId, NoLock);
 
+	if (relation->rd_tableam)
+		rel->leverage_column_projection = relation->rd_tableam->scans_leverage_column_projection;
 	/* Temporary and unlogged relations are inaccessible during recovery. */
 	if (!RelationNeedsWAL(relation) && RecoveryInProgress())
 		ereport(ERROR,

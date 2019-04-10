@@ -818,6 +818,9 @@ use_physical_tlist(PlannerInfo *root, Path *path, int flags)
 		rel->rtekind != RTE_CTE)
 		return false;
 
+	if (rel->rtekind == RTE_RELATION && rel->leverage_column_projection)
+		return false;
+
 	/*
 	 * Can't do it with inheritance cases either (mainly because Append
 	 * doesn't project; this test may be unnecessary now that
