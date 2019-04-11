@@ -102,3 +102,23 @@ COPY t_zedcopy (a, b, c, d, e) from stdin;
 \.
 
 select * from t_zedcopy;
+
+-- Test expressions in the defaults
+CREATE OR REPLACE FUNCTION foo(a INT) RETURNS TEXT AS $$
+DECLARE res TEXT := '';
+        i INT;
+BEGIN
+  i := 0;
+  WHILE (i < a) LOOP
+    res := res || chr(ascii('a') + i);
+    i := i + 1;
+  END LOOP;
+  RETURN res;
+END; $$ LANGUAGE PLPGSQL STABLE;
+
+create table t_zaddcol(a int) using zedstore;
+insert into t_zaddcol select * from generate_series(1, 3);
+select oid,relfilenode from pg_class where relname='t_zaddcol';
+alter table t_zaddcol add column b int generated always as (a + 1) stored;
+select oid,relfilenode from pg_class where relname='t_zaddcol';
+select * from t_zaddcol;

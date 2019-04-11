@@ -52,6 +52,7 @@ typedef struct ZedStoreDescData
 	int		   *proj_atts;
 	ZSBtreeScan *btree_scans;
 	int			num_proj_atts;
+	bool        *project_columns;
 
 	zs_scan_state state;
 	zstid		cur_range_start;
@@ -450,6 +451,41 @@ zedstoream_slot_callbacks(Relation relation)
 	return &TTSOpsVirtual;
 }
 
+static void
+zs_initialize_proj_attributes(ZedStoreDesc scan, int natts)
+{
+	if (scan->num_proj_atts == 0)
+	{
+		/*
+		 * convert booleans array into an array of the attribute numbers of the
+		 * required columns.
+		 */
+		for (int i = 0; i < natts; i++)
+		{
+			/* project_columns empty also conveys need all the columns */
+			if (scan->project_columns == NULL || scan->project_columns[i])
+			{
+				scan->proj_atts[scan->num_proj_atts++] = i;
+			}
+		}
+
+		/* Extra setup for bitmap and sample scans */
+		if (scan->rs_scan.rs_bitmapscan || scan->rs_scan.rs_samplescan)
+		{
+			scan->bmscan_ntuples = 0;
+			scan->bmscan_tids = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(zstid));
+
+			scan->bmscan_datums = palloc(scan->num_proj_atts * sizeof(Datum *));
+			scan->bmscan_isnulls = palloc(scan->num_proj_atts * sizeof(bool *));
+			for (int i = 0; i < scan->num_proj_atts; i++)
+			{
+				scan->bmscan_datums[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(Datum));
+				scan->bmscan_isnulls[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(bool));
+			}
+		}
+	}
+}
+
 static TableScanDesc
 zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot,
 											int nkeys, ScanKey key,
@@ -505,37 +541,10 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 		scan->rs_scan.rs_key = NULL;
 
 	scan->proj_atts = palloc(relation->rd_att->natts * sizeof(int));
+	scan->project_columns = project_columns;
 
 	scan->btree_scans = palloc0(relation->rd_att->natts * sizeof(ZSBtreeScan));
 	scan->num_proj_atts = 0;
-
-	/*
-	 * convert booleans array into an array of the attribute numbers of the
-	 * required columns.
-	 */
-	for (int i = 0; i < relation->rd_att->natts; i++)
-	{
-		/* project_columns empty also conveys need all the columns */
-		if (project_columns == NULL || project_columns[i])
-		{
-			scan->proj_atts[scan->num_proj_atts++] = i;
-		}
-	}
-
-	/* Extra setup for bitmap and sample scans */
-	if (is_bitmapscan || is_samplescan)
-	{
-		scan->bmscan_ntuples = 0;
-		scan->bmscan_tids = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(zstid));
-
-		scan->bmscan_datums = palloc(scan->num_proj_atts * sizeof(Datum *));
-		scan->bmscan_isnulls = palloc(scan->num_proj_atts * sizeof(bool *));
-		for (int i = 0; i < scan->num_proj_atts; i++)
-		{
-			scan->bmscan_datums[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(Datum));
-			scan->bmscan_isnulls[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(bool));
-		}
-	}
 
 	return (TableScanDesc) scan;
 }
@@ -606,6 +615,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 	if (slot->tts_tupleDescriptor->natts == 0)
 		elog(ERROR, "zero-column tables not supported in zedstore yet");
+
+	zs_initialize_proj_attributes(scan, slot->tts_tupleDescriptor->natts);
 
 	if (scan->num_proj_atts > slot->tts_tupleDescriptor->natts)
 	{
@@ -1541,6 +1552,8 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 	int			ntuples;
 	int			first_ntuples = 0;
 	bool		firstcol;
+
+	zs_initialize_proj_attributes(scan, scan->rs_scan.rs_rd->rd_att->natts);
 
 	/*
 	 * Our strategy for a bitmap scan is to scan the tree of each attribute,
