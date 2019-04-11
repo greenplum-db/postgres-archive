@@ -79,29 +79,42 @@ fetch_undo_record:
 				*undo_record_needed = true;
 				return TM_Ok;
 			}
-			else if (TransactionIdIsInProgress(undorec->xid))
+
+			if (TransactionIdIsInProgress(undorec->xid))
 				return TM_Invisible;		/* inserter has not committed yet */
-			else if (TransactionIdDidCommit(undorec->xid))
+
+			if (TransactionIdDidCommit(undorec->xid))
 			{
 				*undo_record_needed = true;
 				return TM_Ok;
 			}
-			else
-			{
-				/* it must have aborted or crashed */
-				return TM_Invisible;
-			}
+
+			/* it must have aborted or crashed */
+			return TM_Invisible;
 		}
 		else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
 		{
 			if (TransactionIdIsCurrentTransactionId(undorec->xid))
 			{
-				tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
-				tmfd->xmax = undorec->xid;
-				tmfd->cmax = InvalidCommandId;
-				return TM_BeingModified;
+				/*
+				 * HeapTupleSatisfiesUpdate() returns TM_BeingModified for
+				 * this case, but then caller heap_update() checks again for
+				 * TransactionIdIsCurrentTransactionId() and converts this to
+				 * TM_Ok and avoids populating tmfd. For zedstore caller
+				 * doesn't have access to xid, hence can't perform the check
+				 * later. Currently update is only user of this function and
+				 * seems for zedstore need to have all the logic here inside
+				 * as have access to xid. For future need to return
+				 * TM_BeingModified for this case then also pass back as
+				 * boolean maybe that its current transaction, so caller can
+				 * take appropriate action on it. Can't return
+				 * TM_BeingModified to ExecUpdate() if wait=true, hence need
+				 * to return TM_Ok for this case.
+				 */
+				return TM_Ok;
 			}
-			else if (TransactionIdIsInProgress(undorec->xid))
+
+			if (TransactionIdIsInProgress(undorec->xid))
 			{
 				tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
 				tmfd->xmax = undorec->xid;
