@@ -257,3 +257,15 @@ select * from t_zedcopy;
  10005 | 26 | 36    | 46     | 56
 (12 rows)
 
+-- Test for alter table add column force rewrite
+create table t_zaddcol(a int) using zedstore;
+insert into t_zaddcol select * from generate_series(1, 3);
+alter table t_zaddcol add column b int generated always as (a + 1) stored;
+select * from t_zaddcol;
+ a | b 
+---+---
+ 1 | 2
+ 2 | 3
+ 3 | 4
+(3 rows)
+
