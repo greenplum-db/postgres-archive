@@ -257,9 +257,10 @@ select * from t_zedcopy;
  10005 | 26 | 36    | 46     | 56
 (12 rows)
 
--- Test for alter table add column force rewrite
+--- Test for alter table add column
 create table t_zaddcol(a int) using zedstore;
 insert into t_zaddcol select * from generate_series(1, 3);
+-- rewrite case
 alter table t_zaddcol add column b int generated always as (a + 1) stored;
 select * from t_zaddcol;
  a | b 
@@ -267,5 +268,25 @@ select * from t_zaddcol;
  1 | 2
  2 | 3
  3 | 4
+(3 rows)
+
+-- fixed length default value stored in catalog
+alter table t_zaddcol add column c int default 3;
+select * from t_zaddcol;
+ a | b | c 
+---+---+---
+ 1 | 2 | 3
+ 2 | 3 | 3
+ 3 | 4 | 3
+(3 rows)
+
+-- variable length default value stored in catalog
+alter table t_zaddcol add column d text default 'abcdefgh';
+select d from t_zaddcol;
+    d     
+----------
+ abcdefgh
+ abcdefgh
+ abcdefgh
 (3 rows)
 

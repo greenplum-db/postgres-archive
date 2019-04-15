@@ -456,6 +456,9 @@ zs_initialize_proj_attributes(ZedStoreDesc scan, int natts)
 {
 	if (scan->num_proj_atts == 0)
 	{
+		Relation rel = scan->rs_scan.rs_rd;
+		bool validcolumnstoscan = false;
+
 		/*
 		 * convert booleans array into an array of the attribute numbers of the
 		 * required columns.
@@ -466,7 +469,43 @@ zs_initialize_proj_attributes(ZedStoreDesc scan, int natts)
 			if (scan->project_columns == NULL || scan->project_columns[i])
 			{
 				scan->proj_atts[scan->num_proj_atts++] = i;
+
+				if (!rel->rd_att->attrs[i].attisdropped &&
+					!rel->rd_att->attrs[i].atthasmissing)
+					validcolumnstoscan = true;
 			}
+		}
+
+		/*
+		 * Just based on dropped columns or columns with missing values, it's
+		 * impossible to know how many tuples are present in the table. Hence,
+		 * need at least a valid column (not dropped and does not contain
+		 * missing values) to know what all tuples (means TIDs) are present in
+		 * the table for which datums must be returned. Below logic hence
+		 * tries to add at least one valid column to project list for scanning
+		 * if not present already.
+		 *
+		 * Note: Ideally seems this part is better handled in planner. It can
+		 * decide which column to add to project list and also which column to
+		 * scan based on cost to scan the column. AM layer having this
+		 * intelligence seems little odd.
+		 */
+		if (!validcolumnstoscan)
+		{
+			for (int i = 0; i < rel->rd_att->natts; i++)
+			{
+				if (!rel->rd_att->attrs[i].attisdropped &&
+					!rel->rd_att->attrs[i].atthasmissing)
+				{
+					scan->proj_atts[scan->num_proj_atts++] = i;
+					validcolumnstoscan = true;
+					break;
+				}
+			}
+
+			if (!validcolumnstoscan)
+				elog(ERROR,
+					 "zedstore does not support scanning tables composed entirely of dropped and or missing values");
 		}
 
 		/* Extra setup for bitmap and sample scans */
@@ -692,20 +731,29 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			int			natt = scan->proj_atts[i];
 			Datum		datum;
 			bool        isnull;
+			bool        isvaluemissing;
 			zstid		tid;
 
-			if (!zsbt_scan_next(btscan, &datum, &isnull, &tid))
+			if (!zsbt_scan_next(btscan, &datum, &isnull, &tid, &isvaluemissing))
 			{
 				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
 				break;
 			}
+
+			if (isvaluemissing)
+			{
+				slot->tts_values[natt] = datum;
+				slot->tts_isnull[natt] = isnull;
+				continue;
+			}
+
 			if (tid >= scan->cur_range_end)
 			{
 				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
 				break;
 			}
 
-			if (i == 0)
+			if (this_tid == InvalidZSTid)
 				this_tid = tid;
 			else if (this_tid != tid)
 			{
@@ -764,11 +812,14 @@ zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	bool		found;
 	Datum		datum;
 	bool		isnull;
+	bool        isvaluemissing;
 
 	/* Use the first column for the visibility information. */
 	zsbt_begin_scan(rel, 1, tid, snapshot, &btree_scan);
 
-	found = zsbt_scan_next(&btree_scan, &datum, &isnull, &ftid);
+	found = zsbt_scan_next(&btree_scan, &datum, &isnull, &ftid, &isvaluemissing);
+	Assert(!isvaluemissing);
+
 	if (found && tid != ftid)
 		found = false;
 
@@ -899,6 +950,7 @@ zedstoream_fetch_row(Relation rel,
 		ZSBtreeScan btree_scan;
 		Datum		datum;
 		bool        isnull;
+		bool        isvaluemissing;
 		zstid		this_tid;
 
 		if (att->attisdropped)
@@ -910,9 +962,9 @@ zedstoream_fetch_row(Relation rel,
 
 		zsbt_begin_scan(rel, natt + 1, tid, snapshot, &btree_scan);
 
-		if (zsbt_scan_next(&btree_scan, &datum, &isnull, &this_tid))
+		if (zsbt_scan_next(&btree_scan, &datum, &isnull, &this_tid, &isvaluemissing))
 		{
-			if (this_tid != tid)
+			if (!isvaluemissing && this_tid != tid)
 				found = false;
 			else
 			{
@@ -951,6 +1003,7 @@ zedstoream_fetch_row(Relation rel,
 		 * get *any* of the columns. Currently, if any of the columns
 		 * is missing, we treat the tuple as non-existent
 		 */
+		ExecClearTuple(slot);
 		return false;
 	}
 }
@@ -1335,6 +1388,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 		ZSBtreeScan	btree_scan;
 		Datum		datum;
 		bool        isnull;
+		bool        isvaluemissing;
 		zstid		tid;
 		Datum	   *datums = scan->bmscan_datums[natt];
 		bool	   *isnulls = scan->bmscan_isnulls[natt];
@@ -1349,9 +1403,9 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 		 * so that it could skip over to it more efficiently.
 		 */
 		ntuples = 0;
-		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid, &isvaluemissing))
 		{
-			if (ZSTidGetBlockNumber(tid) != blockno)
+			if (!isvaluemissing && ZSTidGetBlockNumber(tid) != blockno)
 			{
 				Assert(ZSTidGetBlockNumber(tid) > blockno);
 				break;
@@ -1361,10 +1415,17 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 			isnulls[ntuples] = isnull;
 			if (firstcol)
 				scan->bmscan_tids[ntuples] = tid;
-			else if (tid != scan->bmscan_tids[ntuples])
+			else if (!isvaluemissing && tid != scan->bmscan_tids[ntuples])
 				elog(ERROR, "scans on different attributes out of sync");
 
 			ntuples++;
+
+			/*
+			 * need a termination condition for a missing value because it
+			 * doesn't know how many tuples it has
+			 */
+			if (isvaluemissing && (ntuples == first_ntuples))
+				break;
 		}
 		if (firstcol)
 			first_ntuples = ntuples;
@@ -1571,6 +1632,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 		ZSBtreeScan	btree_scan;
 		Datum		datum;
 		bool        isnull;
+		bool        isvaluemissing;
 		zstid		tid;
 		Datum	   *datums = scan->bmscan_datums[natt];
 		bool	   *isnulls = scan->bmscan_isnulls[natt];
@@ -1586,34 +1648,39 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 		 * so that it could skip over to it more efficiently.
 		 */
 		ntuples = 0;
-		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid, &isvaluemissing))
 		{
-			if (ZSTidGetBlockNumber(tid) != tid_blkno)
+			if (!isvaluemissing)
 			{
-				Assert(ZSTidGetBlockNumber(tid) > tid_blkno);
-				break;
-			}
-
-			if (tbmres->ntuples != -1)
-			{
-				while (ZSTidGetOffsetNumber(tid) > tbmres->offsets[noff] && noff < tbmres->ntuples)
-					noff++;
-
-				if (noff == tbmres->ntuples)
+				if (ZSTidGetBlockNumber(tid) != tid_blkno)
+				{
+					Assert(ZSTidGetBlockNumber(tid) > tid_blkno);
 					break;
+				}
 
-				if (ZSTidGetOffsetNumber(tid) < tbmres->offsets[noff])
-					continue;
+				if (tbmres->ntuples != -1)
+				{
+					while (ZSTidGetOffsetNumber(tid) > tbmres->offsets[noff] && noff < tbmres->ntuples)
+						noff++;
+
+					if (noff == tbmres->ntuples)
+						break;
+
+					if (ZSTidGetOffsetNumber(tid) < tbmres->offsets[noff])
+						continue;
+				}
 			}
 
 			datums[ntuples] = datum;
 			isnulls[ntuples] = isnull;
 			if (firstcol)
 				scan->bmscan_tids[ntuples] = tid;
-			else if (tid != scan->bmscan_tids[ntuples])
+			else if (!isvaluemissing && tid != scan->bmscan_tids[ntuples])
 				elog(ERROR, "scans on different attributes out of sync");
 
 			ntuples++;
+			if (isvaluemissing && ntuples == first_ntuples)
+				break;
 		}
 		if (firstcol)
 			first_ntuples = ntuples;

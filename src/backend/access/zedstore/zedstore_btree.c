@@ -27,6 +27,7 @@
 #include "postgres.h"
 
 #include "access/tableam.h"
+#include "access/tupdesc_details.h"
 #include "access/xact.h"
 #include "access/zedstore_compression.h"
 #include "access/zedstore_internal.h"
@@ -87,46 +88,35 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapsho
 
 	rootblk = zsmeta_get_root_for_attribute(rel, attno, false, &attlen, &attbyval);
 
-	if (rootblk == InvalidBlockNumber)
-	{
-		/* completely empty tree */
-		scan->rel = NULL;
-		scan->attno = InvalidAttrNumber;
-		scan->attlen = 0;
-		scan->attbyval = false;
-		scan->active = false;
-		scan->lastbuf = InvalidBuffer;
-		scan->lastbuf_is_locked = false;
-		scan->lastoff = InvalidOffsetNumber;
-		scan->snapshot = NULL;
-		scan->context = NULL;
-		memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
-		scan->nexttid = InvalidZSTid;
-		return;
-	}
-
-	buf = zsbt_descend(rel, rootblk, starttid);
-	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
 	scan->rel = rel;
 	scan->attno = attno;
 	scan->attlen = attlen;
 	scan->attbyval = attbyval;
 	scan->snapshot = snapshot;
 	scan->for_update = false;		/* caller can change this */
+	scan->atthasmissing = rel->rd_att->attrs[attno-1].atthasmissing;
+	scan->context = CurrentMemoryContext;
+	scan->lastbuf_is_locked = false;
+	scan->lastoff = InvalidOffsetNumber;
+	scan->has_decompressed = false;
+	scan->nexttid = starttid;
+	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
+
+	if (rootblk == InvalidBlockNumber)
+	{
+		/* completely empty tree */
+		scan->active = false;
+		scan->lastbuf = InvalidBuffer;
+		return;
+	}
+
+	buf = zsbt_descend(rel, rootblk, starttid);
+	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
 	scan->active = true;
 	scan->lastbuf = buf;
-	scan->lastbuf_is_locked = false;
-	scan->lastoff = InvalidOffsetNumber;
-	scan->nexttid = starttid;
 
-	scan->context = CurrentMemoryContext;
-
-	scan->has_decompressed = false;
 	zs_decompress_init(&scan->decompressor);
-
-	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 }
 
 void
@@ -146,17 +136,66 @@ zsbt_end_scan(ZSBtreeScan *scan)
 	scan->active = false;
 }
 
+static void
+zsbt_fill_missing_attribute_value(ZSBtreeScan *scan, Datum *datum, bool *isnull)
+{
+	int attno = scan->attno - 1;
+	AttrMissing *attrmiss = NULL;
+	TupleDesc tupleDesc = scan->rel->rd_att;
+	Form_pg_attribute attr = TupleDescAttr(tupleDesc, attno);
+
+	*isnull = true;
+	if (tupleDesc->constr &&
+		tupleDesc->constr->missing)
+	{
+		/*
+		 * If there are missing values we want to put them into the
+		 * tuple.
+		 */
+		attrmiss = tupleDesc->constr->missing;
+
+		if (attrmiss[attno].am_present)
+		{
+			*isnull = false;
+			if (attr->attbyval)
+				*datum = fetch_att(&attrmiss[attno].am_value, attr->attbyval, attr->attlen);
+			else
+				*datum = zs_datumCopy(attrmiss[attno].am_value, attr->attbyval, attr->attlen);
+		}
+	}
+}
+
 /*
  * Return true if there was another tuple. The datum is returned in *datum,
  * and its TID in *tid. For a pass-by-ref datum, it's a palloc'd copy.
  */
 bool
-zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
+zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid, bool *isvaluemissing)
 {
 	ZSUncompressedBtreeItem *item;
 
+	*isvaluemissing = false;
+
 	if (!scan->active)
+	{
+		/*
+		 * If btree is not present for this attribute, active will be false
+		 * and atthasmissing will be true. In this case the table doesn't have
+		 * the datum value but instead catalog has the value for it. Hence,
+		 * fill the value from the catalog. Important note: we don't know the
+		 * TID for this attributes in such case hence caller needs to not
+		 * interpret the TID value.
+		 */
+		if (scan->atthasmissing)
+		{
+			zsbt_fill_missing_attribute_value(scan, datum, isnull);
+			*tid = InvalidZSTid;
+			*isvaluemissing = true;
+			return true;
+		}
+
 		return false;
+	}
 
 	while ((item = zsbt_scan_next_internal(scan)) != NULL)
 	{

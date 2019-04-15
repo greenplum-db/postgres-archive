@@ -366,6 +366,7 @@ typedef struct ZSBtreeScan
 	AttrNumber	attno;
 	int16		attlen;
 	bool		attbyval;
+	bool        atthasmissing;
 
 	/*
 	 * memory context that should be used for any allocations that go with the scan,
@@ -414,7 +415,7 @@ extern TM_Result zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 			   LockTupleMode lockmode, LockWaitPolicy wait_policy,
 			   TM_FailureData *hufd);
 extern void zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapshot, ZSBtreeScan *scan);
-extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid);
+extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid, bool *isvaluemissing);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
 

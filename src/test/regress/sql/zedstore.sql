@@ -103,8 +103,15 @@ COPY t_zedcopy (a, b, c, d, e) from stdin;
 
 select * from t_zedcopy;
 
--- Test for alter table add column force rewrite
+--- Test for alter table add column
 create table t_zaddcol(a int) using zedstore;
 insert into t_zaddcol select * from generate_series(1, 3);
+-- rewrite case
 alter table t_zaddcol add column b int generated always as (a + 1) stored;
 select * from t_zaddcol;
+-- fixed length default value stored in catalog
+alter table t_zaddcol add column c int default 3;
+select * from t_zaddcol;
+-- variable length default value stored in catalog
+alter table t_zaddcol add column d text default 'abcdefgh';
+select d from t_zaddcol;

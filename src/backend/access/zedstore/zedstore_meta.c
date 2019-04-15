@@ -167,8 +167,24 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 	metapg = (ZSMetaPage *) PageGetContents(BufferGetPage(metabuf));
 
-	if (attno <= 0 || attno > metapg->nattributes)
+	if (attno <= 0)
 		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
+
+	/*
+	 * file has less number of attributes stored compared to catalog. This
+	 * happens due to add column default value storing value in catalog and
+	 * absent in table. This attribute must be marked with atthasmissing.
+	 */
+	if (attno > metapg->nattributes)
+	{
+		if (rel->rd_att->attrs[attno-1].atthasmissing)
+		{
+			UnlockReleaseBuffer(metabuf);
+			return InvalidBlockNumber;
+		}
+
+		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
+	}
 
 	rootblk = metapg->tree_root_dir[attno - 1].root;
 	attlen = metapg->tree_root_dir[attno - 1].attlen;
