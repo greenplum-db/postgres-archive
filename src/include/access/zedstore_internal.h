@@ -286,9 +286,12 @@ typedef struct varatt_zs_toastptr
 static inline Size
 zs_datumGetSize(Datum value, bool typByVal, int typLen)
 {
-	if (typLen < 0 && VARATT_IS_EXTERNAL(value) && VARTAG_EXTERNAL(value) == VARTAG_ZEDSTORE)
+	if (typLen > 0)
+		return typLen;
+	else if (VARATT_IS_EXTERNAL(value) && VARTAG_EXTERNAL(value) == VARTAG_ZEDSTORE)
 		return sizeof(varatt_zs_toastptr);
-	return datumGetSize(value, typByVal, typLen);
+	else
+		return datumGetSize(value, typByVal, typLen);
 }
 
 static inline Datum
