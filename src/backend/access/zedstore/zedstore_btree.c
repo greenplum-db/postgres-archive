@@ -53,7 +53,6 @@ static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
 						 zstid key1, BlockNumber blk1,
 						 zstid key2, BlockNumber blk2,
 						 Buffer leftchildbuf);
-static ZSUncompressedBtreeItem *zsbt_scan_next_internal(ZSBtreeScan *scan);
 static ZSUncompressedBtreeItem *zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot,
 		   zstid tid, Buffer *buf_p);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
@@ -154,37 +153,138 @@ zsbt_end_scan(ZSBtreeScan *scan)
 bool
 zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 {
-	ZSUncompressedBtreeItem *item;
+	ZSUncompressedBtreeItem *uitem;
+	Buffer		buf;
+	bool		buf_is_locked = false;
+	Page		page;
+	ZSBtreePageOpaque *opaque;
+	OffsetNumber off;
+	OffsetNumber maxoff;
+	BlockNumber	next;
+	bool		found = false;
 
 	if (!scan->active)
 		return false;
 
-	while ((item = zsbt_scan_next_internal(scan)) != NULL)
+	for (;;)
 	{
-		if (zs_SatisfiesVisibility(scan, item))
+		if (scan->has_decompressed)
 		{
-			char		*ptr = item->t_payload;
+			uitem = zs_decompress_read_item(&scan->decompressor);
 
-			*tid = item->t_tid;
-			if (item->t_flags & ZSBT_NULL)
-				*isnull = true;
-			else
+			if (uitem == NULL)
 			{
-				*isnull = false;
-				*datum = fetch_att(ptr, scan->attbyval, scan->attlen);
-				*datum = zs_datumCopy(*datum, scan->attbyval, scan->attlen);
+				scan->has_decompressed = false;
+				continue;
+			}
+			if (uitem->t_tid >= scan->nexttid)
+			{
+				scan->nexttid = uitem->t_tid + 1;
+
+				if (zs_SatisfiesVisibility(scan, uitem))
+				{
+					found = true;
+					break;
+				}
+			}
+		}
+		else
+		{
+			buf = scan->lastbuf;
+			page = BufferGetPage(buf);
+			opaque = ZSBtreePageGetOpaque(page);
+
+			if (!buf_is_locked)
+				LockBuffer(buf, BUFFER_LOCK_SHARE);
+			buf_is_locked = true;
+
+			/* TODO: check that the page is a valid zs btree page */
+
+			/* TODO: check the last offset first, as an optimization */
+			maxoff = PageGetMaxOffsetNumber(page);
+			for (off = FirstOffsetNumber; off <= maxoff; off++)
+			{
+				ItemId		iid = PageGetItemId(page, off);
+				ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+
+				if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+				{
+					ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+
+					if (citem->t_lasttid >= scan->nexttid)
+					{
+						MemoryContext oldcxt = MemoryContextSwitchTo(scan->context);
+
+						zs_decompress_chunk(&scan->decompressor, citem);
+						MemoryContextSwitchTo(oldcxt);
+						scan->has_decompressed = true;
+						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+						buf_is_locked = false;
+						break;
+					}
+				}
+				else
+				{
+					uitem = (ZSUncompressedBtreeItem *) item;
+					if (uitem->t_tid >= scan->nexttid)
+					{
+						scan->nexttid = uitem->t_tid + 1;
+						if (zs_SatisfiesVisibility(scan, uitem))
+						{
+							found = true;
+							break;
+						}
+					}
+				}
 			}
 
-			if (scan->lastbuf_is_locked)
+			if (found)
+				break;
+
+			if (scan->has_decompressed)
+				continue;
+
+			/* No more items on this page. Walk right, if possible */
+			next = opaque->zs_next;
+			if (next == BufferGetBlockNumber(buf))
+				elog(ERROR, "btree page %u next-pointer points to itself", next);
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+			buf_is_locked = false;
+
+			if (next == InvalidBlockNumber)
 			{
-				LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
-				scan->lastbuf_is_locked = false;
+				scan->active = false;
+				ReleaseBuffer(scan->lastbuf);
+				scan->lastbuf = InvalidBuffer;
+				break;
 			}
 
-			return true;
+			scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 		}
 	}
-	return false;
+
+	if (found)
+	{
+		char		*ptr = uitem->t_payload;
+
+		*tid = uitem->t_tid;
+		if (uitem->t_flags & ZSBT_NULL)
+			*isnull = true;
+		else
+		{
+			*isnull = false;
+			*datum = fetch_att(ptr, scan->attbyval, scan->attlen);
+			*datum = zs_datumCopy(*datum, scan->attbyval, scan->attlen);
+		}
+
+		if (buf_is_locked)
+		{
+			LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
+			buf_is_locked = false;
+		}
+	}
+
+	return found;
 }
 
 /*
@@ -1277,114 +1377,6 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, zstid tid,
 		UnlockReleaseBuffer(buf);
 		*buf_p = InvalidBuffer;
 		return NULL;
-	}
-}
-
-
-
-
-/*
- * Returns the next item in the scan. This doesn't pay attention to visibility.
- *
- * The returned pointer might point directly to a btree-buffer, or it might be
- * palloc'd copy. If it points to a buffer, scan->lastbuf_is_locked is true,
- * otherwise false.
- */
-static ZSUncompressedBtreeItem *
-zsbt_scan_next_internal(ZSBtreeScan *scan)
-{
-	Buffer		buf;
-	Page		page;
-	ZSBtreePageOpaque *opaque;
-	OffsetNumber off;
-	OffsetNumber maxoff;
-	BlockNumber	next;
-
-	if (!scan->active)
-		return NULL;
-
-	for (;;)
-	{
-		while (scan->has_decompressed)
-		{
-			ZSUncompressedBtreeItem *item = zs_decompress_read_item(&scan->decompressor);
-
-			if (item == NULL)
-			{
-				scan->has_decompressed = false;
-				break;
-			}
-			if (item->t_tid >= scan->nexttid)
-			{
-				scan->nexttid = item->t_tid + 1;
-				return item;
-			}
-		}
-
-		buf = scan->lastbuf;
-		page = BufferGetPage(buf);
-		opaque = ZSBtreePageGetOpaque(page);
-
-		if (!scan->lastbuf_is_locked)
-			LockBuffer(buf, BUFFER_LOCK_SHARE);
-		scan->lastbuf_is_locked = true;
-
-		/* TODO: check that the page is a valid zs btree page */
-
-		/* TODO: check the last offset first, as an optimization */
-		maxoff = PageGetMaxOffsetNumber(page);
-		for (off = FirstOffsetNumber; off <= maxoff; off++)
-		{
-			ItemId		iid = PageGetItemId(page, off);
-			ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
-
-			if ((item->t_flags & ZSBT_COMPRESSED) != 0)
-			{
-				ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
-
-				if (citem->t_lasttid >= scan->nexttid)
-				{
-					MemoryContext oldcxt = MemoryContextSwitchTo(scan->context);
-
-					zs_decompress_chunk(&scan->decompressor, citem);
-					MemoryContextSwitchTo(oldcxt);
-					scan->has_decompressed = true;
-					LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-					scan->lastbuf_is_locked = false;
-					break;
-				}
-			}
-			else
-			{
-				ZSUncompressedBtreeItem *uitem = (ZSUncompressedBtreeItem *) item;
-
-				if (uitem->t_tid >= scan->nexttid)
-				{
-					scan->nexttid = uitem->t_tid + 1;
-					return uitem;
-				}
-			}
-		}
-
-		if (scan->has_decompressed)
-			continue;
-
-		/* No more items on this page. Walk right, if possible */
-		next = opaque->zs_next;
-		if (next == BufferGetBlockNumber(buf))
-			elog(ERROR, "btree page %u next-pointer points to itself", next);
-		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-		scan->lastbuf_is_locked = false;
-
-		if (next == InvalidBlockNumber)
-		{
-			scan->active = false;
-			ReleaseBuffer(scan->lastbuf);
-			scan->lastbuf = InvalidBuffer;
-			return NULL;
-		}
-
-		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 	}
 }
 
