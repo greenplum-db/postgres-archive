@@ -451,7 +451,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 
 	/* Find the item to delete. (It could be compressed) */
 	item = zsbt_scan_next_internal(&scan);
-	if (item->t_tid != tid)
+	if (item == NULL || item->t_tid != tid)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
@@ -566,7 +566,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 		elog(ERROR, "attribute information stored in root dir doesn't match with rel");
 
 	olditem = zsbt_scan_next_internal(&scan);
-	if (olditem->t_tid != otid)
+	if (olditem == NULL || olditem->t_tid != otid)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
@@ -641,7 +641,7 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 		elog(ERROR, "attribute information stored in root dir doesn't match with rel");
 
 	olditem = zsbt_scan_next_internal(&scan);
-	if (olditem->t_tid != otid)
+	if (olditem == NULL || olditem->t_tid != otid)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
@@ -713,7 +713,7 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 
 	/* Find the item to delete. (It could be compressed) */
 	item = zsbt_scan_next_internal(&scan);
-	if (item->t_tid != tid)
+	if (item == NULL || item->t_tid != tid)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
@@ -788,7 +788,7 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 
 	/* Find the item to delete. (It could be compressed) */
 	item = zsbt_scan_next_internal(&scan);
-	if (item->t_tid != tid)
+	if (item == NULL || item->t_tid != tid)
 	{
 		zsbt_end_scan(&scan);
 		elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
