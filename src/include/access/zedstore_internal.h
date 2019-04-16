@@ -28,30 +28,35 @@ typedef uint64	zstid;
 /* note: if this is converted to ItemPointer, it is invalid */
 #define MaxPlusOneZSTid		(MaxZSTid + 1)
 
-static inline zstid
-ZSTidFromItemPointer(ItemPointerData iptr)
-{
-	Assert(ItemPointerIsValid(&iptr));
-	return ((uint64) iptr.ip_blkid.bi_hi << 32 |
-			(uint64) iptr.ip_blkid.bi_lo << 16 |
-			(uint64) iptr.ip_posid);
-}
+#define MaxZSTidOffsetNumber	129
 
 static inline zstid
 ZSTidFromBlkOff(BlockNumber blk, OffsetNumber off)
 {
 	Assert(off != 0);
-	return ((uint64) blk << 16 | off);
+
+	return (uint64) blk * (MaxZSTidOffsetNumber - 1) + off;
+}
+
+static inline zstid
+ZSTidFromItemPointer(ItemPointerData iptr)
+{
+	Assert(ItemPointerIsValid(&iptr));
+	return ZSTidFromBlkOff(ItemPointerGetBlockNumber(&iptr),
+						   ItemPointerGetOffsetNumber(&iptr));
 }
 
 static inline ItemPointerData
 ItemPointerFromZSTid(zstid tid)
 {
 	ItemPointerData iptr;
+	BlockNumber blk;
+	OffsetNumber off;
 
-	iptr.ip_blkid.bi_hi = (tid >> 32) & 0xffff;
-	iptr.ip_blkid.bi_lo = (tid >> 16) & 0xffff;
-	iptr.ip_posid = (tid) & 0xffff;
+	blk = (tid - 1) / (MaxZSTidOffsetNumber - 1);
+	off = (tid - 1) % (MaxZSTidOffsetNumber - 1) + 1;
+
+	ItemPointerSet(&iptr, blk, off);
 	Assert(ItemPointerIsValid(&iptr));
 	return iptr;
 }
@@ -59,36 +64,13 @@ ItemPointerFromZSTid(zstid tid)
 static inline BlockNumber
 ZSTidGetBlockNumber(zstid tid)
 {
-	return (BlockNumber) (tid >> 16);
+	return (BlockNumber) ((tid - 1) / (MaxZSTidOffsetNumber - 1));
 }
 
 static inline OffsetNumber
 ZSTidGetOffsetNumber(zstid tid)
 {
-	return (OffsetNumber) tid;
-}
-
-/*
- * Helper function to "increment" a TID by one.
- *
- * Skips over values that would be invalid ItemPointers.
- */
-static inline zstid
-ZSTidIncrement(zstid tid)
-{
-	tid++;
-	if ((tid & 0xffff) == 0)
-		tid++;
-	return tid;
-}
-
-static inline zstid
-ZSTidIncrementForInsert(zstid tid)
-{
-	tid++;
-	if (ZSTidGetOffsetNumber(tid) >= MaxHeapTuplesPerPage)
-		tid = ZSTidFromBlkOff(ZSTidGetBlockNumber(tid) + 1, 1);
-	return tid;
+	return (OffsetNumber) ((tid - 1) % (MaxZSTidOffsetNumber - 1) + 1);
 }
 
 /*

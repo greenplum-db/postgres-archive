@@ -220,10 +220,9 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 
 		/* COMPRESSED items cover a range of TIDs */
 		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
-			tid = ((ZSCompressedBtreeItem *) hitup)->t_lasttid;
+			tid = ((ZSCompressedBtreeItem *) hitup)->t_lasttid + 1;
 		else
-			tid = hitup->t_tid;
-		tid = ZSTidIncrementForInsert(tid);
+			tid = hitup->t_tid + 1;
 	}
 	else
 	{
@@ -340,10 +339,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 			lasttid = hitup->t_tid;
 
 		if (assign_tids)
-		{
-			tid = lasttid;
-			tid = ZSTidIncrementForInsert(tid);
-		}
+			tid = lasttid + 1;
 	}
 	else
 	{
@@ -358,7 +354,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 		for (i = 0; i < nitems; i++)
 		{
 			tids[i] = tid;
-			tid = ZSTidIncrementForInsert(tid);
+			tid++;
 		}
 	}
 
@@ -1251,8 +1247,7 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 			}
 			if (item->t_tid >= scan->nexttid)
 			{
-				scan->nexttid = item->t_tid;
-				scan->nexttid = ZSTidIncrement(scan->nexttid);
+				scan->nexttid = item->t_tid + 1;
 				return item;
 			}
 		}
@@ -1299,8 +1294,7 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 
 				if (uitem->t_tid >= scan->nexttid)
 				{
-					scan->nexttid = uitem->t_tid;
-					scan->nexttid = ZSTidIncrement(scan->nexttid);
+					scan->nexttid = uitem->t_tid + 1;
 					return uitem;
 				}
 			}
