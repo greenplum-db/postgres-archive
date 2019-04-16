@@ -148,6 +148,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 	BlockNumber	rootblk;
 	int16		attlen;
 	bool		attbyval;
+	Page        page;
 
 	if (RelationGetNumberOfBlocks(rel) == 0)
 	{
@@ -165,7 +166,8 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 
 	/* TODO: get share lock to begin with */
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
-	metapg = (ZSMetaPage *) PageGetContents(BufferGetPage(metabuf));
+	page = BufferGetPage(metabuf);
+	metapg = (ZSMetaPage *) PageGetContents(page);
 
 	if (attno <= 0)
 		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
@@ -177,13 +179,18 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 	 */
 	if (attno > metapg->nattributes)
 	{
-		if (rel->rd_att->attrs[attno-1].atthasmissing)
+		if (forupdate)
+			zsmeta_add_root_for_attribute(rel, attno, page);
+		else
 		{
-			UnlockReleaseBuffer(metabuf);
-			return InvalidBlockNumber;
-		}
+			if (rel->rd_att->attrs[attno-1].atthasmissing)
+			{
+				UnlockReleaseBuffer(metabuf);
+				return InvalidBlockNumber;
+			}
 
-		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
+			elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
+		}
 	}
 
 	rootblk = metapg->tree_root_dir[attno - 1].root;
@@ -227,6 +234,21 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 	*attlen_p = attlen;
 	*attbyval_p = attbyval;
 	return rootblk;
+}
+
+void
+zsmeta_add_root_for_attribute(Relation rel, AttrNumber attno, Page page)
+{
+	int idx = attno - 1;
+
+	ZSMetaPage *metapg = (ZSMetaPage *) PageGetContents(page);
+	metapg->nattributes++;
+
+	metapg->tree_root_dir[idx].root = InvalidBlockNumber;
+	metapg->tree_root_dir[idx].attlen = rel->rd_att->attrs[idx].attlen;
+	metapg->tree_root_dir[idx].attbyval = rel->rd_att->attrs[idx].attbyval;
+
+	((PageHeader) page)->pd_lower += sizeof(ZSRootDirItem);
 }
 
 /*

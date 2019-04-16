@@ -115,3 +115,12 @@ select * from t_zaddcol;
 -- variable length default value stored in catalog
 alter table t_zaddcol add column d text default 'abcdefgh';
 select d from t_zaddcol;
+
+create table t_zaddcol_insert (a int) using zedstore;
+insert into t_zaddcol_insert values (1);
+alter table t_zaddcol_insert add column b int default 3;
+select * from t_zaddcol_insert;
+insert into t_zaddcol_insert values (2);
+--select * from t_zaddcol_insert;
+--insert into t_zaddcol_insert values (3,3);
+--select b from t_zaddcol_insert;

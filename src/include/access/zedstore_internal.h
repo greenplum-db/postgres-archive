@@ -425,6 +425,7 @@ extern void zsmeta_initmetapage(Relation rel);
 extern Buffer zs_getnewbuf(Relation rel);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update, int16 *attlen_p, bool *attbyval_p);
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
+extern void zsmeta_add_root_for_attribute(Relation rel, AttrNumber attno, Page page);
 
 /* prototypes for functions in zedstore_visibility.c */
 extern TM_Result zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item,
