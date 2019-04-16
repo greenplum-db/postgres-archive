@@ -96,7 +96,7 @@ zs_compress_begin(ZSCompressContext *context, int maxCompressedSize)
  * If it wouldn't fit, return false.
  */
 bool
-zs_compress_add(ZSCompressContext *context, ZSUncompressedBtreeItem *item)
+zs_compress_add(ZSCompressContext *context, ZSBtreeItem *item)
 {
 	ZSCompressedBtreeItem *chunk = (ZSCompressedBtreeItem *) context->buffer;
 
@@ -109,7 +109,7 @@ zs_compress_add(ZSCompressContext *context, ZSUncompressedBtreeItem *item)
 	memcpy(context->uncompressedbuffer + context->rawsize, item, item->t_size);
 	if (context->nitems == 0)
 		chunk->t_tid = item->t_tid;
-	chunk->t_lasttid = item->t_tid;
+	chunk->t_lasttid = zsbt_item_lasttid(item);
 	context->nitems++;
 	context->rawsize += item->t_size;
 
@@ -174,19 +174,19 @@ zs_decompress_chunk(ZSDecompressContext *context, ZSCompressedBtreeItem *chunk)
 	context->bytesread = 0;
 }
 
-ZSUncompressedBtreeItem *
+ZSBtreeItem *
 zs_decompress_read_item(ZSDecompressContext *context)
 {
-	ZSUncompressedBtreeItem *next;
+	ZSBtreeItem *next;
 
 	if (context->bytesread == context->uncompressedsize)
 		return NULL;
-	next = (ZSUncompressedBtreeItem *) (context->buffer + context->bytesread);
+	next = (ZSBtreeItem *) (context->buffer + context->bytesread);
 	if (context->bytesread + next->t_size > context->uncompressedsize)
 		elog(ERROR, "invalid compressed item");
 	context->bytesread += next->t_size;
 
-	Assert(next->t_size >= sizeof(ZSUncompressedBtreeItem));
+	Assert(next->t_size >= sizeof(ZSBtreeItem));
 	Assert(next->t_tid != InvalidZSTid);
 
 	return next;

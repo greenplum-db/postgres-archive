@@ -257,6 +257,58 @@ select * from t_zedcopy;
  10005 | 26 | 36    | 46     | 56
 (12 rows)
 
+--
+-- Also test delete and update on the table that was populated with COPY.
+-- This exercises splitting the array item. (A table not populated with
+-- COPY only contains single items, at the moment.)
+--
+delete from t_zedcopy where b = 4;
+select * from t_zedcopy;
+   a   | b  |   c   |   d    | e  
+-------+----+-------+--------+----
+  9999 |    | \N    | NN     | 
+ 10000 | 21 | 31    | 41     | 51
+     1 |  1 | stuff | test_1 | 
+     2 |  2 | stuff | test_2 | 
+     3 |  3 | stuff | test_3 | 
+     5 |  5 | stuff | test_5 | 
+ 10001 | 22 | 32    | 42     | 52
+ 10002 | 23 | 33    | 43     | 53
+ 10003 | 24 | 34    | 44     | 54
+ 10004 | 25 | 35    | 45     | 55
+ 10005 | 26 | 36    | 46     | 56
+(11 rows)
+
+delete from t_zedcopy where b < 3;
+select * from t_zedcopy;
+   a   | b  |   c   |   d    | e  
+-------+----+-------+--------+----
+  9999 |    | \N    | NN     | 
+ 10000 | 21 | 31    | 41     | 51
+     3 |  3 | stuff | test_3 | 
+     5 |  5 | stuff | test_5 | 
+ 10001 | 22 | 32    | 42     | 52
+ 10002 | 23 | 33    | 43     | 53
+ 10003 | 24 | 34    | 44     | 54
+ 10004 | 25 | 35    | 45     | 55
+ 10005 | 26 | 36    | 46     | 56
+(9 rows)
+
+update t_zedcopy set b = 100 where b = 5;
+select * from t_zedcopy;
+   a   |  b  |   c   |   d    | e  
+-------+-----+-------+--------+----
+  9999 |     | \N    | NN     | 
+ 10000 |  21 | 31    | 41     | 51
+     3 |   3 | stuff | test_3 | 
+ 10001 |  22 | 32    | 42     | 52
+ 10002 |  23 | 33    | 43     | 53
+ 10003 |  24 | 34    | 44     | 54
+ 10004 |  25 | 35    | 45     | 55
+ 10005 |  26 | 36    | 46     | 56
+     5 | 100 | stuff | test_5 | 
+(9 rows)
+
 -- Test for alter table add column force rewrite
 create table t_zaddcol(a int) using zedstore;
 insert into t_zaddcol select * from generate_series(1, 3);

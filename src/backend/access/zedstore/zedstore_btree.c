@@ -53,11 +53,11 @@ static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
 						 zstid key1, BlockNumber blk1,
 						 zstid key2, BlockNumber blk2,
 						 Buffer leftchildbuf);
-static ZSUncompressedBtreeItem *zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot,
+static ZSSingleBtreeItem *zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot,
 		   zstid tid, Buffer *buf_p);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
-							  ZSBtreeItem *olditem, ZSBtreeItem *replacementitem,
-							  ZSBtreeItem *newitem, List *newitems);
+							  zstid oldtid, ZSBtreeItem *replacementitem,
+							  List *newitems);
 
 static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems);
 
@@ -103,6 +103,8 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapsho
 		scan->context = NULL;
 		memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 		scan->nexttid = InvalidZSTid;
+		scan->array_item = NULL;
+		scan->array_elements_left = 0;
 		return;
 	}
 
@@ -125,6 +127,8 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapsho
 
 	scan->has_decompressed = false;
 	zs_decompress_init(&scan->decompressor);
+	scan->array_item = NULL;
+	scan->array_elements_left = 0;
 
 	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 }
@@ -153,7 +157,6 @@ zsbt_end_scan(ZSBtreeScan *scan)
 bool
 zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 {
-	ZSUncompressedBtreeItem *uitem;
 	Buffer		buf;
 	bool		buf_is_locked = false;
 	Page		page;
@@ -161,15 +164,61 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 	OffsetNumber off;
 	OffsetNumber maxoff;
 	BlockNumber	next;
-	bool		found = false;
 
 	if (!scan->active)
 		return false;
 
+	/*
+	 * Process items, until we find something that is visible to the snapshot.
+	 *
+	 * This advances scan->nexttid as it goes.
+	 */
 	for (;;)
 	{
+		/*
+		 * If we are still processing an array item, return next element from it.
+		 */
+		if (scan->array_elements_left > 0)
+		{
+			if (scan->array_isnull)
+				*isnull = true;
+			else
+			{
+				char	   *dataptr = scan->array_next_datum;
+
+				*datum = fetch_att(dataptr, scan->attbyval, scan->attlen);
+
+				/* make a copy, to make sure it's aligned. */
+				if (scan->attlen < 0 && !VARATT_IS_1B(*datum))
+					*datum = zs_datumCopy(*datum, scan->attbyval, scan->attlen);
+
+				*isnull = false;
+				if (scan->attlen > 0)
+					dataptr += scan->attlen;
+				else
+				{
+					dataptr += zs_datumGetSize(PointerGetDatum(dataptr), scan->attbyval, scan->attlen);
+				}
+				scan->array_next_datum = dataptr;
+			}
+			*tid = scan->array_next_tid;
+			scan->array_next_tid++;
+			scan->nexttid = scan->array_next_tid;
+			scan->array_elements_left--;
+			return true;
+		}
+
+		/*
+		 * If we are still processing a compressed item, process the next item
+		 * from the it. If it's an array item, we start iterating the array by
+		 * setting the scan->array_* fields, and loop back to top to return the
+		 * first element from the array.
+		 */
 		if (scan->has_decompressed)
 		{
+			zstid		lasttid;
+			ZSBtreeItem *uitem;
+
 			uitem = zs_decompress_read_item(&scan->decompressor);
 
 			if (uitem == NULL)
@@ -177,114 +226,190 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 				scan->has_decompressed = false;
 				continue;
 			}
-			if (uitem->t_tid >= scan->nexttid)
-			{
-				scan->nexttid = uitem->t_tid + 1;
 
-				if (zs_SatisfiesVisibility(scan, uitem))
+			/* a compressed item cannot contain nested compressed items */
+			Assert((uitem->t_flags & ZSBT_COMPRESSED) == 0);
+
+			lasttid = zsbt_item_lasttid(uitem);
+			if (lasttid < scan->nexttid)
+				continue;
+
+			if (!zs_SatisfiesVisibility(scan, uitem))
+			{
+				scan->nexttid = lasttid + 1;
+				continue;
+			}
+			if ((uitem->t_flags & ZSBT_ARRAY) != 0)
+			{
+				/* no need to make a copy, because the uncompressed buffer
+				 * is already a copy */
+				ZSArrayBtreeItem *aitem = (ZSArrayBtreeItem *) uitem;
+
+				scan->array_item = aitem;
+				scan->array_isnull = (aitem->t_flags & ZSBT_NULL) != 0;
+				scan->array_next_datum = aitem->t_payload;
+				scan->array_next_tid = aitem->t_tid;
+				scan->array_elements_left = aitem->t_nelements;
+
+				while (scan->array_next_tid < scan->nexttid && scan->array_elements_left > 0)
 				{
-					found = true;
-					break;
+					if (scan->attlen > 0)
+						scan->array_next_datum += scan->attlen;
+					else
+						scan->array_next_datum += zs_datumGetSize(PointerGetDatum(scan->array_next_datum), scan->attbyval, scan->attlen);
+
+					scan->array_next_tid++;
+					scan->array_elements_left--;
 				}
+				scan->nexttid = scan->array_next_tid;
+				continue;
+			}
+			else
+			{
+				/* single item */
+				ZSSingleBtreeItem *sitem = (ZSSingleBtreeItem *) uitem;
+
+				*tid = sitem->t_tid;
+				if (sitem->t_flags & ZSBT_NULL)
+					*isnull = true;
+				else
+				{
+					*isnull = false;
+					*datum = fetch_att(sitem->t_payload, scan->attbyval, scan->attlen);
+					/* no need to copy, because the uncompression buffer is a copy already */
+					/* FIXME: do we need to copy anyway, to make sure it's aligned correctly? */
+				}
+				scan->nexttid = sitem->t_tid + 1;
+
+				if (buf_is_locked)
+					LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
+				buf_is_locked = false;
+				return true;
 			}
 		}
-		else
+
+		/*
+		 * Scan the page for the next item.
+		 */
+		buf = scan->lastbuf;
+		if (!buf_is_locked)
 		{
-			buf = scan->lastbuf;
-			page = BufferGetPage(buf);
-			opaque = ZSBtreePageGetOpaque(page);
-
-			if (!buf_is_locked)
-				LockBuffer(buf, BUFFER_LOCK_SHARE);
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
 			buf_is_locked = true;
+		}
+		page = BufferGetPage(buf);
+		opaque = ZSBtreePageGetOpaque(page);
+		Assert(opaque->zs_page_id == ZS_BTREE_PAGE_ID);
 
-			/* TODO: check that the page is a valid zs btree page */
+		/* TODO: check the last offset first, as an optimization */
+		maxoff = PageGetMaxOffsetNumber(page);
+		for (off = FirstOffsetNumber; off <= maxoff; off++)
+		{
+			ItemId		iid = PageGetItemId(page, off);
+			ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+			zstid		lasttid;
 
-			/* TODO: check the last offset first, as an optimization */
-			maxoff = PageGetMaxOffsetNumber(page);
-			for (off = FirstOffsetNumber; off <= maxoff; off++)
+			lasttid = zsbt_item_lasttid(item);
+
+			if (scan->nexttid > lasttid)
+				continue;
+
+			if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 			{
-				ItemId		iid = PageGetItemId(page, off);
-				ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+				ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+				MemoryContext oldcxt = MemoryContextSwitchTo(scan->context);
 
-				if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+				zs_decompress_chunk(&scan->decompressor, citem);
+				MemoryContextSwitchTo(oldcxt);
+				scan->has_decompressed = true;
+				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+				buf_is_locked = false;
+				break;
+			}
+			else
+			{
+				if (!zs_SatisfiesVisibility(scan, item))
 				{
-					ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+					scan->nexttid = lasttid + 1;
+					continue;
+				}
 
-					if (citem->t_lasttid >= scan->nexttid)
+				if ((item->t_flags & ZSBT_ARRAY) != 0)
+				{
+					/* copy the item, because we can't hold a lock on the page  */
+					ZSArrayBtreeItem *aitem;
+
+					aitem = MemoryContextAlloc(scan->context, item->t_size);
+					memcpy(aitem, item, item->t_size);
+
+					scan->array_item = aitem;
+					scan->array_next_datum = aitem->t_payload;
+					scan->array_next_tid = aitem->t_tid;
+					scan->array_elements_left = aitem->t_nelements;
+
+					while (scan->array_next_tid < scan->nexttid && scan->array_elements_left > 0)
 					{
-						MemoryContext oldcxt = MemoryContextSwitchTo(scan->context);
+						if (scan->attlen > 0)
+							scan->array_next_datum += scan->attlen;
+						else
+							scan->array_next_datum += zs_datumGetSize(PointerGetDatum(scan->array_next_datum), scan->attbyval, scan->attlen);
 
-						zs_decompress_chunk(&scan->decompressor, citem);
-						MemoryContextSwitchTo(oldcxt);
-						scan->has_decompressed = true;
-						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+						scan->array_next_tid++;
+						scan->array_elements_left--;
+					}
+					scan->nexttid = scan->array_next_tid;
+
+					if (scan->array_elements_left > 0)
+					{
+						LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
 						buf_is_locked = false;
 						break;
 					}
 				}
 				else
 				{
-					uitem = (ZSUncompressedBtreeItem *) item;
-					if (uitem->t_tid >= scan->nexttid)
+					/* single item */
+					ZSSingleBtreeItem *sitem = (ZSSingleBtreeItem *) item;
+
+					*tid = item->t_tid;
+					if (item->t_flags & ZSBT_NULL)
+						*isnull = true;
+					else
 					{
-						scan->nexttid = uitem->t_tid + 1;
-						if (zs_SatisfiesVisibility(scan, uitem))
-						{
-							found = true;
-							break;
-						}
+						*isnull = false;
+						*datum = fetch_att(sitem->t_payload, scan->attbyval, scan->attlen);
+						*datum = zs_datumCopy(*datum, scan->attbyval, scan->attlen);
 					}
+					scan->nexttid = sitem->t_tid + 1;
+					LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
+					buf_is_locked = false;
+					return true;
 				}
 			}
-
-			if (found)
-				break;
-
-			if (scan->has_decompressed)
-				continue;
-
-			/* No more items on this page. Walk right, if possible */
-			next = opaque->zs_next;
-			if (next == BufferGetBlockNumber(buf))
-				elog(ERROR, "btree page %u next-pointer points to itself", next);
-			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-			buf_is_locked = false;
-
-			if (next == InvalidBlockNumber)
-			{
-				scan->active = false;
-				ReleaseBuffer(scan->lastbuf);
-				scan->lastbuf = InvalidBuffer;
-				break;
-			}
-
-			scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 		}
+
+		if (scan->array_elements_left > 0 || scan->has_decompressed)
+			continue;
+
+		/* No more items on this page. Walk right, if possible */
+		next = opaque->zs_next;
+		if (next == BufferGetBlockNumber(buf))
+			elog(ERROR, "btree page %u next-pointer points to itself", next);
+		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+		buf_is_locked = false;
+
+		if (next == InvalidBlockNumber)
+		{
+			scan->active = false;
+			ReleaseBuffer(scan->lastbuf);
+			scan->lastbuf = InvalidBuffer;
+			break;
+		}
+
+		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 	}
 
-	if (found)
-	{
-		char		*ptr = uitem->t_payload;
-
-		*tid = uitem->t_tid;
-		if (uitem->t_flags & ZSBT_NULL)
-			*isnull = true;
-		else
-		{
-			*isnull = false;
-			*datum = fetch_att(ptr, scan->attbyval, scan->attlen);
-			*datum = zs_datumCopy(*datum, scan->attbyval, scan->attlen);
-		}
-
-		if (buf_is_locked)
-		{
-			LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
-			buf_is_locked = false;
-		}
-	}
-
-	return found;
+	return false;
 }
 
 /*
@@ -319,11 +444,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 		ItemId		iid = PageGetItemId(page, maxoff);
 		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
 
-		/* COMPRESSED items cover a range of TIDs */
-		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
-			tid = ((ZSCompressedBtreeItem *) hitup)->t_lasttid + 1;
-		else
-			tid = hitup->t_tid + 1;
+		tid = zsbt_item_lasttid(hitup) + 1;
 	}
 	else
 	{
@@ -334,43 +455,154 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 	return tid;
 }
 
-static ZSUncompressedBtreeItem *
-zsbt_create_item(int16 attlen, bool attbyval, zstid tid, Datum datum, bool isnull)
+/*
+ * Compute the size of a slice of an array, from an array item. 'dataptr'
+ * points to the packed on-disk representation of the array item's data.
+ * The elements are stored one after each other.
+ */
+static Size
+zsbt_get_array_slice_len(int16 attlen, bool attbyval, bool isnull,
+						 char *dataptr, int nelements)
 {
-	Size		datumsz;
+	Size		datasz;
+
+	if (isnull)
+		datasz = 0;
+	else
+	{
+		/*
+		 * For a fixed-width type, we can just multiply. For variable-length,
+		 * we have to walk through the elements, looking at the length of each
+		 * element.
+		 */
+		if (attlen > 0)
+		{
+			datasz = attlen * nelements;
+		}
+		else
+		{
+			char	   *p = dataptr;
+			Size		datumsz = 0;
+
+			datasz = 0;
+			for (int i = 0; i < nelements; i++)
+			{
+				datumsz = zs_datumGetSize(PointerGetDatum(p), attbyval, attlen);
+
+				/*
+				 * The array should already use short varlen representation whenever
+				 * possible.
+				 */
+				Assert(!VARATT_CAN_MAKE_SHORT(DatumGetPointer(p)));
+
+				datasz += datumsz;
+				p += datumsz;
+			}
+		}
+	}
+	return datasz;
+}
+
+static ZSBtreeItem *
+zsbt_create_item(int16 attlen, bool attbyval, zstid tid, ZSUndoRecPtr undo_ptr,
+				 int nelements,
+				 Datum *datums,
+				 char *dataptr, Size datasz, bool isnull)
+{
+	ZSBtreeItem *result;
 	Size		itemsz;
-	ZSUncompressedBtreeItem *newitem;
-	char	   *dataptr;
+	char	   *databegin;
+
+	Assert(nelements > 0);
 
 	/*
 	 * Form a ZSBtreeItem to insert.
 	 */
-	if (isnull)
-		datumsz = 0;
-	else
-		datumsz = zs_datumGetSize(datum, attbyval, attlen);
-	itemsz = offsetof(ZSUncompressedBtreeItem, t_payload) + datumsz;
+	if (nelements > 1)
+	{
+		ZSArrayBtreeItem *newitem;
 
-	newitem = palloc(itemsz);
-	memset(newitem, 0, offsetof(ZSUncompressedBtreeItem, t_payload)); /* zero padding */
-	newitem->t_tid = tid;
-	newitem->t_flags = 0;
-	newitem->t_size = itemsz;
-	memset(&newitem->t_undo_ptr, 0, sizeof(ZSUndoRecPtr));
+		itemsz = offsetof(ZSArrayBtreeItem, t_payload) + datasz;
 
-	if (isnull)
-		newitem->t_flags |= ZSBT_NULL;
+		newitem = palloc(itemsz);
+		memset(newitem, 0, offsetof(ZSArrayBtreeItem, t_payload)); /* zero padding */
+		newitem->t_tid = tid;
+		newitem->t_size = itemsz;
+		newitem->t_flags = ZSBT_ARRAY;
+		if (isnull)
+			newitem->t_flags |= ZSBT_NULL;
+		newitem->t_nelements = nelements;
+		newitem->t_undo_ptr = undo_ptr;
+
+		databegin = newitem->t_payload;
+
+		result = (ZSBtreeItem *) newitem;
+	}
 	else
 	{
-		dataptr = ((char *) newitem) + offsetof(ZSUncompressedBtreeItem, t_payload);
-		if (attbyval)
-			store_att_byval(dataptr, datum, attlen);
-		else
-			memcpy(dataptr, DatumGetPointer(datum), datumsz);
+		ZSSingleBtreeItem *newitem;
+
+		itemsz = offsetof(ZSSingleBtreeItem, t_payload) + datasz;
+
+		newitem = palloc(itemsz);
+		memset(newitem, 0, offsetof(ZSSingleBtreeItem, t_payload)); /* zero padding */
+		newitem->t_tid = tid;
+		newitem->t_flags = 0;
+		if (isnull)
+			newitem->t_flags |= ZSBT_NULL;
+		newitem->t_size = itemsz;
+		newitem->t_undo_ptr = undo_ptr;
+
+		databegin = newitem->t_payload;
+
+		result = (ZSBtreeItem *) newitem;
 	}
 
-	return newitem;
+	if (!isnull)
+	{
+		char	   *datadst = databegin;
+
+		if (datums)
+		{
+			for (int i = 0; i < nelements; i++)
+			{
+				Datum		val = datums[i];
+
+				if (attbyval)
+				{
+					store_att_byval(datadst, val, attlen);
+					datadst += attlen;
+				}
+				else
+				{
+					if (attlen == -1 && VARATT_CAN_MAKE_SHORT(DatumGetPointer(val)))
+					{
+						/* convert to short varlena */
+						Size		data_length = VARATT_CONVERTED_SHORT_SIZE(val);
+
+						SET_VARSIZE_SHORT(datadst, data_length);
+						memcpy(datadst + 1, VARDATA(val), data_length - 1);
+						datadst += data_length;
+					}
+					else
+					{
+						/* full 4-byte header varlena, or was already short */
+						Size		datumsz = zs_datumGetSize(PointerGetDatum(val), attbyval, attlen);
+
+						memcpy(datadst, DatumGetPointer(val), datumsz);
+						datadst += datumsz;
+					}
+				}
+			}
+			Assert(datadst - databegin == datasz);
+		}
+		else
+			memcpy(datadst, dataptr, datasz);
+	}
+
+	return result;
 }
+
 
 /*
  * Insert a multiple items to the given attribute's btree.
@@ -397,7 +629,6 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 	Page		page;
 	ZSBtreePageOpaque *opaque;
 	OffsetNumber maxoff;
-	zstid		lasttid;
 	zstid		insert_target_key;
 	ZSUndoRec_Insert undorec;
 	int			i;
@@ -424,34 +655,31 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 	buf = zsbt_descend(rel, rootblk, insert_target_key);
 	page = BufferGetPage(buf);
 	opaque = ZSBtreePageGetOpaque(page);
+	maxoff = PageGetMaxOffsetNumber(page);
 
 	/*
 	 * Look at the last item, for its tid.
+	 *
+	 * assign TIDS for each item, if needed.
 	 */
-	maxoff = PageGetMaxOffsetNumber(page);
-	if (maxoff >= FirstOffsetNumber)
-	{
-		ItemId		iid = PageGetItemId(page, maxoff);
-		ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
-
-		if ((hitup->t_flags & ZSBT_COMPRESSED) != 0)
-			lasttid = ((ZSCompressedBtreeItem *) hitup)->t_lasttid;
-		else
-			lasttid = hitup->t_tid;
-
-		if (assign_tids)
-			tid = lasttid + 1;
-	}
-	else
-	{
-		lasttid = opaque->zs_lokey;
-		if (assign_tids)
-			tid = lasttid;
-	}
-
-	/* assign TIDS for each item, if needed */
 	if (assign_tids)
 	{
+		zstid		lasttid;
+
+		if (maxoff >= FirstOffsetNumber)
+		{
+			ItemId		iid = PageGetItemId(page, maxoff);
+			ZSBtreeItem	*hitup = (ZSBtreeItem *) PageGetItem(page, iid);
+
+			lasttid = zsbt_item_lasttid(hitup);
+			tid = lasttid + 1;
+		}
+		else
+		{
+			lasttid = opaque->zs_lokey;
+			tid = lasttid;
+		}
+
 		for (i = 0; i < nitems; i++)
 		{
 			tids[i] = tid;
@@ -474,64 +702,65 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 
 	/* Create items to insert */
 	newitems = NIL;
-	for (i = 0; i < nitems; i++)
+	i = 0;
+	while (i < nitems)
 	{
-		ZSUncompressedBtreeItem *newitem;
+		Size		datasz;
+		int			j;
+		ZSBtreeItem *newitem;
 
-		newitem = zsbt_create_item(attlen, attbyval, tid, datums[i], isnulls[i]);
+		datasz = 0;
+		if (!isnulls[i])
+		{
+			Datum		val = datums[i];
 
-		/* fill in the remaining fields in the item */
-		newitem->t_undo_ptr = *undorecptr;
-		newitem->t_tid = tids[i];
+			if (attlen == -1 && VARATT_CAN_MAKE_SHORT(DatumGetPointer(val)))
+			{
+				/* will be converted to short varlena */
+				Size		data_length = VARATT_CONVERTED_SHORT_SIZE(val);
+
+				datasz += data_length;
+			}
+			else
+				datasz += zs_datumGetSize(datums[i], attbyval, attlen);
+		}
+		for (j = i + 1; j < nitems && datasz < MaxZedStoreDatumSize / 4; j++)
+		{
+			if (isnulls[j] != isnulls[i])
+				break;
+
+			if (tids[j] != tids[j - 1] + 1)
+				break;
+
+			if (!isnulls[i])
+			{
+				Datum		val = datums[j];
+
+				if (attlen == -1 && VARATT_CAN_MAKE_SHORT(DatumGetPointer(val)))
+				{
+					/* will be converted to short varlena */
+					Size		data_length = VARATT_CONVERTED_SHORT_SIZE(val);
+
+					datasz += data_length;
+				}
+				else
+					datasz += zs_datumGetSize(datums[j], attbyval, attlen);
+			}
+		}
+
+		newitem = zsbt_create_item(attlen, attbyval, tids[i], *undorecptr,
+								   j - i, &datums[i], NULL, datasz, isnulls[i]);
 
 		newitems = lappend(newitems, newitem);
+		i = j;
 	}
 
-	while (list_length(newitems))
-	{
-		ZSUncompressedBtreeItem *newitem = (ZSUncompressedBtreeItem *) linitial(newitems);
-
-		/*
-		 * If there's enough space on the page, insert it directly. Otherwise, try to
-		 * compress all existing items. If that still doesn't create enough space, we
-		 * have to split the page.
-		 *
-		 * TODO: We also resort to the slow way, if the new TID is not at the end of
-		 * the page. Things get difficult, if the new TID is covered by the range of
-		 * an existing compressed item.
-		 */
-		if (PageGetFreeSpace(page) >= MAXALIGN(newitem->t_size) &&
-			(maxoff > FirstOffsetNumber || tid > lasttid))
-		{
-			OffsetNumber off;
-
-			off = PageAddItemExtended(page, (Item) newitem, newitem->t_size,
-									  maxoff + 1, PAI_OVERWRITE);
-			if (off == InvalidOffsetNumber)
-				elog(ERROR, "didn't fit, after all?");
-
-			maxoff = PageGetMaxOffsetNumber(page);
-			newitems = list_delete_first(newitems);
-		}
-		else
-			break;
-	}
-
-	if (list_length(newitems))
-	{
-		/* recompress and possibly split the page */
-		zsbt_replace_item(rel, attno, buf,
-						  NULL, NULL,
-						  NULL, newitems);
-		/* zsbt_replace_item unlocked 'buf' */
-		ReleaseBuffer(buf);
-	}
-	else
-	{
-		MarkBufferDirty(buf);
-		/* TODO: WAL-log */
-		UnlockReleaseBuffer(buf);
-	}
+	/* recompress and possibly split the page */
+	zsbt_replace_item(rel, attno, buf,
+					  InvalidZSTid, NULL,
+					  newitems);
+	/* zsbt_replace_item unlocked 'buf' */
+	ReleaseBuffer(buf);
 }
 
 TM_Result
@@ -540,11 +769,11 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 			Snapshot snapshot, Snapshot crosscheck, bool wait,
 			TM_FailureData *hufd, bool changingPart)
 {
-	ZSUncompressedBtreeItem *item;
+	ZSSingleBtreeItem *item;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 	ZSUndoRecPtr undorecptr;
-	ZSUncompressedBtreeItem *deleteditem;
+	ZSSingleBtreeItem *deleteditem;
 	Buffer		buf;
 
 	/* Find the item to delete. (It could be compressed) */
@@ -558,7 +787,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
-	result = zs_SatisfiesUpdate(rel, snapshot, item, &keep_old_undo_ptr, hufd);
+	result = zs_SatisfiesUpdate(rel, snapshot, (ZSBtreeItem *) item, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -592,8 +821,8 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	deleteditem->t_undo_ptr = undorecptr;
 
 	zsbt_replace_item(rel, attno, buf,
-					  (ZSBtreeItem *) item, (ZSBtreeItem *) deleteditem,
-					  NULL, NIL);
+					  item->t_tid, (ZSBtreeItem *) deleteditem,
+					  NIL);
 	ReleaseBuffer(buf);	/* zsbt_replace_item unlocked */
 
 	pfree(deleteditem);
@@ -646,7 +875,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 					 Snapshot crosscheck, bool wait, TM_FailureData *hufd)
 {
 	Buffer		buf;
-	ZSUncompressedBtreeItem *olditem;
+	ZSSingleBtreeItem *olditem;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 
@@ -667,7 +896,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 	/*
 	 * Is it visible to us?
 	 */
-	result = zs_SatisfiesUpdate(rel, snapshot, olditem, &keep_old_undo_ptr, hufd);
+	result = zs_SatisfiesUpdate(rel, snapshot, (ZSBtreeItem *) olditem, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -708,12 +937,12 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 					  TransactionId xid, CommandId cid, Snapshot snapshot)
 {
 	Buffer		buf;
-	ZSUncompressedBtreeItem *olditem;
+	ZSSingleBtreeItem *olditem;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 	TM_FailureData tmfd;
 	ZSUndoRecPtr undorecptr;
-	ZSUncompressedBtreeItem *deleteditem;
+	ZSSingleBtreeItem *deleteditem;
 
 	/*
 	 * Find the item to delete.  It could be part of a compressed item,
@@ -733,7 +962,7 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	/*
 	 * Is it visible to us?
 	 */
-	result = zs_SatisfiesUpdate(rel, snapshot, olditem, &keep_old_undo_ptr, &tmfd);
+	result = zs_SatisfiesUpdate(rel, snapshot, (ZSBtreeItem *) olditem, &keep_old_undo_ptr, &tmfd);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -766,8 +995,8 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	deleteditem->t_undo_ptr = undorecptr;
 
 	zsbt_replace_item(rel, attno, buf,
-					  (ZSBtreeItem *) olditem, (ZSBtreeItem *) deleteditem,
-					  NULL, NIL);
+					  otid, (ZSBtreeItem *) deleteditem,
+					  NIL);
 	ReleaseBuffer(buf);		/* zsbt_recompress_replace released */
 
 	pfree(deleteditem);
@@ -780,11 +1009,11 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 			   TM_FailureData *hufd)
 {
 	Buffer		buf;
-	ZSUncompressedBtreeItem *item;
+	ZSSingleBtreeItem *item;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 	ZSUndoRecPtr undorecptr;
-	ZSUncompressedBtreeItem *newitem;
+	ZSSingleBtreeItem *newitem;
 
 	/* Find the item to delete. (It could be compressed) */
 	item = zsbt_fetch(rel, attno, snapshot, tid, &buf);
@@ -797,7 +1026,7 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
-	result = zs_SatisfiesUpdate(rel, snapshot, item, &keep_old_undo_ptr, hufd);
+	result = zs_SatisfiesUpdate(rel, snapshot, (ZSBtreeItem *) item, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -836,8 +1065,8 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 	newitem->t_undo_ptr = undorecptr;
 
 	zsbt_replace_item(rel, attno, buf,
-					  (ZSBtreeItem *) item, (ZSBtreeItem *) newitem,
-					  NULL, NIL);
+					  item->t_tid, (ZSBtreeItem *) newitem,
+					  NIL);
 	ReleaseBuffer(buf);		/* zsbt_replace_item unlocked */
 
 	pfree(newitem);
@@ -854,8 +1083,8 @@ void
 zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undoptr)
 {
 	Buffer		buf;
-	ZSUncompressedBtreeItem *item;
-	ZSUncompressedBtreeItem deaditem;
+	ZSSingleBtreeItem *item;
+	ZSSingleBtreeItem deaditem;
 
 	/* Find the item to delete. (It could be compressed) */
 	item = zsbt_fetch(rel, attno, NULL, tid, &buf);
@@ -873,15 +1102,15 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 		return;
 	}
 
-	memset(&deaditem, 0, offsetof(ZSUncompressedBtreeItem, t_payload));
+	memset(&deaditem, 0, offsetof(ZSSingleBtreeItem, t_payload));
 	deaditem.t_tid = tid;
-	deaditem.t_size = sizeof(ZSUncompressedBtreeItem);
+	deaditem.t_size = sizeof(ZSSingleBtreeItem);
 	deaditem.t_flags = ZSBT_DEAD;
 	deaditem.t_undo_ptr = undoptr;
 
 	zsbt_replace_item(rel, attno, buf,
-					  (ZSBtreeItem *) item, (ZSBtreeItem *) &deaditem,
-					  NULL, NIL);
+					  tid, (ZSBtreeItem *) &deaditem,
+					  NIL);
 	ReleaseBuffer(buf); 	/* zsbt_replace_item released */
 }
 
@@ -1283,7 +1512,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer 
 	zsbt_insert_downlink(rel, attno, leftbuf, splittid, rightblkno);
 }
 
-static ZSUncompressedBtreeItem *
+static ZSSingleBtreeItem *
 zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, zstid tid,
 		   Buffer *buf_p)
 {
@@ -1292,7 +1521,7 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, zstid tid,
 	bool		attbyval;
 	Buffer		buf;
 	Page		page;
-	ZSUncompressedBtreeItem *uitem = NULL;
+	ZSBtreeItem *item = NULL;
 	bool		found = false;
 	OffsetNumber maxoff;
 	OffsetNumber off;
@@ -1308,46 +1537,45 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, zstid tid,
 	buf = zsbt_descend(rel, rootblk, tid);
 	page = BufferGetPage(buf);
 
-	/* Find the item on the page */
+	/* Find the item on the page that covers the target TID */
 	maxoff = PageGetMaxOffsetNumber(page);
 	for (off = FirstOffsetNumber; off <= maxoff; off++)
 	{
 		ItemId		iid = PageGetItemId(page, off);
-		ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+		item = (ZSBtreeItem *) PageGetItem(page, iid);
 
 		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 		{
 			ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+			ZSDecompressContext decompressor;
 
-			if (citem->t_tid <= tid && tid <= citem->t_lasttid)
+			zs_decompress_init(&decompressor);
+			zs_decompress_chunk(&decompressor, citem);
+
+			while ((item = zs_decompress_read_item(&decompressor)) != NULL)
 			{
-				ZSDecompressContext decompressor;
+				zstid		lasttid = zsbt_item_lasttid(item);
 
-				zs_decompress_init(&decompressor);
-				zs_decompress_chunk(&decompressor, citem);
-
-				while ((uitem = zs_decompress_read_item(&decompressor)) != NULL)
+				if (item->t_tid <= tid && lasttid >= tid)
 				{
-					if (uitem->t_tid == tid)
-					{
-						found = true;
-						break;
-					}
-				}
-				if (found)
-				{
-					/* FIXME: decompressor is leaked. Can't free it yet, because we still
-					 * need to access the item below
-					 */
+					found = true;
 					break;
 				}
-				zs_decompress_free(&decompressor);
 			}
+			if (found)
+			{
+				/* FIXME: decompressor is leaked. Can't free it yet, because we still
+				 * need to access the item below
+				 */
+				break;
+			}
+			zs_decompress_free(&decompressor);
 		}
 		else
 		{
-			uitem = (ZSUncompressedBtreeItem *) item;
-			if (uitem->t_tid == tid)
+			zstid		lasttid = zsbt_item_lasttid(item);
+
+			if (item->t_tid <= tid && lasttid >= tid)
 			{
 				found = true;
 				break;
@@ -1357,20 +1585,72 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, zstid tid,
 
 	if (found && snapshot)
 	{
+		/*
+		 * Ok, we have the item that covers the target TID now, in 'item'. Check
+		 * if it's visible.
+		 */
 		/* FIXME: dummmy scan */
 		ZSBtreeScan scan;
 		memset(&scan, 0, sizeof(scan));
 		scan.rel = rel;
 		scan.snapshot = snapshot;
 
-		if (!zs_SatisfiesVisibility(&scan, uitem))
+		if (!zs_SatisfiesVisibility(&scan, item))
 			found = false;
 	}
 
 	if (found)
 	{
+		ZSSingleBtreeItem *result;
+
+		if ((item->t_flags & ZSBT_ARRAY) != 0)
+		{
+			ZSArrayBtreeItem *aitem = (ZSArrayBtreeItem *) item;
+			int			elemno = tid - aitem->t_tid;
+			char	   *dataptr = NULL;
+			int			datasz;
+			int			resultsize;
+
+			Assert(elemno < aitem->t_nelements);
+
+			if ((item->t_flags & ZSBT_NULL) == 0)
+			{
+				if (attlen > 0)
+				{
+					dataptr = aitem->t_payload + elemno * attlen;
+					datasz = attlen;
+				}
+				else
+				{
+					dataptr = aitem->t_payload;
+					for (int i = 0; i < elemno; i++)
+					{
+						dataptr += zs_datumGetSize(PointerGetDatum(dataptr), attbyval, attlen);
+					}
+					datasz = zs_datumGetSize(PointerGetDatum(dataptr), attbyval, attlen);
+				}
+			}
+			else
+				datasz = 0;
+
+			resultsize = offsetof(ZSSingleBtreeItem, t_payload) + datasz;
+			result = palloc(resultsize);
+			memset(result, 0, offsetof(ZSSingleBtreeItem, t_payload)); /* zero padding */
+			result->t_tid = tid;
+			result->t_flags = item->t_flags & ~ZSBT_ARRAY;
+			result->t_size = resultsize;
+			result->t_undo_ptr = aitem->t_undo_ptr;
+			if (datasz > 0)
+				memcpy(result->t_payload, dataptr, datasz);
+		}
+		else
+		{
+			/* single item */
+			result = (ZSSingleBtreeItem *) item;
+		}
+
 		*buf_p = buf;
-		return uitem;
+		return result;
 	}
 	else
 	{
@@ -1386,100 +1666,188 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, zstid tid,
  * If 'olditem' is not NULL, then 'olditem' on the page is replaced with
  * 'replacementitem'. 'replacementitem' can be NULL, to remove an old item.
  *
- * If 'newitem' is not NULL, it is added to the page, to the correct position.
+ * If 'newitems' is not empty, the items in the list are added to the page,
+ * to the correct position. FIXME: Actually, they're always just added to
+ * the end of the page, and that better be the correct position.
  *
  * This function handles decompressing and recompressing items, and splitting
  * the page if needed.
  */
 static void
 zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
-				  ZSBtreeItem *olditem,
+				  zstid oldtid,
 				  ZSBtreeItem *replacementitem,
-				  ZSBtreeItem *newitem,
 				  List       *newitems)
 {
+	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
+	int16		attlen = attr->attlen;
+	bool		attbyval = attr->attbyval;
 	Page		page = BufferGetPage(buf);
 	OffsetNumber off;
 	OffsetNumber maxoff;
 	List	   *items;
 	bool		found_old_item = false;
 	/* We might need to decompress up to two previously compressed items */
-	ZSDecompressContext decompressors[2];
-	int			numdecompressors = 0;
+	ZSDecompressContext decompressor;
+	bool		decompressor_used = false;
+	bool		decompressing;
+
+	if (replacementitem)
+		Assert(replacementitem->t_tid == oldtid);
 
 	/*
-	 * Helper routine, to append the given old item 'x' to the list.
-	 * If the 'x' matches the old item, then append 'replacementitem' instead.
-	 * And if thew 'newitem' shoudl go before 'x', then append that first.
-	 *
-	 * TODO: We could also leave out any old, deleted, items that are no longer
-	 * visible to anyone.
+	 * TODO: It would be good to have a fast path, for the common case that we're
+	 * just adding items to the end.
 	 */
-#define PROCESS_ITEM(x) \
-	do { \
-		if (newitem && (x)->t_tid >= newitem->t_tid) \
-		{ \
-			Assert((x)->t_tid != newitem->t_tid); \
-			items = lappend(items, newitem); \
-			newitem = NULL; \
-		} \
-		if (olditem && (x)->t_tid == olditem->t_tid) \
-		{ \
-			Assert(!found_old_item); \
-			found_old_item = true; \
-			if (replacementitem) \
-				items = lappend(items, replacementitem); \
-		} \
-		else \
-			items = lappend(items, x); \
-	} while(0)
 
 	/* Loop through all old items on the page */
 	items = NIL;
 	maxoff = PageGetMaxOffsetNumber(page);
-	for (off = FirstOffsetNumber; off <= maxoff; off++)
+	decompressing = false;
+	off = 1;
+	for (;;)
 	{
-		ItemId		iid = PageGetItemId(page, off);
-		ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+		ZSBtreeItem *item;
 
-		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+		/*
+		 * Get the next item to process. If we're decompressing, get the next
+		 * tuple from the decompressor, otherwise get the next item from the page.
+		 */
+		if (decompressing)
 		{
-			ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
-
-			if ((olditem && citem->t_tid <= olditem->t_tid && olditem->t_tid <= citem->t_lasttid) ||
-				(newitem && citem->t_tid <= newitem->t_tid && newitem->t_tid <= citem->t_lasttid))
+			item = zs_decompress_read_item(&decompressor);
+			if (!item)
 			{
-				/* Found it, this compressed item covers the target or the new TID. */
-				/* We have to decompress it, and recompress */
-				ZSDecompressContext *decompressor = &decompressors[numdecompressors++];
-				ZSUncompressedBtreeItem *uitem;
-
-				Assert(numdecompressors <= 2);
-
-				zs_decompress_init(decompressor);
-				zs_decompress_chunk(decompressor, citem);
-
-				while ((uitem = zs_decompress_read_item(decompressor)) != NULL)
-					PROCESS_ITEM(uitem);
-			}
-			else
-			{
-				/* this item does not cover the target, nor the newitem. Add as it is. */
-				items = lappend(items, item);
+				decompressing = false;
 				continue;
 			}
 		}
+		else if (off <= maxoff)
+		{
+			ItemId		iid = PageGetItemId(page, off);
+
+			item = (ZSBtreeItem *) PageGetItem(page, iid);
+			off++;
+
+		}
 		else
-			PROCESS_ITEM(item);
+		{
+			/* out of items */
+			break;
+		}
+
+		/* we now have an item to process, either straight from the page or from
+		 * the decompressor */
+		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+		{
+			zstid		item_lasttid = zsbt_item_lasttid(item);
+
+			/* there shouldn't nested compressed items */
+			if (decompressing)
+				elog(ERROR, "nested compressed items on zedstore page not supported");
+
+			if (oldtid != InvalidZSTid && item->t_tid <= oldtid && oldtid <= item_lasttid)
+			{
+				ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+
+				/* Found it, this compressed item covers the target or the new TID. */
+				/* We have to decompress it, and recompress */
+				Assert(!decompressor_used);
+
+				zs_decompress_init(&decompressor);
+				zs_decompress_chunk(&decompressor, citem);
+				decompressor_used = true;
+				decompressing = true;
+				continue;
+			}
+			else
+			{
+				/* keep this compressed item as it is */
+				items = lappend(items, item);
+			}
+		}
+		else if ((item->t_flags & ZSBT_ARRAY) != 0)
+		{
+			/* array item */
+			ZSArrayBtreeItem *aitem = (ZSArrayBtreeItem *) item;
+			zstid		item_lasttid = zsbt_item_lasttid(item);
+
+			if (oldtid != InvalidZSTid && item->t_tid <= oldtid && oldtid <= item_lasttid)
+			{
+				/*
+				 * The target TID is currently part of an array item. We have to split
+				 * the array item into two, and put the replacement item in the middle.
+				 */
+				int			cutoff;
+				Size		olddatalen;
+				int			nelements = aitem->t_nelements;
+				bool		isnull = (aitem->t_flags & ZSBT_NULL) != 0;
+				char	   *dataptr;
+
+				cutoff = oldtid - item->t_tid;
+
+				/* Array slice before the target TID */
+				dataptr = aitem->t_payload;
+				if (cutoff > 0)
+				{
+					ZSBtreeItem *item1;
+					Size		datalen1;
+
+					datalen1 = zsbt_get_array_slice_len(attlen, attbyval, isnull,
+														dataptr, cutoff);
+					item1 = zsbt_create_item(attlen, attbyval, aitem->t_tid, aitem->t_undo_ptr,
+											 cutoff, NULL, dataptr, datalen1, isnull);
+					dataptr += datalen1;
+					items = lappend(items, item1);
+				}
+
+				/*
+				 * Skip over the target element, and store the replacement
+				 * item, if any, in its place
+				 */
+				olddatalen = zsbt_get_array_slice_len(attlen, attbyval, isnull,
+													  dataptr, 1);
+				dataptr += olddatalen;
+				if (replacementitem)
+					items = lappend(items, replacementitem);
+
+				/* Array slice after the target */
+				if (cutoff + 1 < nelements)
+				{
+					ZSBtreeItem *item2;
+					Size		datalen2;
+
+					datalen2 = zsbt_get_array_slice_len(attlen, attbyval, isnull,
+														dataptr, nelements - (cutoff + 1));
+					item2 = zsbt_create_item(attlen, attbyval, oldtid + 1, aitem->t_undo_ptr,
+											 nelements - (cutoff + 1), NULL, dataptr, datalen2, isnull);
+					items = lappend(items, item2);
+				}
+
+				found_old_item = true;
+			}
+			else
+				items = lappend(items, item);
+		}
+		else
+		{
+			/* single item */
+			if (oldtid != InvalidZSTid && item->t_tid == oldtid)
+			{
+				Assert(!found_old_item);
+				found_old_item = true;
+				if (replacementitem)
+					items = lappend(items, replacementitem);
+			}
+			else
+				items = lappend(items, item);
+		}
 	}
 
-	if (olditem && !found_old_item)
+	if (oldtid != InvalidZSTid && !found_old_item)
 		elog(ERROR, "could not find old item to replace");
 
-	/* if the new item was not added in the loop, it goes to the end */
-	if (newitem)
-		items = lappend(items, newitem);
-
+	/* Add any new items to the end */
 	if (newitems)
 		items = list_concat(items, newitems);
 
@@ -1492,8 +1860,8 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 	 * point to decompression buffers, so we cannot free them until after writing out
 	 * the pages.
 	 */
-	for (int i = 0; i < numdecompressors; i++)
-		zs_decompress_free(&decompressors[i]);
+	if (decompressor_used)
+		zs_decompress_free(&decompressor);
 	list_free(items);
 }
 
@@ -1561,7 +1929,7 @@ zsbt_recompress_add_to_page(zsbt_recompress_context *cxt, ZSBtreeItem *item)
 }
 
 static bool
-zsbt_recompress_add_to_compressor(zsbt_recompress_context *cxt, ZSUncompressedBtreeItem *item)
+zsbt_recompress_add_to_compressor(zsbt_recompress_context *cxt, ZSBtreeItem *item)
 {
 	bool		result;
 
@@ -1607,6 +1975,9 @@ zsbt_recompress_flush(zsbt_recompress_context *cxt)
  *
  * On entry, 'oldbuf' must be pinned and exclusive-locked. On exit, the lock
  * is released, but it's still pinned.
+ *
+ * TODO: Try to combine single items, and existing array-items, into new array
+ * items.
  */
 static void
 zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *items)
@@ -1640,12 +2011,12 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 		/* We can leave out any old-enough DEAD items */
 		if ((item->t_flags & ZSBT_DEAD) != 0)
 		{
-			ZSUncompressedBtreeItem *uitem = (ZSUncompressedBtreeItem *) item;
+			ZSBtreeItem *uitem = (ZSBtreeItem *) item;
 
 			if (recent_oldest_undo.counter == 0)
 				recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 
-			if (uitem->t_undo_ptr.counter < recent_oldest_undo.counter)
+			if (zsbt_item_undoptr(uitem).counter < recent_oldest_undo.counter)
 				continue;
 		}
 
@@ -1659,16 +2030,14 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 		else
 		{
 			/* try to add this item to the compressor */
-			ZSUncompressedBtreeItem *uitem = (ZSUncompressedBtreeItem *) item;
-
-			if (!zsbt_recompress_add_to_compressor(&cxt, uitem))
+			if (!zsbt_recompress_add_to_compressor(&cxt, item))
 			{
 				if (cxt.compressed_items > 0)
 				{
 					/* flush, and retry */
 					zsbt_recompress_flush(&cxt);
 
-					if (!zsbt_recompress_add_to_compressor(&cxt, uitem))
+					if (!zsbt_recompress_add_to_compressor(&cxt, item))
 					{
 						/* could not compress, even on its own. Store it uncompressed, then */
 						zsbt_recompress_add_to_page(&cxt, item);

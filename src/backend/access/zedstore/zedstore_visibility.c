@@ -24,7 +24,7 @@
  * belonged to an aborted deleting transaction, for example, it can be ignored.
  */
 TM_Result
-zs_SatisfiesUpdate(Relation rel, Snapshot snapshot, ZSUncompressedBtreeItem *item,
+zs_SatisfiesUpdate(Relation rel, Snapshot snapshot, ZSBtreeItem *item,
 				   bool *undo_record_needed, TM_FailureData *tmfd)
 {
 	ZSUndoRecPtr recent_oldest_undo;
@@ -32,12 +32,14 @@ zs_SatisfiesUpdate(Relation rel, Snapshot snapshot, ZSUncompressedBtreeItem *ite
 	bool		is_deleted;
 	ZSUndoRec  *undorec;
 
+	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
+
 	*undo_record_needed = true;
 
 	recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 
 	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
-	undo_ptr = item->t_undo_ptr;
+	undo_ptr = zsbt_item_undoptr(item);
 
 fetch_undo_record:
 
@@ -181,7 +183,7 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesAny
  */
 static bool
-zs_SatisfiesAny(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
+zs_SatisfiesAny(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
 	return true;
 }
@@ -217,7 +219,7 @@ xid_is_visible(Snapshot snapshot, TransactionId xid, CommandId cid)
  * Like HeapTupleSatisfiesMVCC
  */
 static bool
-zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
+zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -226,10 +228,11 @@ zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 	ZSUndoRec  *undorec;
 	bool		is_deleted;
 
+	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
 	Assert (snapshot->snapshot_type == SNAPSHOT_MVCC);
 
 	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
-	undo_ptr = item->t_undo_ptr;
+	undo_ptr = zsbt_item_undoptr(item);
 
 fetch_undo_record:
 	if (undo_ptr.counter < recent_oldest_undo.counter)
@@ -309,19 +312,21 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesSelf
  */
 static bool
-zs_SatisfiesSelf(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
+zs_SatisfiesSelf(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
 	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
 	ZSUndoRec  *undorec;
 	bool		is_deleted;
+	ZSUndoRecPtr undoptr = zsbt_item_undoptr(item);
 
+	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
 	Assert (snapshot->snapshot_type == SNAPSHOT_SELF);
 
 	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
 
-	if (item->t_undo_ptr.counter < recent_oldest_undo.counter)
+	if (undoptr.counter < recent_oldest_undo.counter)
 	{
 		if (!is_deleted)
 			return true;
@@ -330,7 +335,7 @@ zs_SatisfiesSelf(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 	}
 
 	/* have to fetch the UNDO record */
-	undorec = zsundo_fetch(rel, item->t_undo_ptr);
+	undorec = zsundo_fetch(rel, undoptr);
 
 	if (!is_deleted)
 	{
@@ -378,7 +383,7 @@ zs_SatisfiesSelf(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
  * Like HeapTupleSatisfiesDirty
  */
 static bool
-zs_SatisfiesDirty(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
+zs_SatisfiesDirty(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -387,13 +392,14 @@ zs_SatisfiesDirty(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 	ZSUndoRec  *undorec;
 	bool		is_deleted;
 
+	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
 	Assert (snapshot->snapshot_type == SNAPSHOT_DIRTY);
 
 	snapshot->xmin = snapshot->xmax = InvalidTransactionId;
 	snapshot->speculativeToken = 0;
 
 	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
-	undo_ptr = item->t_undo_ptr;
+	undo_ptr = zsbt_item_undoptr(item);
 
 fetch_undo_record:
 	if (undo_ptr.counter < recent_oldest_undo.counter)
@@ -472,7 +478,7 @@ fetch_undo_record:
  * surely dead to everyone, ie, vacuumable.
  */
 static bool
-zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
+zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
 	Snapshot	snapshot = scan->snapshot;
 	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
@@ -482,7 +488,7 @@ zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
 
 	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
 
-	if (item->t_undo_ptr.counter < recent_oldest_undo.counter)
+	if (zsbt_item_undoptr(item).counter < recent_oldest_undo.counter)
 	{
 		if (!is_deleted)
 			return true;
@@ -498,8 +504,15 @@ zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
  * Like HeapTupleSatisfiesVisibility
  */
 bool
-zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item)
+zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
+	/*
+	 * This works on a single or array item. Compressed items don't have
+	 * visibility information (the items inside the compressed container
+	 * do)
+	 */
+	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
+
 	/*
 	 * If we don't have a cached oldest-undo-ptr value yet, fetch it
 	 * from the metapage. (TODO: In the final EDB's UNDO-log implementation

@@ -21,6 +21,7 @@
 #include "access/multixact.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/tuptoaster.h"
 #include "access/xact.h"
 #include "access/zedstore_internal.h"
 #include "access/zedstore_undo.h"
@@ -78,13 +79,17 @@ typedef struct ZedStoreIndexFetchData
 	IndexFetchTableData idx_fetch_data;
 	int		   *proj_atts;
 	int			num_proj_atts;
+
+	ZSBtreeScan *btree_scans;
 } ZedStoreIndexFetchData;
 
 typedef struct ZedStoreIndexFetchData *ZedStoreIndexFetch;
 
 typedef struct ParallelZSScanDescData *ParallelZSScanDesc;
 
-static bool zedstoream_fetch_row(Relation rel,
+static IndexFetchTableData *zedstoream_begin_index_fetch(Relation rel);
+static void zedstoream_end_index_fetch(IndexFetchTableData *scan);
+static bool zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 							 ItemPointer tid_p,
 							 Snapshot snapshot,
 							 TupleTableSlot *slot,
@@ -109,7 +114,18 @@ zedstoream_fetch_row_version(Relation rel,
 							 Snapshot snapshot,
 							 TupleTableSlot *slot)
 {
-	return zedstoream_fetch_row(rel, tid_p, snapshot, slot, 0, NULL);
+	IndexFetchTableData *fetcher;
+	bool		result;
+
+	fetcher = zedstoream_begin_index_fetch(rel);
+
+	result = zedstoream_fetch_row((ZedStoreIndexFetchData *) fetcher,
+								  tid_p, snapshot, slot, 0, NULL);
+	ExecMaterializeSlot(slot);
+
+	zedstoream_end_index_fetch(fetcher);
+
+	return result;
 }
 
 static void
@@ -150,6 +166,9 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 		Datum		datum = d[attno - 1];
 		bool		isnull = isnulls[attno - 1];
 		Datum		toastptr = (Datum) 0;
+
+		if (!isnull && attr->attlen < 0 && VARATT_IS_EXTERNAL(datum))
+			datum = PointerGetDatum(heap_tuple_fetch_attr((struct varlena *) DatumGetPointer(datum)));
 
 		/* If this datum is too large, toast it */
 		if (!isnull && attr->attlen < 0 &&
@@ -354,7 +373,7 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	}
 
 	/* Fetch the tuple, too. */
-	if (!zedstoream_fetch_row(relation, tid_p, snapshot, slot, 0, NULL))
+	if (!zedstoream_fetch_row_version(relation, tid_p, snapshot, slot))
 		elog(ERROR, "could not fetch locked tuple");
 
 	return TM_Ok;
@@ -392,6 +411,9 @@ retry:
 		Datum		newdatum = d[attno - 1];
 		bool		newisnull = isnulls[attno - 1];
 		Datum		toastptr = (Datum) 0;
+
+		if (!newisnull && attr->attlen < 0 && VARATT_IS_EXTERNAL(newdatum))
+			newdatum = PointerGetDatum(heap_tuple_fetch_attr((struct varlena *) DatumGetPointer(newdatum)));
 
 		/* If this datum is too large, toast it */
 		if (!newisnull && attr->attlen < 0 &&
@@ -616,7 +638,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	if (slot->tts_tupleDescriptor->natts == 0)
 		elog(ERROR, "zero-column tables not supported in zedstore yet");
 
-	zs_initialize_proj_attributes(scan, slot->tts_tupleDescriptor->natts);
+	if (scan->num_proj_atts == 0)
+		zs_initialize_proj_attributes(scan, slot->tts_tupleDescriptor->natts);
 
 	if (scan->num_proj_atts > slot->tts_tupleDescriptor->natts)
 	{
@@ -689,7 +712,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		for (int i = 0; i < scan->num_proj_atts; i++)
 		{
 			ZSBtreeScan	*btscan = &scan->btree_scans[i];
-			int			natt = scan->proj_atts[i];
+			int			natt;
 			Datum		datum;
 			bool        isnull;
 			zstid		tid;
@@ -716,6 +739,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			 * flatten any ZS-TOASTed values, becaue the rest of the system
 			 * doesn't know how to deal with them.
 			 */
+			natt = scan->proj_atts[i];
 			if (!isnull && btscan->attlen == -1 &&
 				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 			{
@@ -797,6 +821,7 @@ zedstoream_begin_index_fetch(Relation rel)
 
 	zscan->proj_atts = NULL;
 	zscan->num_proj_atts = 0;
+	zscan->btree_scans = palloc0(rel->rd_att->natts * sizeof(ZSBtreeScan));
 
 	return (IndexFetchTableData *) zscan;
 }
@@ -828,12 +853,16 @@ zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
 static void
 zedstoream_reset_index_fetch(IndexFetchTableData *scan)
 {
+	/* TODO: we could close the scans here, but currently we don't bother */
 }
 
 static void
 zedstoream_end_index_fetch(IndexFetchTableData *scan)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
+
+	for (int i = 0; i < zscan->num_proj_atts; i++)
+		zsbt_end_scan(&zscan->btree_scans[i]);
 
 	if (zscan->proj_atts)
 		pfree(zscan->proj_atts);
@@ -857,7 +886,7 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 		*call_again = false;
 	if (all_dead)
 		*all_dead = false;
-	return zedstoream_fetch_row(scan->rel, tid_p, snapshot, slot,
+	return zedstoream_fetch_row((ZedStoreIndexFetchData *) scan, tid_p, snapshot, slot,
 								zscan->num_proj_atts, zscan->proj_atts);
 }
 
@@ -865,15 +894,20 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
  * Shared implementation of fetch_row_version and index_fetch_tuple callbacks.
  */
 static bool
-zedstoream_fetch_row(Relation rel,
+zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 					 ItemPointer tid_p,
 					 Snapshot snapshot,
 					 TupleTableSlot *slot,
 					 int num_proj_atts,
 					 int *proj_atts)
 {
+	Relation	rel = fetch->idx_fetch_data.rel;
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	bool		found = true;
+
+	/* If we had a previous fetches still open, close them first */
+	for (int i = 0; i < fetch->num_proj_atts; i++)
+		zsbt_end_scan(&fetch->btree_scans[i]);
 
 	/*
 	 * Initialize the slot.
@@ -891,12 +925,13 @@ zedstoream_fetch_row(Relation rel,
 	}
 	else
 		num_proj_atts = slot->tts_tupleDescriptor->natts;
+	fetch->num_proj_atts = num_proj_atts;
 
 	for (int i = 0; i < num_proj_atts && found; i++)
 	{
 		int         natt = proj_atts ? proj_atts[i] : i;
 		Form_pg_attribute att = &rel->rd_att->attrs[natt];
-		ZSBtreeScan btree_scan;
+		ZSBtreeScan *btscan = &fetch->btree_scans[i];
 		Datum		datum;
 		bool        isnull;
 		zstid		this_tid;
@@ -908,31 +943,30 @@ zedstoream_fetch_row(Relation rel,
 			continue;
 		}
 
-		zsbt_begin_scan(rel, natt + 1, tid, snapshot, &btree_scan);
+		zsbt_begin_scan(rel, natt + 1, tid, snapshot, btscan);
 
-		if (zsbt_scan_next(&btree_scan, &datum, &isnull, &this_tid))
+		if (zsbt_scan_next(btscan, &datum, &isnull, &this_tid))
 		{
 			if (this_tid != tid)
 				found = false;
 			else
 			{
 				/*
-				 * flatten any ZS-TOASTed values, becaue the rest of the system
+				 * flatten any ZS-TOASTed values, because the rest of the system
 				 * doesn't know how to deal with them.
 				 */
-				if (!isnull && btree_scan.attlen == -1 &&
+				if (!isnull && btscan->attlen == -1 &&
 					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 				{
 					datum = zedstore_toast_flatten(rel, natt + 1, tid, datum);
 				}
+
 				slot->tts_values[natt] = datum;
 				slot->tts_isnull[natt] = isnull;
 			}
 		}
 		else
 			found = false;
-
-		zsbt_end_scan(&btree_scan);
 	}
 
 	if (found)
@@ -1315,9 +1349,13 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 								   BufferAccessStrategy bstrategy)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	Relation	rel = scan->rs_scan.rs_rd;
 	int			ntuples;
 	int			first_ntuples = 0;
 	bool		firstcol;
+
+	/* TODO: for now, assume that we need all columns */
+	zs_initialize_proj_attributes(scan, RelationGetNumberOfAttributes(rel));
 
 	/*
 	 * Our strategy for a bitmap scan is to scan the tree of each attribute,
@@ -1357,6 +1395,12 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 				break;
 			}
 
+			/*
+			 * have to make a copy because we close the scan immediately.
+			 * FIXME: I think this leaks into a too-long-lived context
+			 */
+			if (!isnull)
+				datum = zs_datumCopy(datum, btree_scan.attbyval, btree_scan.attlen);
 			datums[ntuples] = datum;
 			isnulls[ntuples] = isnull;
 			if (firstcol)
@@ -1606,6 +1650,9 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 					continue;
 			}
 
+			/* have to make a copy because we close the scan immediately. */
+			if (!isnull)
+				datum = zs_datumCopy(datum, btree_scan.attbyval, btree_scan.attlen);
 			datums[ntuples] = datum;
 			isnulls[ntuples] = isnull;
 			if (firstcol)

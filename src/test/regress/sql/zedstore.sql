@@ -103,6 +103,21 @@ COPY t_zedcopy (a, b, c, d, e) from stdin;
 
 select * from t_zedcopy;
 
+--
+-- Also test delete and update on the table that was populated with COPY.
+-- This exercises splitting the array item. (A table not populated with
+-- COPY only contains single items, at the moment.)
+--
+
+delete from t_zedcopy where b = 4;
+select * from t_zedcopy;
+delete from t_zedcopy where b < 3;
+select * from t_zedcopy;
+
+update t_zedcopy set b = 100 where b = 5;
+select * from t_zedcopy;
+
+
 -- Test for alter table add column force rewrite
 create table t_zaddcol(a int) using zedstore;
 insert into t_zaddcol select * from generate_series(1, 3);

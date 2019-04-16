@@ -33,19 +33,19 @@ typedef struct ZSCompressContext
 
 typedef struct ZSBtreeItem ZSBtreeItem;
 typedef struct ZSCompressedBtreeItem ZSCompressedBtreeItem;
-typedef struct ZSUncompressedBtreeItem ZSUncompressedBtreeItem;
+typedef struct ZSSingleBtreeItem ZSSingleBtreeItem;
 
 /* compression functions */
 extern void zs_compress_init(ZSCompressContext *context);
 extern void zs_compress_begin(ZSCompressContext *context, int maxCompressedSize);
-extern bool zs_compress_add(ZSCompressContext *context, ZSUncompressedBtreeItem *item);
+extern bool zs_compress_add(ZSCompressContext *context, ZSBtreeItem *item);
 extern ZSCompressedBtreeItem *zs_compress_finish(ZSCompressContext *context);
 extern void zs_compress_free(ZSCompressContext *context);
 
 /* decompression functions */
 extern void zs_decompress_init(ZSDecompressContext *context);
 extern void zs_decompress_chunk(ZSDecompressContext *context, ZSCompressedBtreeItem *chunk);
-extern ZSUncompressedBtreeItem *zs_decompress_read_item(ZSDecompressContext *context);
+extern ZSBtreeItem *zs_decompress_read_item(ZSDecompressContext *context);
 extern void zs_decompress_free(ZSDecompressContext *context);
 
 #endif							/* ZEDSTORE_COMPRESSION_H */
