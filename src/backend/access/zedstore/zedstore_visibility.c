@@ -24,11 +24,9 @@
  * belonged to an aborted deleting transaction, for example, it can be ignored.
  */
 TM_Result
-zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item,
+zs_SatisfiesUpdate(Relation rel, Snapshot snapshot, ZSUncompressedBtreeItem *item,
 				   bool *undo_record_needed, TM_FailureData *tmfd)
 {
-	Relation	rel = scan->rel;
-	Snapshot	snapshot = scan->snapshot;
 	ZSUndoRecPtr recent_oldest_undo;
 	ZSUndoRecPtr undo_ptr;
 	bool		is_deleted;
@@ -36,9 +34,7 @@ zs_SatisfiesUpdate(ZSBtreeScan *scan, ZSUncompressedBtreeItem *item,
 
 	*undo_record_needed = true;
 
-	if (scan->recent_oldest_undo.counter == 0)
-		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(scan->rel);
-	recent_oldest_undo = scan->recent_oldest_undo;
+	recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 
 	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
 	undo_ptr = item->t_undo_ptr;

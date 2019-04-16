@@ -54,6 +54,8 @@ static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
 						 zstid key2, BlockNumber blk2,
 						 Buffer leftchildbuf);
 static ZSUncompressedBtreeItem *zsbt_scan_next_internal(ZSBtreeScan *scan);
+static ZSUncompressedBtreeItem *zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot,
+		   zstid tid, Buffer *buf_p);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 							  ZSBtreeItem *olditem, ZSBtreeItem *replacementitem,
 							  ZSBtreeItem *newitem, List *newitems);
@@ -113,7 +115,6 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapsho
 	scan->attlen = attlen;
 	scan->attbyval = attbyval;
 	scan->snapshot = snapshot;
-	scan->for_update = false;		/* caller can change this */
 
 	scan->active = true;
 	scan->lastbuf = buf;
@@ -439,19 +440,16 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 			Snapshot snapshot, Snapshot crosscheck, bool wait,
 			TM_FailureData *hufd, bool changingPart)
 {
-	ZSBtreeScan scan;
 	ZSUncompressedBtreeItem *item;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 	ZSUndoRecPtr undorecptr;
 	ZSUncompressedBtreeItem *deleteditem;
-
-	zsbt_begin_scan(rel, attno, tid, snapshot, &scan);
-	scan.for_update = true;
+	Buffer		buf;
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_scan_next_internal(&scan);
-	if (item == NULL || item->t_tid != tid)
+	item = zsbt_fetch(rel, attno, snapshot, tid, &buf);
+	if (item == NULL)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
@@ -460,10 +458,10 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
-	result = zs_SatisfiesUpdate(&scan, item, &keep_old_undo_ptr, hufd);
+	result = zs_SatisfiesUpdate(rel, snapshot, item, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
-		zsbt_end_scan(&scan);
+		UnlockReleaseBuffer(buf);
 		/* FIXME: We should fill TM_FailureData *hufd correctly */
 		return result;
 	}
@@ -493,11 +491,10 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	deleteditem->t_flags |= ZSBT_DELETED;
 	deleteditem->t_undo_ptr = undorecptr;
 
-	zsbt_replace_item(rel, attno, scan.lastbuf,
+	zsbt_replace_item(rel, attno, buf,
 					  (ZSBtreeItem *) item, (ZSBtreeItem *) deleteditem,
 					  NULL, NIL);
-	scan.lastbuf_is_locked = false;	/* zsbt_replace_item released */
-	zsbt_end_scan(&scan);
+	ReleaseBuffer(buf);	/* zsbt_replace_item unlocked */
 
 	pfree(deleteditem);
 
@@ -548,25 +545,16 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 					 TransactionId xid, CommandId cid, Snapshot snapshot,
 					 Snapshot crosscheck, bool wait, TM_FailureData *hufd)
 {
-	TupleDesc	desc = RelationGetDescr(rel);
-	Form_pg_attribute attr = &desc->attrs[attno - 1];
-	ZSBtreeScan scan;
+	Buffer		buf;
 	ZSUncompressedBtreeItem *olditem;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 
 	/*
-	 * Find the item to delete.  It could be part of a compressed item,
-	 * we let zsbt_scan_next_internal() handle that.
+	 * Find the item to delete.
 	 */
-	zsbt_begin_scan(rel, attno, otid, snapshot, &scan);
-	scan.for_update = true;
-
-	if (attr->attbyval != scan.attbyval || attr->attlen != scan.attlen)
-		elog(ERROR, "attribute information stored in root dir doesn't match with rel");
-
-	olditem = zsbt_scan_next_internal(&scan);
-	if (olditem == NULL || olditem->t_tid != otid)
+	olditem = zsbt_fetch(rel, attno, snapshot, otid, &buf);
+	if (olditem == NULL)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
@@ -579,10 +567,10 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 	/*
 	 * Is it visible to us?
 	 */
-	result = zs_SatisfiesUpdate(&scan, olditem, &keep_old_undo_ptr, hufd);
+	result = zs_SatisfiesUpdate(rel, snapshot, olditem, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
-		zsbt_end_scan(&scan);
+		UnlockReleaseBuffer(buf);
 		/* FIXME: We should fill TM_FailureData *hufd correctly */
 		return result;
 	}
@@ -592,8 +580,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 	 * concurrent update!
 	 */
 
-	/* transfer ownership of the buffer, and free the scan. */
-	zsbt_end_scan(&scan);
+	UnlockReleaseBuffer(buf);
 
 	return TM_Ok;
 }
@@ -620,9 +607,7 @@ static void
 zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 					  TransactionId xid, CommandId cid, Snapshot snapshot)
 {
-	TupleDesc	desc = RelationGetDescr(rel);
-	Form_pg_attribute attr = &desc->attrs[attno - 1];
-	ZSBtreeScan scan;
+	Buffer		buf;
 	ZSUncompressedBtreeItem *olditem;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
@@ -632,16 +617,10 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 
 	/*
 	 * Find the item to delete.  It could be part of a compressed item,
-	 * we let zsbt_scan_next_internal() handle that.
+	 * we let zsbt_fetch() handle that.
 	 */
-	zsbt_begin_scan(rel, attno, otid, snapshot, &scan);
-	scan.for_update = true;
-
-	if (attr->attbyval != scan.attbyval || attr->attlen != scan.attlen)
-		elog(ERROR, "attribute information stored in root dir doesn't match with rel");
-
-	olditem = zsbt_scan_next_internal(&scan);
-	if (olditem == NULL || olditem->t_tid != otid)
+	olditem = zsbt_fetch(rel, attno, snapshot, otid, &buf);
+	if (olditem == NULL)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
@@ -654,10 +633,10 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	/*
 	 * Is it visible to us?
 	 */
-	result = zs_SatisfiesUpdate(&scan, olditem, &keep_old_undo_ptr, &tmfd);
+	result = zs_SatisfiesUpdate(rel, snapshot, olditem, &keep_old_undo_ptr, &tmfd);
 	if (result != TM_Ok)
 	{
-		zsbt_end_scan(&scan);
+		UnlockReleaseBuffer(buf);
 		elog(ERROR, "tuple concurrently updated - not implemented");
 	}
 
@@ -686,11 +665,10 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	deleteditem->t_flags |= ZSBT_UPDATED;
 	deleteditem->t_undo_ptr = undorecptr;
 
-	zsbt_replace_item(rel, attno, scan.lastbuf,
+	zsbt_replace_item(rel, attno, buf,
 					  (ZSBtreeItem *) olditem, (ZSBtreeItem *) deleteditem,
 					  NULL, NIL);
-	scan.lastbuf_is_locked = false;	/* zsbt_recompress_replace released */
-	zsbt_end_scan(&scan);
+	ReleaseBuffer(buf);		/* zsbt_recompress_replace released */
 
 	pfree(deleteditem);
 }
@@ -701,19 +679,16 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 			   LockTupleMode lockmode, LockWaitPolicy wait_policy,
 			   TM_FailureData *hufd)
 {
-	ZSBtreeScan scan;
+	Buffer		buf;
 	ZSUncompressedBtreeItem *item;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 	ZSUndoRecPtr undorecptr;
 	ZSUncompressedBtreeItem *newitem;
 
-	zsbt_begin_scan(rel, attno, tid, snapshot, &scan);
-	scan.for_update = true;
-
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_scan_next_internal(&scan);
-	if (item == NULL || item->t_tid != tid)
+	item = zsbt_fetch(rel, attno, snapshot, tid, &buf);
+	if (item == NULL)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
@@ -722,10 +697,10 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
-	result = zs_SatisfiesUpdate(&scan, item, &keep_old_undo_ptr, hufd);
+	result = zs_SatisfiesUpdate(rel, snapshot, item, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
-		zsbt_end_scan(&scan);
+		UnlockReleaseBuffer(buf);
 		/* FIXME: We should fill TM_FailureData *hufd correctly */
 		return result;
 	}
@@ -760,11 +735,10 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 	memcpy(newitem, item, item->t_size);
 	newitem->t_undo_ptr = undorecptr;
 
-	zsbt_replace_item(rel, attno, scan.lastbuf,
+	zsbt_replace_item(rel, attno, buf,
 					  (ZSBtreeItem *) item, (ZSBtreeItem *) newitem,
 					  NULL, NIL);
-	scan.lastbuf_is_locked = false;	/* zsbt_replace_item released */
-	zsbt_end_scan(&scan);
+	ReleaseBuffer(buf);		/* zsbt_replace_item unlocked */
 
 	pfree(newitem);
 
@@ -779,18 +753,14 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 void
 zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undoptr)
 {
-	ZSBtreeScan scan;
+	Buffer		buf;
 	ZSUncompressedBtreeItem *item;
 	ZSUncompressedBtreeItem deaditem;
 
-	zsbt_begin_scan(rel, attno, tid, NULL, &scan);
-	scan.for_update = true;
-
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_scan_next_internal(&scan);
-	if (item == NULL || item->t_tid != tid)
+	item = zsbt_fetch(rel, attno, NULL, tid, &buf);
+	if (item == NULL)
 	{
-		zsbt_end_scan(&scan);
 		elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 		return;
@@ -799,7 +769,7 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 	/* Replace the ZSBreeItem with a DEAD item. (Unless it's already dead) */
 	if ((item->t_flags & ZSBT_DEAD) != 0)
 	{
-		zsbt_end_scan(&scan);
+		UnlockReleaseBuffer(buf);
 		return;
 	}
 
@@ -809,11 +779,10 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 	deaditem.t_flags = ZSBT_DEAD;
 	deaditem.t_undo_ptr = undoptr;
 
-	zsbt_replace_item(rel, attno, scan.lastbuf,
+	zsbt_replace_item(rel, attno, buf,
 					  (ZSBtreeItem *) item, (ZSBtreeItem *) &deaditem,
 					  NULL, NIL);
-	scan.lastbuf_is_locked = false;	/* zsbt_replace_item released */
-	zsbt_end_scan(&scan);
+	ReleaseBuffer(buf); 	/* zsbt_replace_item released */
 }
 
 /* ----------------------------------------------------------------
@@ -1214,6 +1183,106 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer 
 	zsbt_insert_downlink(rel, attno, leftbuf, splittid, rightblkno);
 }
 
+static ZSUncompressedBtreeItem *
+zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, zstid tid,
+		   Buffer *buf_p)
+{
+	BlockNumber	rootblk;
+	int16		attlen;
+	bool		attbyval;
+	Buffer		buf;
+	Page		page;
+	ZSUncompressedBtreeItem *uitem = NULL;
+	bool		found = false;
+	OffsetNumber maxoff;
+	OffsetNumber off;
+
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, false, &attlen, &attbyval);
+
+	if (rootblk == InvalidBlockNumber)
+	{
+		*buf_p = InvalidBuffer;
+		return NULL;
+	}
+
+	buf = zsbt_descend(rel, rootblk, tid);
+	page = BufferGetPage(buf);
+
+	/* Find the item on the page */
+	maxoff = PageGetMaxOffsetNumber(page);
+	for (off = FirstOffsetNumber; off <= maxoff; off++)
+	{
+		ItemId		iid = PageGetItemId(page, off);
+		ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+
+		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+		{
+			ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+
+			if (citem->t_tid <= tid && tid <= citem->t_lasttid)
+			{
+				ZSDecompressContext decompressor;
+
+				zs_decompress_init(&decompressor);
+				zs_decompress_chunk(&decompressor, citem);
+
+				while ((uitem = zs_decompress_read_item(&decompressor)) != NULL)
+				{
+					if (uitem->t_tid == tid)
+					{
+						found = true;
+						break;
+					}
+				}
+				if (found)
+				{
+					/* FIXME: decompressor is leaked. Can't free it yet, because we still
+					 * need to access the item below
+					 */
+					break;
+				}
+				zs_decompress_free(&decompressor);
+			}
+		}
+		else
+		{
+			uitem = (ZSUncompressedBtreeItem *) item;
+			if (uitem->t_tid == tid)
+			{
+				found = true;
+				break;
+			}
+		}
+	}
+
+	if (found && snapshot)
+	{
+		/* FIXME: dummmy scan */
+		ZSBtreeScan scan;
+		memset(&scan, 0, sizeof(scan));
+		scan.rel = rel;
+		scan.snapshot = snapshot;
+
+		if (!zs_SatisfiesVisibility(&scan, uitem))
+			found = false;
+	}
+
+	if (found)
+	{
+		*buf_p = buf;
+		return uitem;
+	}
+	else
+	{
+		UnlockReleaseBuffer(buf);
+		*buf_p = InvalidBuffer;
+		return NULL;
+	}
+}
+
+
+
+
 /*
  * Returns the next item in the scan. This doesn't pay attention to visibility.
  *
@@ -1257,7 +1326,7 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 		opaque = ZSBtreePageGetOpaque(page);
 
 		if (!scan->lastbuf_is_locked)
-			LockBuffer(buf, scan->for_update ? BUFFER_LOCK_EXCLUSIVE : BUFFER_LOCK_SHARE);
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
 		scan->lastbuf_is_locked = true;
 
 		/* TODO: check that the page is a valid zs btree page */
@@ -1280,11 +1349,8 @@ zsbt_scan_next_internal(ZSBtreeScan *scan)
 					zs_decompress_chunk(&scan->decompressor, citem);
 					MemoryContextSwitchTo(oldcxt);
 					scan->has_decompressed = true;
-					if (!scan->for_update)
-					{
-						LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-						scan->lastbuf_is_locked = false;
-					}
+					LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+					scan->lastbuf_is_locked = false;
 					break;
 				}
 			}
