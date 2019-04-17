@@ -79,7 +79,7 @@ static void zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zs
  * Begin a scan of the btree.
  */
 void
-zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapshot, ZSBtreeScan *scan)
+zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan)
 {
 	BlockNumber	rootblk;
 	int16		attlen;
@@ -103,7 +103,9 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapsho
 		scan->context = NULL;
 		memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 		scan->nexttid = InvalidZSTid;
-		scan->array_item = NULL;
+		scan->endtid = InvalidZSTid;
+		scan->array_datums = NULL;
+		scan->array_datums_allocated_size = 0;
 		scan->array_elements_left = 0;
 		return;
 	}
@@ -122,12 +124,14 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapsho
 	scan->lastbuf_is_locked = false;
 	scan->lastoff = InvalidOffsetNumber;
 	scan->nexttid = starttid;
+	scan->endtid = endtid;
 
 	scan->context = CurrentMemoryContext;
 
 	scan->has_decompressed = false;
 	zs_decompress_init(&scan->decompressor);
-	scan->array_item = NULL;
+	scan->array_datums = NULL;
+	scan->array_datums_allocated_size = 0;
 	scan->array_elements_left = 0;
 
 	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
@@ -148,6 +152,115 @@ zsbt_end_scan(ZSBtreeScan *scan)
 	zs_decompress_free(&scan->decompressor);
 
 	scan->active = false;
+	scan->array_elements_left = 0;
+}
+
+static void
+zsbt_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
+{
+	int			nelements = aitem->t_nelements;
+	zstid		tid = aitem->t_tid;
+	bool		isnull = (aitem->t_flags & ZSBT_NULL) != 0;
+	char	   *p = aitem->t_payload;
+
+	/* skip over elements that we are not interested in */
+	while (tid < scan->nexttid && nelements > 0)
+	{
+		if (!isnull)
+		{
+			if (scan->attlen > 0)
+				p += scan->attlen;
+			else
+				p += zs_datumGetSize(PointerGetDatum(p), scan->attbyval, scan->attlen);
+		}
+		tid++;
+		nelements--;
+	}
+
+	/* leave out elements that are past end of range */
+	if (tid + nelements > scan->endtid)
+		nelements = scan->endtid - tid;
+
+	scan->array_isnull = isnull;
+
+	if (nelements > scan->array_datums_allocated_size)
+	{
+		if (scan->array_datums)
+			pfree(scan->array_datums);
+		scan->array_datums = palloc(nelements * sizeof(Datum));
+		scan->array_datums_allocated_size = nelements;
+	}
+
+	if (isnull)
+	{
+		/*
+		 * For NULLs, clear the Datum array. Not strictly necessary, I think,
+		 * but less confusing when debugging.
+		 */
+		memset(scan->array_datums, 0, nelements * sizeof(Datum));
+	}
+	else
+	{
+		/*
+		 * Expand the packed array data into an array of Datums.
+		 *
+		 * It would perhaps be more natural to loop through the elements with
+		 * datumGetSize() and fetch_att(), but this is a pretty hot loop, so it's
+		 * better to avoid checking attlen/attbyval in the loop.
+		 *
+		 * TODO: a different on-disk representation might make this further still,
+		 * for varlenas (this is pretty optimal for fixed-lengths already).
+		 * For example, storing an array of sizes or an array of offsets, followed
+		 * by the data itself, might incur fewer pipeline stalls in the CPU.
+		 */
+		int16		attlen = scan->attlen;
+
+		if (scan->attbyval)
+		{
+			if (attlen == sizeof(Datum))
+			{
+				memcpy(scan->array_datums, p, nelements * sizeof(Datum));
+			}
+			else if (attlen == sizeof(int32))
+			{
+				for (int i = 0; i < nelements; i++)
+				{
+					scan->array_datums[i] = fetch_att(p, true, sizeof(int32));
+					p += sizeof(int32);
+				}
+			}
+			else if (attlen == sizeof(int16))
+			{
+				for (int i = 0; i < nelements; i++)
+				{
+					scan->array_datums[i] = fetch_att(p, true, sizeof(int16));
+					p += sizeof(int16);
+				}
+			}
+			else if (attlen == 1)
+			{
+				for (int i = 0; i < nelements; i++)
+				{
+					scan->array_datums[i] = fetch_att(p, true, 1);
+					p += 1;
+				}
+			}
+			else
+				Assert(false);
+		}
+		else
+		{
+			Assert(attlen == -1);
+
+			for (int i = 0; i < nelements; i++)
+			{
+				scan->array_datums[i] = fetch_att(p, false, -1);
+				p += zs_datumGetSize(PointerGetDatum(p), false, -1);
+			}
+		}
+	}
+	scan->array_next_datum = &scan->array_datums[0];
+	scan->array_elements_left = nelements;
 }
 
 /*
@@ -177,34 +290,16 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 	{
 		/*
 		 * If we are still processing an array item, return next element from it.
+		 *
+		 * NB: Keep this in sync with the fast path in zsbt_scan_next_fast()!
 		 */
 		if (scan->array_elements_left > 0)
 		{
-			if (scan->array_isnull)
-				*isnull = true;
-			else
-			{
-				char	   *dataptr = scan->array_next_datum;
-
-				*datum = fetch_att(dataptr, scan->attbyval, scan->attlen);
-
-				/* make a copy, to make sure it's aligned. */
-				if (scan->attlen < 0 && !VARATT_IS_1B(*datum))
-					*datum = zs_datumCopy(*datum, scan->attbyval, scan->attlen);
-
-				*isnull = false;
-				if (scan->attlen > 0)
-					dataptr += scan->attlen;
-				else
-				{
-					dataptr += zs_datumGetSize(PointerGetDatum(dataptr), scan->attbyval, scan->attlen);
-				}
-				scan->array_next_datum = dataptr;
-			}
-			*tid = scan->array_next_tid;
-			scan->array_next_tid++;
-			scan->nexttid = scan->array_next_tid;
+			*isnull = scan->array_isnull;
+			*datum = *(scan->array_next_datum++);
+			*tid = (scan->nexttid++);
 			scan->array_elements_left--;
+			Assert(*tid < scan->endtid);
 			return true;
 		}
 
@@ -234,6 +329,9 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 			if (lasttid < scan->nexttid)
 				continue;
 
+			if (uitem->t_tid >= scan->endtid)
+				break;
+
 			if (!zs_SatisfiesVisibility(scan, uitem))
 			{
 				scan->nexttid = lasttid + 1;
@@ -245,23 +343,7 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 				 * is already a copy */
 				ZSArrayBtreeItem *aitem = (ZSArrayBtreeItem *) uitem;
 
-				scan->array_item = aitem;
-				scan->array_isnull = (aitem->t_flags & ZSBT_NULL) != 0;
-				scan->array_next_datum = aitem->t_payload;
-				scan->array_next_tid = aitem->t_tid;
-				scan->array_elements_left = aitem->t_nelements;
-
-				while (scan->array_next_tid < scan->nexttid && scan->array_elements_left > 0)
-				{
-					if (scan->attlen > 0)
-						scan->array_next_datum += scan->attlen;
-					else
-						scan->array_next_datum += zs_datumGetSize(PointerGetDatum(scan->array_next_datum), scan->attbyval, scan->attlen);
-
-					scan->array_next_tid++;
-					scan->array_elements_left--;
-				}
-				scan->nexttid = scan->array_next_tid;
+				zsbt_scan_extract_array(scan, aitem);
 				continue;
 			}
 			else
@@ -314,6 +396,12 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 			if (scan->nexttid > lasttid)
 				continue;
 
+			if (item->t_tid >= scan->endtid)
+			{
+				scan->nexttid = scan->endtid;
+				break;
+			}
+
 			if ((item->t_flags & ZSBT_COMPRESSED) != 0)
 			{
 				ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
@@ -342,22 +430,7 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 					aitem = MemoryContextAlloc(scan->context, item->t_size);
 					memcpy(aitem, item, item->t_size);
 
-					scan->array_item = aitem;
-					scan->array_next_datum = aitem->t_payload;
-					scan->array_next_tid = aitem->t_tid;
-					scan->array_elements_left = aitem->t_nelements;
-
-					while (scan->array_next_tid < scan->nexttid && scan->array_elements_left > 0)
-					{
-						if (scan->attlen > 0)
-							scan->array_next_datum += scan->attlen;
-						else
-							scan->array_next_datum += zs_datumGetSize(PointerGetDatum(scan->array_next_datum), scan->attbyval, scan->attlen);
-
-						scan->array_next_tid++;
-						scan->array_elements_left--;
-					}
-					scan->nexttid = scan->array_next_tid;
+					zsbt_scan_extract_array(scan, aitem);
 
 					if (scan->array_elements_left > 0)
 					{
@@ -398,9 +471,10 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 		buf_is_locked = false;
 
-		if (next == InvalidBlockNumber)
+		if (next == InvalidBlockNumber || scan->nexttid >= scan->endtid)
 		{
 			scan->active = false;
+			scan->array_elements_left = 0;
 			ReleaseBuffer(scan->lastbuf);
 			scan->lastbuf = InvalidBuffer;
 			break;

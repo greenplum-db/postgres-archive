@@ -631,25 +631,21 @@ zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
 static bool
 zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
-	MemoryContext oldcontext = CurrentMemoryContext;
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 	int			i;
-
-	if (slot->tts_tupleDescriptor->natts == 0)
-		elog(ERROR, "zero-column tables not supported in zedstore yet");
+	int			slot_natts = slot->tts_tupleDescriptor->natts;
+	Datum	   *slot_values = slot->tts_values;
+	bool	   *slot_isnull = slot->tts_isnull;
 
 	if (scan->num_proj_atts == 0)
-		zs_initialize_proj_attributes(scan, slot->tts_tupleDescriptor->natts);
-
-	if (scan->num_proj_atts > slot->tts_tupleDescriptor->natts)
 	{
-		/*
-		 * FIXME: This actually happens sometimes, during DROP COLUMN. When no
-		 * column list was given, zedstore_beginscan creates it from the
-		 * relation's descriptor, which is out of sync with the slot.
-		 */
-		elog(ERROR, "scan has more projected attributes than slot");
+		if (slot_natts == 0)
+			elog(ERROR, "zero-column tables not supported in zedstore yet");
+
+		zs_initialize_proj_attributes(scan, slot_natts);
 	}
+
+	Assert(scan->num_proj_atts <= slot_natts);
 
 	/*
 	 * Initialize the slot.
@@ -660,8 +656,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	 */
 	slot->tts_nvalid = 0;
 	slot->tts_flags |= TTS_FLAG_EMPTY;
-	for (i = 0; i < slot->tts_tupleDescriptor->natts; i++)
-		slot->tts_isnull[i] = true;
+	for (i = 0; i < slot_natts; i++)
+		slot_isnull[i] = true;
 
 	while (scan->state != ZSSCAN_STATE_FINISHED)
 	{
@@ -670,6 +666,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		if (scan->state == ZSSCAN_STATE_UNSTARTED ||
 			scan->state == ZSSCAN_STATE_FINISHED_RANGE)
 		{
+			MemoryContext oldcontext;
+
 			if (scan->rs_scan.rs_parallel)
 			{
 				/* Allocate next range of TIDs to scan */
@@ -692,13 +690,14 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				scan->cur_range_end = MaxPlusOneZSTid;
 			}
 
-			MemoryContextSwitchTo(scan->context);
+			oldcontext = MemoryContextSwitchTo(scan->context);
 			for (int i = 0; i < scan->num_proj_atts; i++)
 			{
 				int			natt = scan->proj_atts[i];
 
 				zsbt_begin_scan(scan->rs_scan.rs_rd, natt + 1,
 								scan->cur_range_start,
+								scan->cur_range_end,
 								scan->rs_scan.rs_snapshot,
 								&scan->btree_scans[i]);
 			}
@@ -717,16 +716,12 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			bool        isnull;
 			zstid		tid;
 
-			if (!zsbt_scan_next(btscan, &datum, &isnull, &tid))
+			if (!zsbt_scan_next_fast(btscan, &datum, &isnull, &tid))
 			{
 				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
 				break;
 			}
-			if (tid >= scan->cur_range_end)
-			{
-				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
-				break;
-			}
+			Assert (tid < scan->cur_range_end);
 
 			if (i == 0)
 				this_tid = tid;
@@ -736,18 +731,19 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			}
 
 			/*
-			 * flatten any ZS-TOASTed values, becaue the rest of the system
+			 * flatten any ZS-TOASTed values, because the rest of the system
 			 * doesn't know how to deal with them.
 			 */
 			natt = scan->proj_atts[i];
+
 			if (!isnull && btscan->attlen == -1 &&
 				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 			{
 				datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt + 1, tid, datum);
 			}
 
-			slot->tts_values[natt] = datum;
-			slot->tts_isnull[natt] = isnull;
+			slot_values[natt] = datum;
+			slot_isnull[natt] = isnull;
 		}
 
 		if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
@@ -790,11 +786,10 @@ zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	bool		isnull;
 
 	/* Use the first column for the visibility information. */
-	zsbt_begin_scan(rel, 1, tid, snapshot, &btree_scan);
+	zsbt_begin_scan(rel, 1, tid, tid + 1, snapshot, &btree_scan);
 
 	found = zsbt_scan_next(&btree_scan, &datum, &isnull, &ftid);
-	if (found && tid != ftid)
-		found = false;
+	Assert (!found || ftid == tid);
 
 	zsbt_end_scan(&btree_scan);
 
@@ -943,27 +938,24 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 			continue;
 		}
 
-		zsbt_begin_scan(rel, natt + 1, tid, snapshot, btscan);
+		zsbt_begin_scan(rel, natt + 1, tid, tid + 1, snapshot, btscan);
 
 		if (zsbt_scan_next(btscan, &datum, &isnull, &this_tid))
 		{
-			if (this_tid != tid)
-				found = false;
-			else
-			{
-				/*
-				 * flatten any ZS-TOASTed values, because the rest of the system
-				 * doesn't know how to deal with them.
-				 */
-				if (!isnull && btscan->attlen == -1 &&
-					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
-				{
-					datum = zedstore_toast_flatten(rel, natt + 1, tid, datum);
-				}
+			Assert(this_tid == tid);
 
-				slot->tts_values[natt] = datum;
-				slot->tts_isnull[natt] = isnull;
+			/*
+			 * flatten any ZS-TOASTed values, because the rest of the system
+			 * doesn't know how to deal with them.
+			 */
+			if (!isnull && btscan->attlen == -1 &&
+				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+			{
+				datum = zedstore_toast_flatten(rel, natt + 1, tid, datum);
 			}
+
+			slot->tts_values[natt] = datum;
+			slot->tts_isnull[natt] = isnull;
 		}
 		else
 			found = false;
@@ -1121,6 +1113,7 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 
 				zsbt_begin_scan(zscan->rs_scan.rs_rd, natt + 1,
 								zscan->cur_range_start,
+								zscan->cur_range_end,
 								zscan->rs_scan.rs_snapshot,
 								&zscan->btree_scans[i]);
 			}
@@ -1379,6 +1372,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 
 		zsbt_begin_scan(scan->rs_scan.rs_rd, natt + 1,
 						ZSTidFromBlkOff(blockno, 1),
+						ZSTidFromBlkOff(blockno + 1, 1),
 						scan->rs_scan.rs_snapshot,
 						&btree_scan);
 
@@ -1389,11 +1383,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 		ntuples = 0;
 		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
 		{
-			if (ZSTidGetBlockNumber(tid) != blockno)
-			{
-				Assert(ZSTidGetBlockNumber(tid) > blockno);
-				break;
-			}
+			Assert(ZSTidGetBlockNumber(tid) == blockno);
 
 			/*
 			 * have to make a copy because we close the scan immediately.
@@ -1622,6 +1612,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 
 		zsbt_begin_scan(scan->rs_scan.rs_rd, natt + 1,
 						ZSTidFromBlkOff(tid_blkno, 1),
+						ZSTidFromBlkOff(tid_blkno + 1, 1),
 						scan->rs_scan.rs_snapshot,
 						&btree_scan);
 
@@ -1632,11 +1623,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 		ntuples = 0;
 		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
 		{
-			if (ZSTidGetBlockNumber(tid) != tid_blkno)
-			{
-				Assert(ZSTidGetBlockNumber(tid) > tid_blkno);
-				break;
-			}
+			Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
 
 			if (tbmres->ntuples != -1)
 			{

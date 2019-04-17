@@ -327,8 +327,13 @@ zs_datumGetSize(Datum value, bool typByVal, int typLen)
 {
 	if (typLen > 0)
 		return typLen;
-	else if (VARATT_IS_EXTERNAL(value) && VARTAG_EXTERNAL(value) == VARTAG_ZEDSTORE)
-		return sizeof(varatt_zs_toastptr);
+	else if (typLen == -1)
+	{
+		if (VARATT_IS_EXTERNAL(value) && VARTAG_EXTERNAL(value) == VARTAG_ZEDSTORE)
+			return sizeof(varatt_zs_toastptr);
+		else
+			return VARSIZE_ANY(value);
+	}
 	else
 		return datumGetSize(value, typByVal, typLen);
 }
@@ -422,6 +427,7 @@ typedef struct ZSBtreeScan
 	bool		lastbuf_is_locked;
 	OffsetNumber lastoff;
 	zstid		nexttid;
+	zstid		endtid;
 	Snapshot	snapshot;
 
 	/* in the "real" UNDO-log, this would probably be a global variable */
@@ -437,11 +443,11 @@ typedef struct ZSBtreeScan
 	/*
 	 * These fields are used, if the scan is processing an array tuple.
 	 */
-	ZSArrayBtreeItem *array_item;
-	bool		array_isnull;
-	char	   *array_next_datum;
-	zstid		array_next_tid;
+	int			array_datums_allocated_size;
+	Datum	   *array_datums;
+	Datum	   *array_next_datum;
 	int			array_elements_left;
+	bool		array_isnull;
 
 } ZSBtreeScan;
 
@@ -463,10 +469,35 @@ extern TM_Result zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 			   TransactionId xid, CommandId cid, Snapshot snapshot,
 			   LockTupleMode lockmode, LockWaitPolicy wait_policy,
 			   TM_FailureData *hufd);
-extern void zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, Snapshot snapshot, ZSBtreeScan *scan);
+extern void zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan);
 extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
+
+/*
+ * A fast-path version of zsbt_scan_next(), where the common case where we just
+ * return the next element from an array item is inlined.
+ *
+ * Keep this fast-path in sync with zsbt_scan_next().
+ */
+static inline bool
+zsbt_scan_next_fast(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
+{
+	if (!scan->active)
+		return false;
+
+	if (scan->array_elements_left > 0)
+	{
+		*isnull = scan->array_isnull;
+		*datum = *(scan->array_next_datum++);
+		*tid = (scan->nexttid++);
+		scan->array_elements_left--;
+		return true;
+	}
+
+	/* slow path */
+	return zsbt_scan_next(scan, datum, isnull, tid);
+}
 
 
 /* prototypes for functions in zedstore_meta.c */
