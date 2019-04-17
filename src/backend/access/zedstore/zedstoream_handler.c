@@ -742,6 +742,12 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt + 1, tid, datum);
 			}
 
+			/* Check that the values coming out of the b-tree are aligned properly */
+			if (!isnull && btscan->attlen == -1)
+			{
+				Assert (VARATT_IS_1B(datum) || INTALIGN(datum) == datum);
+			}
+
 			slot_values[natt] = datum;
 			slot_isnull[natt] = isnull;
 		}

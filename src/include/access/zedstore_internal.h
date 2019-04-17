@@ -413,6 +413,7 @@ typedef struct ZSBtreeScan
 	AttrNumber	attno;
 	int16		attlen;
 	bool		attbyval;
+	char		attalign;
 
 	/*
 	 * memory context that should be used for any allocations that go with the scan,
