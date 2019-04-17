@@ -1173,6 +1173,7 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	EState	   *estate;
 	ExprContext *econtext;
 	Snapshot	snapshot;
+	SnapshotData NonVacuumableSnapshot;
 	bool		need_unregister_snapshot = false;
 	TransactionId OldestXmin;
 
@@ -1238,7 +1239,11 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 			need_unregister_snapshot = true;
 		}
 		else
-			snapshot = SnapshotAny;
+		{
+			/* leave out completely dead items even with SnapshotAny */
+			InitNonVacuumableSnapshot(NonVacuumableSnapshot, OldestXmin);
+			snapshot = &NonVacuumableSnapshot;
+		}
 
 		proj = palloc0(baseRelation->rd_att->natts * sizeof(bool));
 		for (attno = 0; attno < indexInfo->ii_NumIndexKeyAttrs; attno++)
@@ -1292,6 +1297,13 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 		Assert(start_blockno == 0);
 		Assert(numblocks == InvalidBlockNumber);
 		snapshot = scan->rs_snapshot;
+
+		if (snapshot == SnapshotAny)
+		{
+			/* leave out completely dead items even with SnapshotAny */
+			InitNonVacuumableSnapshot(NonVacuumableSnapshot, OldestXmin);
+			snapshot = &NonVacuumableSnapshot;
+		}
 	}
 
 	/*
@@ -1300,10 +1312,10 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	 * this for parallel builds, since ambuild routines that support parallel
 	 * builds must work these details out for themselves.)
 	 */
-	Assert(snapshot == SnapshotAny || IsMVCCSnapshot(snapshot));
-	Assert(snapshot == SnapshotAny ? TransactionIdIsValid(OldestXmin) :
+	Assert(snapshot == &NonVacuumableSnapshot || IsMVCCSnapshot(snapshot));
+	Assert(snapshot == &NonVacuumableSnapshot ? TransactionIdIsValid(OldestXmin) :
 		   !TransactionIdIsValid(OldestXmin));
-	Assert(snapshot == SnapshotAny || !anyvisible);
+	Assert(snapshot == &NonVacuumableSnapshot || !anyvisible);
 
 	reltuples = 0;
 

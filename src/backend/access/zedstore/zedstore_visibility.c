@@ -480,15 +480,23 @@ fetch_undo_record:
 static bool
 zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
-	Snapshot	snapshot = scan->snapshot;
-	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
+	Relation	rel = scan->rel;
+	TransactionId OldestXmin = scan->snapshot->xmin;
 	bool		is_deleted;
+	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
+	ZSUndoRecPtr undo_ptr;
+	ZSUndoRec  *undorec;
 
-	Assert (snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE);
+	Assert (scan->snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE);
+	Assert(TransactionIdIsValid(OldestXmin));
 
 	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
+	undo_ptr = zsbt_item_undoptr(item);
 
-	if (zsbt_item_undoptr(item).counter < recent_oldest_undo.counter)
+fetch_undo_record:
+
+	/* Is it visible? */
+	if (undo_ptr.counter < recent_oldest_undo.counter)
 	{
 		if (!is_deleted)
 			return true;
@@ -496,8 +504,85 @@ zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSBtreeItem *item)
 			return false;
 	}
 
-	/* we could fetch the UNDO record and inspect closer, but we won't bother */
-	return true;
+
+	/* have to fetch the UNDO record */
+	undorec = zsundo_fetch(rel, undo_ptr);
+
+	if (!is_deleted)
+	{
+		/* Inserted tuple */
+		if (undorec->type == ZSUNDO_TYPE_INSERT)
+		{
+			if (TransactionIdIsInProgress(undorec->xid))
+				return true;		/* inserter has not committed yet */
+
+			if (TransactionIdDidCommit(undorec->xid))
+				return true;
+
+			/* it must have aborted or crashed */
+			return false;
+		}
+		else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
+		{
+			/* look at the previous UNDO record, to find the Insert record */
+			undo_ptr = ((ZSUndoRec_TupleLock *) undorec)->prevundorec;
+			goto fetch_undo_record;
+		}
+		else
+			elog(ERROR, "unexpected UNDO record type: %d", undorec->type);
+	}
+	else
+	{
+		/* deleted or updated-away tuple */
+		ZSUndoRecPtr	prevptr;
+
+		Assert(undorec->type == ZSUNDO_TYPE_DELETE ||
+			   undorec->type == ZSUNDO_TYPE_UPDATE);
+
+		if (TransactionIdIsInProgress(undorec->xid))
+			return true;	/* delete-in-progress */
+		else if (TransactionIdDidCommit(undorec->xid))
+		{
+			/*
+			 * Deleter committed. But perhaps it was recent enough that some open
+			 * transactions could still see the tuple.
+			 */
+			if (!TransactionIdPrecedes(undorec->xid, OldestXmin))
+				return true;
+
+			return false;
+		}
+
+		/*
+		 * The deleting transaction did not commit. But before concluding
+		 * that the tuple is live, we have to check if the inserting
+		 * XID is live.
+		 */
+		do {
+			if (undorec->type == ZSUNDO_TYPE_DELETE)
+				prevptr = ((ZSUndoRec_Delete *) undorec)->prevundorec;
+			else if (undorec->type == ZSUNDO_TYPE_UPDATE)
+				prevptr = ((ZSUndoRec_Update *) undorec)->prevundorec;
+			else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
+				prevptr = ((ZSUndoRec_TupleLock *) undorec)->prevundorec;
+			else
+				elog(ERROR, "unexpected UNDO record type: %d", undorec->type);
+
+			if (prevptr.counter < recent_oldest_undo.counter)
+				return true;
+			undorec = zsundo_fetch(rel, prevptr);
+		} while(undorec->type == ZSUNDO_TYPE_TUPLE_LOCK);
+
+		Assert(undorec->type == ZSUNDO_TYPE_INSERT);
+
+		if (TransactionIdIsInProgress(undorec->xid))
+			return true;	/* insert-in-progress */
+		else if (TransactionIdDidCommit(undorec->xid))
+			return true;	/* inserted committed */
+
+		/* inserter must have aborted or crashed */
+		return false;
+	}
 }
 
 /*
