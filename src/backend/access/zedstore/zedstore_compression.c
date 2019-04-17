@@ -129,7 +129,7 @@ zs_compress_finish(ZSCompressContext *context)
 										   context->rawsize,
 										   context->maxCompressedSize);
 	if (compressed_size < 0)
-		elog(ERROR, "compression failed. what now?");
+		return NULL;
 
 	chunk->t_size = offsetof(ZSCompressedBtreeItem, t_payload) + compressed_size;
 	chunk->t_flags = ZSBT_COMPRESSED;
@@ -286,7 +286,7 @@ zs_compress_finish(ZSCompressContext *context)
 									chunk->t_payload,
 									PGLZ_strategy_always);
 	if (compressed_size < 0)
-		elog(ERROR, "compression failed. what now?");
+		return NULL;
 
 	chunk->t_size = offsetof(ZSCompressedBtreeItem, t_payload) + compressed_size;
 	chunk->t_flags = ZSBT_COMPRESSED;

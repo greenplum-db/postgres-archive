@@ -2215,7 +2215,27 @@ zsbt_recompress_flush(zsbt_recompress_context *cxt)
 
 	citem = zs_compress_finish(&cxt->compressor);
 
-	zsbt_recompress_add_to_page(cxt, (ZSBtreeItem *) citem);
+	if (citem)
+		zsbt_recompress_add_to_page(cxt, (ZSBtreeItem *) citem);
+	else
+	{
+		uint16 size = 0;
+		/*
+		 * compression failed hence add items uncompressed. We should maybe
+		 * note that these items/pattern are not compressible and skip future
+		 * attempts to compress but its possible this clubbed with some other
+		 * future items may compress. So, better avoid recording such info and
+		 * try compression again later if required.
+		 */
+		for (int i = 0; i < cxt->compressor.nitems; i++)
+		{
+			citem = (ZSCompressedBtreeItem *) (cxt->compressor.uncompressedbuffer + size);
+			zsbt_recompress_add_to_page(cxt, (ZSBtreeItem *) citem);
+
+			size += MAXALIGN(citem->t_size);
+		}
+	}
+
 	cxt->compressed_items = 0;
 }
 
