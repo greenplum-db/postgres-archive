@@ -72,6 +72,7 @@ zs_compress_init(ZSCompressContext *context)
 	context->uncompressedbuffer = palloc(BLCKSZ * 10); // FIXME: arbitrary size
 	context->buffer = palloc(BLCKSZ);
 	context->maxCompressedSize = 0;
+	context->maxUncompressedSize = 0;
 	context->nitems = 0;
 	context->rawsize = 0;
 }
@@ -256,7 +257,7 @@ zs_compress_begin(ZSCompressContext *context, int maxCompressedSize)
  * If it wouldn't fit, return false.
  */
 bool
-zs_compress_add(ZSCompressContext *context, ZSUncompressedBtreeItem *item)
+zs_compress_add(ZSCompressContext *context, ZSBtreeItem *item)
 {
 	ZSCompressedBtreeItem *chunk = (ZSCompressedBtreeItem *) context->buffer;
 
@@ -332,19 +333,19 @@ zs_decompress_chunk(ZSDecompressContext *context, ZSCompressedBtreeItem *chunk)
 	context->bytesread = 0;
 }
 
-ZSUncompressedBtreeItem *
+ZSBtreeItem *
 zs_decompress_read_item(ZSDecompressContext *context)
 {
-	ZSUncompressedBtreeItem *next;
+	ZSBtreeItem *next;
 
 	if (context->bytesread == context->uncompressedsize)
 		return NULL;
-	next = (ZSUncompressedBtreeItem *) (context->buffer + context->bytesread);
+	next = (ZSBtreeItem *) (context->buffer + context->bytesread);
 	if (context->bytesread + next->t_size > context->uncompressedsize)
 		elog(ERROR, "invalid compressed item");
 	context->bytesread += next->t_size;
 
-	Assert(next->t_size >= sizeof(ZSUncompressedBtreeItem));
+	Assert(next->t_size >= sizeof(ZSBtreeItem));
 	Assert(next->t_tid != InvalidZSTid);
 
 	return next;
