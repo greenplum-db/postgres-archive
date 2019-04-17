@@ -17,6 +17,7 @@
 
 #include "miscadmin.h"
 
+#include "access/genam.h"
 #include "access/heapam.h"
 #include "access/multixact.h"
 #include "access/relscan.h"
@@ -988,15 +989,162 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 }
 
 static void
-zedstoream_index_validate_scan(Relation heapRelation,
+zedstoream_index_validate_scan(Relation baseRelation,
 							   Relation indexRelation,
 							   IndexInfo *indexInfo,
 							   Snapshot snapshot,
 							   ValidateIndexState *state)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function %s not implemented yet", __func__)));
+	Datum		values[INDEX_MAX_KEYS];
+	bool		isnull[INDEX_MAX_KEYS];
+	ExprState  *predicate;
+	TupleTableSlot *slot;
+	EState	   *estate;
+	ExprContext *econtext;
+	bool	   *proj;
+	int			attno;
+	TableScanDesc scan;
+	ItemPointerData idx_ptr;
+	bool		tuplesort_empty = false;
+
+	/*
+	 * sanity checks
+	 */
+	Assert(OidIsValid(indexRelation->rd_rel->relam));
+
+	/*
+	 * Need an EState for evaluation of index expressions and partial-index
+	 * predicates.  Also a slot to hold the current tuple.
+	 */
+	estate = CreateExecutorState();
+	econtext = GetPerTupleExprContext(estate);
+	slot = table_slot_create(baseRelation, NULL);
+
+	/* Arrange for econtext's scan tuple to be the tuple under test */
+	econtext->ecxt_scantuple = slot;
+
+	/* Set up execution state for predicate, if any. */
+	predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+
+	/*
+	 * Prepare for scan of the base relation.  We need just those tuples
+	 * satisfying the passed-in reference snapshot.  We must disable syncscan
+	 * here, because it's critical that we read from block zero forward to
+	 * match the sorted TIDs.
+	 */
+
+	/*
+	 * TODO: It would be very good to fetch only the columns we need.
+	 */
+	proj = palloc0(baseRelation->rd_att->natts * sizeof(bool));
+	for (attno = 0; attno < indexInfo->ii_NumIndexKeyAttrs; attno++)
+	{
+		Assert(indexInfo->ii_IndexAttrNumbers[attno] <= baseRelation->rd_att->natts);
+		/* skip expressions */
+		if (indexInfo->ii_IndexAttrNumbers[attno] > 0)
+			proj[indexInfo->ii_IndexAttrNumbers[attno] - 1] = true;
+	}
+	GetNeededColumnsForNode((Node *)indexInfo->ii_Expressions, proj,
+							baseRelation->rd_att->natts);
+
+	scan = table_beginscan_with_column_projection(baseRelation,	/* relation */
+												  snapshot,	/* snapshot */
+												  0, /* number of keys */
+												  NULL,	/* scan key */
+												  proj);
+
+	/*
+	 * Scan all tuples matching the snapshot.
+	 */
+	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+	{
+		ItemPointerData tup_ptr = slot->tts_tid;
+		HeapTuple	heapTuple;
+		int			cmp;
+
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * TODO: Once we have in-place updates, like HOT, this will need
+		 * to work harder, like heapam's function.
+		 */
+
+		MemoryContextReset(econtext->ecxt_per_tuple_memory);
+
+		if (tuplesort_empty)
+			cmp = -1;
+		else
+			cmp = ItemPointerCompare(&tup_ptr, &idx_ptr);
+		while (cmp > 0)
+		{
+			Datum		ts_val;
+			bool		ts_isnull;
+
+			tuplesort_empty = !tuplesort_getdatum(state->tuplesort, true,
+												  &ts_val, &ts_isnull, NULL);
+			if (!tuplesort_empty)
+			{
+				Assert(!ts_isnull);
+				itemptr_decode(&idx_ptr, DatumGetInt64(ts_val));
+
+				/* If int8 is pass-by-ref, free (encoded) TID Datum memory */
+#ifndef USE_FLOAT8_BYVAL
+				pfree(DatumGetPointer(ts_val));
+#endif
+			}
+			else
+			{
+				/* Be tidy */
+				ItemPointerSetInvalid(&idx_ptr);
+			}
+		}
+		if (cmp < 0)
+		{
+			/* This item is not in the index */
+
+			/*
+			 * In a partial index, discard tuples that don't satisfy the
+			 * predicate.
+			 */
+			if (predicate != NULL)
+			{
+				if (!ExecQual(predicate, econtext))
+					continue;
+			}
+
+			/*
+			 * For the current heap tuple, extract all the attributes we use in
+			 * this index, and note which are null.  This also performs evaluation
+			 * of any expressions needed.
+			 */
+			FormIndexDatum(indexInfo,
+						   slot,
+						   estate,
+						   values,
+						   isnull);
+
+			/* Call the AM's callback routine to process the tuple */
+			heapTuple = ExecCopySlotHeapTuple(slot);
+			heapTuple->t_self = slot->tts_tid;
+			index_insert(indexRelation, values, isnull, &tup_ptr, baseRelation,
+						 indexInfo->ii_Unique ?
+						 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
+						 indexInfo);
+			pfree(heapTuple);
+
+			state->tups_inserted += 1;
+		}
+	}
+
+	table_endscan(scan);
+
+	ExecDropSingleTupleTableSlot(slot);
+
+	FreeExecutorState(estate);
+
+	/* These may have been pointing to the now-gone estate */
+	indexInfo->ii_ExpressionsState = NIL;
+	indexInfo->ii_PredicateState = NULL;
 }
 
 static double
