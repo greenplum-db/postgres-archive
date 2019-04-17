@@ -54,7 +54,7 @@ static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
 						 zstid key2, BlockNumber blk2,
 						 Buffer leftchildbuf);
 static ZSSingleBtreeItem *zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot,
-		   zstid tid, Buffer *buf_p);
+		   ZSUndoRecPtr *recent_oldest_undo, zstid tid, Buffer *buf_p);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 							  zstid oldtid, ZSBtreeItem *replacementitem,
 							  List *newitems);
@@ -142,7 +142,7 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, zstid endtid, Sn
 	scan->array_datums_allocated_size = 0;
 	scan->array_elements_left = 0;
 
-	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
+	scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 }
 
 void
@@ -705,6 +705,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 			Snapshot snapshot, Snapshot crosscheck, bool wait,
 			TM_FailureData *hufd, bool changingPart)
 {
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 	ZSSingleBtreeItem *item;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
@@ -713,7 +714,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	Buffer		buf;
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, snapshot, tid, &buf);
+	item = zsbt_fetch(rel, attno, snapshot, &recent_oldest_undo, tid, &buf);
 	if (item == NULL)
 	{
 		/*
@@ -723,7 +724,8 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
-	result = zs_SatisfiesUpdate(rel, snapshot, (ZSBtreeItem *) item, &keep_old_undo_ptr, hufd);
+	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
+								(ZSBtreeItem *) item, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -810,6 +812,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 					 TransactionId xid, CommandId cid, Snapshot snapshot,
 					 Snapshot crosscheck, bool wait, TM_FailureData *hufd)
 {
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 	Buffer		buf;
 	ZSSingleBtreeItem *olditem;
 	TM_Result	result;
@@ -818,7 +821,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 	/*
 	 * Find the item to delete.
 	 */
-	olditem = zsbt_fetch(rel, attno, snapshot, otid, &buf);
+	olditem = zsbt_fetch(rel, attno, snapshot, &recent_oldest_undo, otid, &buf);
 	if (olditem == NULL)
 	{
 		/*
@@ -832,7 +835,8 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 	/*
 	 * Is it visible to us?
 	 */
-	result = zs_SatisfiesUpdate(rel, snapshot, (ZSBtreeItem *) olditem, &keep_old_undo_ptr, hufd);
+	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
+								(ZSBtreeItem *) olditem, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -872,6 +876,7 @@ static void
 zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 					  TransactionId xid, CommandId cid, Snapshot snapshot)
 {
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 	Buffer		buf;
 	ZSSingleBtreeItem *olditem;
 	TM_Result	result;
@@ -884,7 +889,7 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	 * Find the item to delete.  It could be part of a compressed item,
 	 * we let zsbt_fetch() handle that.
 	 */
-	olditem = zsbt_fetch(rel, attno, snapshot, otid, &buf);
+	olditem = zsbt_fetch(rel, attno, snapshot, &recent_oldest_undo, otid, &buf);
 	if (olditem == NULL)
 	{
 		/*
@@ -898,7 +903,8 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	/*
 	 * Is it visible to us?
 	 */
-	result = zs_SatisfiesUpdate(rel, snapshot, (ZSBtreeItem *) olditem, &keep_old_undo_ptr, &tmfd);
+	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
+								(ZSBtreeItem *) olditem, &keep_old_undo_ptr, &tmfd);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -944,6 +950,7 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 			   LockTupleMode lockmode, LockWaitPolicy wait_policy,
 			   TM_FailureData *hufd)
 {
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 	Buffer		buf;
 	ZSSingleBtreeItem *item;
 	TM_Result	result;
@@ -952,7 +959,7 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 	ZSSingleBtreeItem *newitem;
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, snapshot, tid, &buf);
+	item = zsbt_fetch(rel, attno, snapshot, &recent_oldest_undo, tid, &buf);
 	if (item == NULL)
 	{
 		/*
@@ -962,7 +969,8 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
-	result = zs_SatisfiesUpdate(rel, snapshot, (ZSBtreeItem *) item, &keep_old_undo_ptr, hufd);
+	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
+								(ZSBtreeItem *) item, &keep_old_undo_ptr, hufd);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -1023,7 +1031,7 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 	ZSSingleBtreeItem deaditem;
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, NULL, tid, &buf);
+	item = zsbt_fetch(rel, attno, NULL, NULL, tid, &buf);
 	if (item == NULL)
 	{
 		elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
@@ -1048,6 +1056,46 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 					  tid, (ZSBtreeItem *) &deaditem,
 					  NIL);
 	ReleaseBuffer(buf); 	/* zsbt_replace_item released */
+}
+
+/*
+ * Clear an item's UNDO pointer.
+ *
+ * This is used during VACUUM, to clear out aborted deletions.
+ */
+void
+zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undoptr)
+{
+	Buffer		buf;
+	ZSSingleBtreeItem *item;
+	ZSSingleBtreeItem *copy;
+
+	/* Find the item to delete. (It could be compressed) */
+	item = zsbt_fetch(rel, attno, NULL, NULL, tid, &buf);
+	if (item == NULL)
+	{
+		elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
+			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
+		return;
+	}
+
+	if (ZSUndoRecPtrEquals(item->t_undo_ptr, undoptr))
+	{
+		copy = palloc(item->t_size);
+		memcpy(copy, item, item->t_size);
+		copy->t_flags &= ~(ZSBT_DELETED | ZSBT_UPDATED);
+		ZSUndoRecPtrInitialize(&copy->t_undo_ptr);
+		zsbt_replace_item(rel, attno, buf,
+						  tid, (ZSBtreeItem *) copy,
+						  NIL);
+		ReleaseBuffer(buf); 	/* zsbt_replace_item unlocked */
+	}
+	else
+	{
+		Assert(item->t_undo_ptr.counter > undoptr.counter ||
+			   !IsZSUndoRecPtrValid(&item->t_undo_ptr));
+		UnlockReleaseBuffer(buf);
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -1449,8 +1497,8 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer 
 }
 
 static ZSSingleBtreeItem *
-zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, zstid tid,
-		   Buffer *buf_p)
+zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, ZSUndoRecPtr *recent_oldest_undo,
+		   zstid tid, Buffer *buf_p)
 {
 	BlockNumber	rootblk;
 	int16		attlen;
@@ -1530,6 +1578,7 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, zstid tid,
 		memset(&scan, 0, sizeof(scan));
 		scan.rel = rel;
 		scan.snapshot = snapshot;
+		scan.recent_oldest_undo = *recent_oldest_undo;
 
 		if (!zs_SatisfiesVisibility(&scan, item))
 			found = false;

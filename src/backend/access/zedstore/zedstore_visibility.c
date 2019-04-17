@@ -24,10 +24,10 @@
  * belonged to an aborted deleting transaction, for example, it can be ignored.
  */
 TM_Result
-zs_SatisfiesUpdate(Relation rel, Snapshot snapshot, ZSBtreeItem *item,
+zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
+				   ZSUndoRecPtr recent_oldest_undo, ZSBtreeItem *item,
 				   bool *undo_record_needed, TM_FailureData *tmfd)
 {
-	ZSUndoRecPtr recent_oldest_undo;
 	ZSUndoRecPtr undo_ptr;
 	bool		is_deleted;
 	ZSUndoRec  *undorec;
@@ -35,8 +35,6 @@ zs_SatisfiesUpdate(Relation rel, Snapshot snapshot, ZSBtreeItem *item,
 	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
 
 	*undo_record_needed = true;
-
-	recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 
 	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
 	undo_ptr = zsbt_item_undoptr(item);
@@ -598,13 +596,8 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
 	 */
 	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
 
-	/*
-	 * If we don't have a cached oldest-undo-ptr value yet, fetch it
-	 * from the metapage. (TODO: In the final EDB's UNDO-log implementation
-	 * this will probably be just a global variable, like RecentGlobalXmin.)
-	 */
-	if (scan->recent_oldest_undo.counter == 0)
-		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(scan->rel);
+	/* The caller should've filled in the recent_oldest_undo pointer */
+	Assert(scan->recent_oldest_undo.counter != 0);
 
 	/* dead items are never considered visible. */
 	if ((item->t_flags & ZSBT_DEAD) != 0)

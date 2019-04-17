@@ -657,15 +657,28 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 				case ZSUNDO_TYPE_DELETE:
 					if (did_commit)
 						zsundo_record_dead_tuple(trimstats, undorec->tid);
+					else
+					{
+						/*
+						 * must clear the item's UNDO pointer, otherwise the deletion
+						 * becomes visible to everyone when the UNDO record is trimmed
+						 * away
+						 */
+						zsbt_undo_item_deletion(rel, undorec->attno, undorec->tid, undorec->undorecptr);
+					}
 					break;
 				case ZSUNDO_TYPE_UPDATE:
 					if (did_commit)
 						zsundo_record_dead_tuple(trimstats, undorec->tid);
 					break;
 			}
-			ptr += undorec->size;
 
-			can_advance_oldestundorecptr = true;
+			if (!trimstats->dead_tuples_overflowed)
+			{
+				ptr += undorec->size;
+
+				can_advance_oldestundorecptr = true;
+			}
 		}
 
 		if (ptr < endptr)
