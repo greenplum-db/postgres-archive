@@ -58,6 +58,9 @@ static ZSSingleBtreeItem *zsbt_fetch(Relation rel, AttrNumber attno, Snapshot sn
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 							  zstid oldtid, ZSBtreeItem *replacementitem,
 							  List *newitems);
+static ZSBtreeItem *zsbt_create_item(int16 attlen, bool attbyval, zstid tid, ZSUndoRecPtr undo_ptr,
+				 int nelements, Datum *datums,
+				 char *dataptr, Size datasz, bool isnull);
 
 static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems);
 
@@ -155,6 +158,10 @@ zsbt_end_scan(ZSBtreeScan *scan)
 	scan->array_elements_left = 0;
 }
 
+/*
+ * Helper function of zsbt_scan_next(), to extract Datums from the given
+ * array item into the scan->array_* fields.
+ */
 static void
 zsbt_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 {
@@ -208,7 +215,7 @@ zsbt_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 		 * datumGetSize() and fetch_att(), but this is a pretty hot loop, so it's
 		 * better to avoid checking attlen/attbyval in the loop.
 		 *
-		 * TODO: a different on-disk representation might make this further still,
+		 * TODO: a different on-disk representation might make this better still,
 		 * for varlenas (this is pretty optimal for fixed-lengths already).
 		 * For example, storing an array of sizes or an array of offsets, followed
 		 * by the data itself, might incur fewer pipeline stalls in the CPU.
@@ -286,7 +293,7 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 	 *
 	 * This advances scan->nexttid as it goes.
 	 */
-	for (;;)
+	while (scan->nexttid < scan->endtid)
 	{
 		/*
 		 * If we are still processing an array item, return next element from it.
@@ -528,155 +535,6 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 
 	return tid;
 }
-
-/*
- * Compute the size of a slice of an array, from an array item. 'dataptr'
- * points to the packed on-disk representation of the array item's data.
- * The elements are stored one after each other.
- */
-static Size
-zsbt_get_array_slice_len(int16 attlen, bool attbyval, bool isnull,
-						 char *dataptr, int nelements)
-{
-	Size		datasz;
-
-	if (isnull)
-		datasz = 0;
-	else
-	{
-		/*
-		 * For a fixed-width type, we can just multiply. For variable-length,
-		 * we have to walk through the elements, looking at the length of each
-		 * element.
-		 */
-		if (attlen > 0)
-		{
-			datasz = attlen * nelements;
-		}
-		else
-		{
-			char	   *p = dataptr;
-			Size		datumsz = 0;
-
-			datasz = 0;
-			for (int i = 0; i < nelements; i++)
-			{
-				datumsz = zs_datumGetSize(PointerGetDatum(p), attbyval, attlen);
-
-				/*
-				 * The array should already use short varlen representation whenever
-				 * possible.
-				 */
-				Assert(!VARATT_CAN_MAKE_SHORT(DatumGetPointer(p)));
-
-				datasz += datumsz;
-				p += datumsz;
-			}
-		}
-	}
-	return datasz;
-}
-
-static ZSBtreeItem *
-zsbt_create_item(int16 attlen, bool attbyval, zstid tid, ZSUndoRecPtr undo_ptr,
-				 int nelements,
-				 Datum *datums,
-				 char *dataptr, Size datasz, bool isnull)
-{
-	ZSBtreeItem *result;
-	Size		itemsz;
-	char	   *databegin;
-
-	Assert(nelements > 0);
-
-	/*
-	 * Form a ZSBtreeItem to insert.
-	 */
-	if (nelements > 1)
-	{
-		ZSArrayBtreeItem *newitem;
-
-		itemsz = offsetof(ZSArrayBtreeItem, t_payload) + datasz;
-
-		newitem = palloc(itemsz);
-		memset(newitem, 0, offsetof(ZSArrayBtreeItem, t_payload)); /* zero padding */
-		newitem->t_tid = tid;
-		newitem->t_size = itemsz;
-		newitem->t_flags = ZSBT_ARRAY;
-		if (isnull)
-			newitem->t_flags |= ZSBT_NULL;
-		newitem->t_nelements = nelements;
-		newitem->t_undo_ptr = undo_ptr;
-
-		databegin = newitem->t_payload;
-
-		result = (ZSBtreeItem *) newitem;
-	}
-	else
-	{
-		ZSSingleBtreeItem *newitem;
-
-		itemsz = offsetof(ZSSingleBtreeItem, t_payload) + datasz;
-
-		newitem = palloc(itemsz);
-		memset(newitem, 0, offsetof(ZSSingleBtreeItem, t_payload)); /* zero padding */
-		newitem->t_tid = tid;
-		newitem->t_flags = 0;
-		if (isnull)
-			newitem->t_flags |= ZSBT_NULL;
-		newitem->t_size = itemsz;
-		newitem->t_undo_ptr = undo_ptr;
-
-		databegin = newitem->t_payload;
-
-		result = (ZSBtreeItem *) newitem;
-	}
-
-	if (!isnull)
-	{
-		char	   *datadst = databegin;
-
-		if (datums)
-		{
-			for (int i = 0; i < nelements; i++)
-			{
-				Datum		val = datums[i];
-
-				if (attbyval)
-				{
-					store_att_byval(datadst, val, attlen);
-					datadst += attlen;
-				}
-				else
-				{
-					if (attlen == -1 && VARATT_CAN_MAKE_SHORT(DatumGetPointer(val)))
-					{
-						/* convert to short varlena */
-						Size		data_length = VARATT_CONVERTED_SHORT_SIZE(val);
-
-						SET_VARSIZE_SHORT(datadst, data_length);
-						memcpy(datadst + 1, VARDATA(val), data_length - 1);
-						datadst += data_length;
-					}
-					else
-					{
-						/* full 4-byte header varlena, or was already short */
-						Size		datumsz = zs_datumGetSize(PointerGetDatum(val), attbyval, attlen);
-
-						memcpy(datadst, DatumGetPointer(val), datumsz);
-						datadst += datumsz;
-					}
-				}
-			}
-			Assert(datadst - databegin == datasz);
-		}
-		else
-			memcpy(datadst, dataptr, datasz);
-	}
-
-	return result;
-}
-
 
 /*
  * Insert a multiple items to the given attribute's btree.
@@ -1732,6 +1590,161 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, zstid tid,
 		*buf_p = InvalidBuffer;
 		return NULL;
 	}
+}
+
+/*
+ * Compute the size of a slice of an array, from an array item. 'dataptr'
+ * points to the packed on-disk representation of the array item's data.
+ * The elements are stored one after each other.
+ */
+static Size
+zsbt_get_array_slice_len(int16 attlen, bool attbyval, bool isnull,
+						 char *dataptr, int nelements)
+{
+	Size		datasz;
+
+	if (isnull)
+		datasz = 0;
+	else
+	{
+		/*
+		 * For a fixed-width type, we can just multiply. For variable-length,
+		 * we have to walk through the elements, looking at the length of each
+		 * element.
+		 */
+		if (attlen > 0)
+		{
+			datasz = attlen * nelements;
+		}
+		else
+		{
+			char	   *p = dataptr;
+
+			datasz = 0;
+			for (int i = 0; i < nelements; i++)
+			{
+				Size		datumsz;
+
+				datumsz = zs_datumGetSize(PointerGetDatum(p), attbyval, attlen);
+
+				/*
+				 * The array should already use short varlen representation whenever
+				 * possible.
+				 */
+				Assert(!VARATT_CAN_MAKE_SHORT(DatumGetPointer(p)));
+
+				datasz += datumsz;
+				p += datumsz;
+			}
+		}
+	}
+	return datasz;
+}
+
+/*
+ * Form a ZSBtreeItem out of the given datums, or data that's already in on-disk
+ * array format, for insertion.
+ *
+ * If there's more than one element, an array item is created. Otherwise, a single
+ * item.
+ */
+static ZSBtreeItem *
+zsbt_create_item(int16 attlen, bool attbyval, zstid tid, ZSUndoRecPtr undo_ptr,
+				 int nelements, Datum *datums,
+				 char *dataptr, Size datasz, bool isnull)
+{
+	ZSBtreeItem *result;
+	Size		itemsz;
+	char	   *databegin;
+
+	Assert(nelements > 0);
+
+	if (nelements > 1)
+	{
+		ZSArrayBtreeItem *newitem;
+
+		itemsz = offsetof(ZSArrayBtreeItem, t_payload) + datasz;
+
+		newitem = palloc(itemsz);
+		memset(newitem, 0, offsetof(ZSArrayBtreeItem, t_payload)); /* zero padding */
+		newitem->t_tid = tid;
+		newitem->t_size = itemsz;
+		newitem->t_flags = ZSBT_ARRAY;
+		if (isnull)
+			newitem->t_flags |= ZSBT_NULL;
+		newitem->t_nelements = nelements;
+		newitem->t_undo_ptr = undo_ptr;
+
+		databegin = newitem->t_payload;
+
+		result = (ZSBtreeItem *) newitem;
+	}
+	else
+	{
+		ZSSingleBtreeItem *newitem;
+
+		itemsz = offsetof(ZSSingleBtreeItem, t_payload) + datasz;
+
+		newitem = palloc(itemsz);
+		memset(newitem, 0, offsetof(ZSSingleBtreeItem, t_payload)); /* zero padding */
+		newitem->t_tid = tid;
+		newitem->t_flags = 0;
+		if (isnull)
+			newitem->t_flags |= ZSBT_NULL;
+		newitem->t_size = itemsz;
+		newitem->t_undo_ptr = undo_ptr;
+
+		databegin = newitem->t_payload;
+
+		result = (ZSBtreeItem *) newitem;
+	}
+
+	/*
+	 * Copy the data.
+	 */
+	if (!isnull)
+	{
+		char	   *datadst = databegin;
+
+		if (datums)
+		{
+			for (int i = 0; i < nelements; i++)
+			{
+				Datum		val = datums[i];
+
+				if (attbyval)
+				{
+					store_att_byval(datadst, val, attlen);
+					datadst += attlen;
+				}
+				else
+				{
+					if (attlen == -1 && VARATT_CAN_MAKE_SHORT(DatumGetPointer(val)))
+					{
+						/* convert to short varlena */
+						Size		data_length = VARATT_CONVERTED_SHORT_SIZE(val);
+
+						SET_VARSIZE_SHORT(datadst, data_length);
+						memcpy(datadst + 1, VARDATA(val), data_length - 1);
+						datadst += data_length;
+					}
+					else
+					{
+						/* full 4-byte header varlena, or was already short */
+						Size		datumsz = zs_datumGetSize(PointerGetDatum(val), attbyval, attlen);
+
+						memcpy(datadst, DatumGetPointer(val), datumsz);
+						datadst += datumsz;
+					}
+				}
+			}
+			Assert(datadst - databegin == datasz);
+		}
+		else
+			memcpy(datadst, dataptr, datasz);
+	}
+
+	return result;
 }
 
 /*
