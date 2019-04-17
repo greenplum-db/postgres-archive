@@ -269,9 +269,9 @@ zs_compress_add(ZSCompressContext *context, ZSBtreeItem *item)
 	memcpy(context->uncompressedbuffer + context->rawsize, item, item->t_size);
 	if (context->nitems == 0)
 		chunk->t_tid = item->t_tid;
-	chunk->t_lasttid = item->t_tid;
+	chunk->t_lasttid = zsbt_item_lasttid(item);
 	context->nitems++;
-	context->rawsize += item->t_size;
+	context->rawsize += MAXALIGN(item->t_size);
 
 	return true;
 }
@@ -341,9 +341,9 @@ zs_decompress_read_item(ZSDecompressContext *context)
 	if (context->bytesread == context->uncompressedsize)
 		return NULL;
 	next = (ZSBtreeItem *) (context->buffer + context->bytesread);
-	if (context->bytesread + next->t_size > context->uncompressedsize)
+	if (context->bytesread + MAXALIGN(next->t_size) > context->uncompressedsize)
 		elog(ERROR, "invalid compressed item");
-	context->bytesread += next->t_size;
+	context->bytesread += MAXALIGN(next->t_size);
 
 	Assert(next->t_size >= sizeof(ZSBtreeItem));
 	Assert(next->t_tid != InvalidZSTid);
