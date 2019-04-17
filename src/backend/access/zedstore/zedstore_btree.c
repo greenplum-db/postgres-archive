@@ -255,14 +255,20 @@ zsbt_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 			else
 				Assert(false);
 		}
-		else
+		else if (attlen == -1)
 		{
-			Assert(attlen == -1);
-
 			for (int i = 0; i < nelements; i++)
 			{
 				scan->array_datums[i] = fetch_att(p, false, -1);
 				p += zs_datumGetSize(PointerGetDatum(p), false, -1);
+			}
+		}
+		else
+		{
+			for (int i = 0; i < nelements; i++)
+			{
+				scan->array_datums[i] = fetch_att(p, false, attlen);
+				p += zs_datumGetSize(PointerGetDatum(p), false, attlen);
 			}
 		}
 	}
