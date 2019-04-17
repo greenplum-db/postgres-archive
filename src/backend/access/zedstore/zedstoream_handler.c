@@ -33,6 +33,7 @@
 #include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "optimizer/plancat.h"
+#include "pgstat.h"
 #include "storage/lmgr.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
@@ -188,6 +189,9 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 	slot->tts_tableOid = RelationGetRelid(relation);
 	slot->tts_tid = ItemPointerFromZSTid(tid);
+
+	/* Note: speculative insertions are counted too, even if aborted later */
+	pgstat_count_heap_insert(relation, 1);
 }
 
 static void
@@ -279,6 +283,8 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		slots[i]->tts_tid = ItemPointerFromZSTid(tids[i]);
 	}
 
+	pgstat_count_heap_insert(relation, ntuples);
+
 	pfree(tids);
 	pfree(tupletoasted);
 	pfree(datums);
@@ -329,6 +335,9 @@ retry:
 			}
 		}
 	}
+
+	if (result == TM_Ok)
+		pgstat_count_heap_delete(relation);
 
 	return result;
 }
@@ -460,7 +469,11 @@ retry:
 		}
 	}
 	else
+	{
 		slot->tts_tid = ItemPointerFromZSTid(newtid);
+
+		pgstat_count_heap_update(relation, false);
+	}
 
 	/* TODO: could we do HOT udates? */
 	/* TODO: What should we set lockmode to? */
@@ -568,6 +581,14 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 
 	scan->btree_scans = palloc0(relation->rd_att->natts * sizeof(ZSBtreeScan));
 	scan->num_proj_atts = 0;
+
+	/*
+	 * Currently, we don't have a stats counter for bitmap heap scans (but the
+	 * underlying bitmap index scans will be counted) or sample scans (we only
+	 * update stats for tuple fetches there)
+	 */
+	if (!is_bitmapscan && !is_samplescan)
+		pgstat_count_heap_scan(relation);
 
 	return (TableScanDesc) scan;
 }
@@ -768,6 +789,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			slot->tts_tid = ItemPointerFromZSTid(this_tid);
 			slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
 			slot->tts_flags &= ~TTS_FLAG_EMPTY;
+
+			pgstat_count_heap_getnext(scan->rs_scan.rs_rd);
 			return true;
 		}
 	}
@@ -1874,6 +1897,8 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 	slot->tts_flags &= ~TTS_FLAG_EMPTY;
 
 	scan->bmscan_nexttuple++;
+
+	pgstat_count_heap_fetch(scan->rs_scan.rs_rd);
 
 	return true;
 }
