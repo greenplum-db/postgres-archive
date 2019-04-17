@@ -85,12 +85,12 @@ zsmeta_initmetapage(Relation rel)
 	if (natts == 0)
 		elog(ERROR, "tables with zero columns not supported in zedstore");
 
-	buf = ReadBuffer(rel, P_NEW);
-	if (BufferGetBlockNumber(buf) != ZS_META_BLK)
-		elog(ERROR, "index is not empty");
-	page = BufferGetPage(buf);
-	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-
+	/*
+	 * It's possible that we error out when building the metapage, if there
+	 * are too many attribute, so work on a temporary copy first, before actually
+	 * allocating the buffer.
+	 */
+	page = palloc(BLCKSZ);
 	PageInit(page, BLCKSZ, sizeof(ZSMetaPageOpaque));
 
 	/* Initialize the attribute root dir */
@@ -125,6 +125,14 @@ zsmeta_initmetapage(Relation rel)
 	opaque->zs_undo_head = InvalidBlockNumber;
 	opaque->zs_undo_tail = InvalidBlockNumber;
 	opaque->zs_undo_oldestptr.counter = 1;
+
+
+	/* Ok, write it out to disk */
+	buf = ReadBuffer(rel, P_NEW);
+	if (BufferGetBlockNumber(buf) != ZS_META_BLK)
+		elog(ERROR, "index is not empty");
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+	PageRestoreTempPage(page, BufferGetPage(buf));
 
 	MarkBufferDirty(buf);
 	/* TODO: WAL-log */
