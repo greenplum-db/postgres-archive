@@ -1056,6 +1056,7 @@ zedstoream_index_validate_scan(Relation baseRelation,
 	/*
 	 * Scan all tuples matching the snapshot.
 	 */
+	ItemPointerSet(&idx_ptr, 0, 0); /* this is less than any real TID */
 	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
 	{
 		ItemPointerData tup_ptr = slot->tts_tid;
@@ -1074,28 +1075,31 @@ zedstoream_index_validate_scan(Relation baseRelation,
 		if (tuplesort_empty)
 			cmp = -1;
 		else
-			cmp = ItemPointerCompare(&tup_ptr, &idx_ptr);
-		while (cmp > 0)
 		{
-			Datum		ts_val;
-			bool		ts_isnull;
-
-			tuplesort_empty = !tuplesort_getdatum(state->tuplesort, true,
-												  &ts_val, &ts_isnull, NULL);
-			if (!tuplesort_empty)
+			while ((cmp = ItemPointerCompare(&tup_ptr, &idx_ptr)) > 0)
 			{
-				Assert(!ts_isnull);
-				itemptr_decode(&idx_ptr, DatumGetInt64(ts_val));
+				Datum		ts_val;
+				bool		ts_isnull;
 
-				/* If int8 is pass-by-ref, free (encoded) TID Datum memory */
+				tuplesort_empty = !tuplesort_getdatum(state->tuplesort, true,
+													  &ts_val, &ts_isnull, NULL);
+				if (!tuplesort_empty)
+				{
+					Assert(!ts_isnull);
+					itemptr_decode(&idx_ptr, DatumGetInt64(ts_val));
+
+					/* If int8 is pass-by-ref, free (encoded) TID Datum memory */
 #ifndef USE_FLOAT8_BYVAL
-				pfree(DatumGetPointer(ts_val));
+					pfree(DatumGetPointer(ts_val));
 #endif
-			}
-			else
-			{
-				/* Be tidy */
-				ItemPointerSetInvalid(&idx_ptr);
+					break;
+				}
+				else
+				{
+					/* Be tidy */
+					ItemPointerSetInvalid(&idx_ptr);
+					cmp = -1;
+				}
 			}
 		}
 		if (cmp < 0)
