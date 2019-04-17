@@ -918,8 +918,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 	 * in the slot to NULL. (Actually, this initializes all to NULL, and the
 	 * code below will overwrite them for the columns that are projected)
 	 */
-	slot->tts_nvalid = 0;
-	slot->tts_flags |= TTS_FLAG_EMPTY;
+	ExecClearTuple(slot);
 	if (proj_atts)
 	{
 		for (int i = 0; i < slot->tts_tupleDescriptor->natts; i++)

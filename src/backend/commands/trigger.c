@@ -2841,6 +2841,10 @@ ExecBRDeleteTriggers(EState *estate, EPQState *epqstate,
 		if (newtuple != trigtuple)
 			heap_freetuple(newtuple);
 	}
+
+	/* Make sure the the new slot is not dependent on the original tuple */
+	ExecMaterializeSlot(slot);
+
 	if (should_free)
 		heap_freetuple(trigtuple);
 
@@ -3116,6 +3120,10 @@ ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 			newtuple = NULL;
 		}
 	}
+
+	/* Make sure the the new slot is not dependent on the original tuple */
+	ExecMaterializeSlot(newslot);
+
 	if (should_free_trig)
 		heap_freetuple(trigtuple);
 
