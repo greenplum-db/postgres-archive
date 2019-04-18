@@ -170,7 +170,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
-		Form_pg_attribute attr = &slot->tts_tupleDescriptor->attrs[attno - 1];
+		Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, attno - 1);
 		Datum		toastptr = (Datum) 0;
 		datum = d[attno - 1];
 		isnull = isnulls[attno - 1];
@@ -248,7 +248,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
-		Form_pg_attribute attr = &(slots[0])->tts_tupleDescriptor->attrs[attno - 1];
+		Form_pg_attribute attr = TupleDescAttr((slots[0])->tts_tupleDescriptor, attno - 1);
 		int			ntupletoasted = 0;
 
 		for (i = 0; i < ntuples; i++)
@@ -433,7 +433,7 @@ retry:
 		newtid = InvalidZSTid;
 		for (attno = 1; attno <= relation->rd_att->natts; attno++)
 		{
-			Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
+			Form_pg_attribute attr = TupleDescAttr(relation->rd_att, attno - 1);
 			Datum		newdatum = d[attno - 1];
 			bool		newisnull = isnulls[attno - 1];
 			Datum		toastptr = (Datum) 0;
@@ -885,8 +885,9 @@ zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
 									   bool *project_columns)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
-	zs_initialize_proj_attributes(scan->rel->rd_att->natts, project_columns,
-								  &zscan->num_proj_atts, zscan->proj_atts);
+	zs_initialize_proj_attributes(RelationGetNumberOfAttributes(scan->rel),
+								  project_columns, &zscan->num_proj_atts,
+								  zscan->proj_atts);
 }
 
 static void
@@ -977,7 +978,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 
 		if (natt != ZS_META_ATTRIBUTE_NUM)
 		{
-			Form_pg_attribute att = &rel->rd_att->attrs[natt - 1];
+			Form_pg_attribute att = TupleDescAttr(rel->rd_att, natt - 1);
 			Assert(natt > 0);
 
 			if	(att->attisdropped)
@@ -1648,7 +1649,7 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin
 	for (int i = 1; i < scan->num_proj_atts; i++)
 	{
 		int			natt = scan->proj_atts[i];
-		Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[natt];
+		Form_pg_attribute att = TupleDescAttr(scan->rs_scan.rs_rd->rd_att, natt - 1);
 
 		Datum		datum;
 		bool        isnull;
@@ -1898,7 +1899,7 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 	for (int i = 1; i < scan->num_proj_atts; i++)
 	{
 		int			natt = scan->proj_atts[i];
-		Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[natt];
+		Form_pg_attribute att = TupleDescAttr(scan->rs_scan.rs_rd->rd_att, natt - 1);
 		Datum		datum;
 		bool        isnull;
 
