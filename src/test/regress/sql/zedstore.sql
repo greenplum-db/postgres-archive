@@ -117,6 +117,12 @@ select * from t_zedcopy;
 update t_zedcopy set b = 100 where b = 5;
 select * from t_zedcopy;
 
+--
+-- Test zero column table
+--
+create table t_zwithzerocols() using zedstore;
+insert into t_zwithzerocols select t.* from t_zwithzerocols t right join generate_series(1,1) on true;
+select count(*) from t_zwithzerocols;
 
 -- Test for alter table add column force rewrite
 create table t_zaddcol(a int) using zedstore;

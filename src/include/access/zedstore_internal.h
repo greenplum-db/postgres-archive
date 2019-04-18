@@ -16,6 +16,8 @@
 #include "storage/bufmgr.h"
 #include "utils/datum.h"
 
+#define ZS_META_ATTRIBUTE_NUM 0
+
 /*
  * Throughout ZedStore, we pass around TIDs as uint64's, rather than ItemPointers,
  * for speed.

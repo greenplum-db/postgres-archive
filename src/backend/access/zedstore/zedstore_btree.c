@@ -573,7 +573,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 				  Datum *datums, bool *isnulls, zstid *tids, int nitems,
 				  TransactionId xid, CommandId cid, ZSUndoRecPtr *undorecptr)
 {
-	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
+	Form_pg_attribute attr;
 	int16		attlen;
 	bool		attbyval;
 	bool		assign_tids;
@@ -590,8 +590,14 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 
 	rootblk = zsmeta_get_root_for_attribute(rel, attno, true, &attlen, &attbyval);
 
-	if (attr->attbyval != attbyval || attr->attlen != attlen)
-		elog(ERROR, "attribute information stored in root dir doesn't match with rel");
+	if (attno == ZS_META_ATTRIBUTE_NUM)
+		attr = NULL;
+	else
+	{
+		attr = &rel->rd_att->attrs[attno - 1];
+		if (attr->attbyval != attbyval || attr->attlen != attlen)
+			elog(ERROR, "attribute information stored in root dir doesn't match with rel");
+	}
 
 	/*
 	 * If TID was given, find the right place for it. Otherwise, insert to
@@ -1937,9 +1943,9 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 				  ZSBtreeItem *replacementitem,
 				  List       *newitems)
 {
-	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
-	int16		attlen = attr->attlen;
-	bool		attbyval = attr->attbyval;
+	Form_pg_attribute attr;
+	int16		attlen;
+	bool		attbyval;
 	Page		page = BufferGetPage(buf);
 	OffsetNumber off;
 	OffsetNumber maxoff;
@@ -1949,6 +1955,19 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 	ZSDecompressContext decompressor;
 	bool		decompressor_used = false;
 	bool		decompressing;
+
+	if (attno == ZS_META_ATTRIBUTE_NUM)
+	{
+		attr = NULL;
+		attlen = 0;
+		attbyval = true;
+	}
+	else
+	{
+		attr = &rel->rd_att->attrs[attno - 1];
+		attlen = attr->attlen;
+		attbyval = attr->attbyval;
+	}
 
 	if (replacementitem)
 		Assert(replacementitem->t_tid == oldtid);

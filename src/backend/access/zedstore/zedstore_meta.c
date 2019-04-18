@@ -74,16 +74,13 @@ zs_getnewbuf(Relation rel)
 void
 zsmeta_initmetapage(Relation rel)
 {
-	int			natts = RelationGetNumberOfAttributes(rel);
+	int			natts = RelationGetNumberOfAttributes(rel) + 1;
 	Buffer		buf;
 	Page		page;
 	ZSMetaPage *metapg;
 	ZSMetaPageOpaque *opaque;
 	Size		freespace;
 	int			maxatts;
-
-	if (natts == 0)
-		elog(ERROR, "tables with zero columns not supported in zedstore");
 
 	/*
 	 * It's possible that we error out when building the metapage, if there
@@ -111,8 +108,8 @@ zsmeta_initmetapage(Relation rel)
 	for (int i = 0; i < natts; i++)
 	{
 		metapg->tree_root_dir[i].root = InvalidBlockNumber;
-		metapg->tree_root_dir[i].attlen = rel->rd_att->attrs[i].attlen;
-		metapg->tree_root_dir[i].attbyval = rel->rd_att->attrs[i].attbyval;
+		metapg->tree_root_dir[i].attlen = rel->rd_att->attrs[i - 1 ].attlen;
+		metapg->tree_root_dir[i].attbyval = rel->rd_att->attrs[i - 1].attbyval;
 	}
 	((PageHeader) page)->pd_lower += natts * sizeof(ZSRootDirItem);
 
@@ -175,12 +172,12 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 	metapg = (ZSMetaPage *) PageGetContents(BufferGetPage(metabuf));
 
-	if (attno <= 0 || attno > metapg->nattributes)
+	if ((attno != ZS_META_ATTRIBUTE_NUM) && (attno <= 0 || attno > metapg->nattributes))
 		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
 
-	rootblk = metapg->tree_root_dir[attno - 1].root;
-	attlen = metapg->tree_root_dir[attno - 1].attlen;
-	attbyval = metapg->tree_root_dir[attno - 1].attbyval;
+	rootblk = metapg->tree_root_dir[attno].root;
+	attlen = metapg->tree_root_dir[attno].attlen;
+	attbyval = metapg->tree_root_dir[attno].attbyval;
 
 	if (forupdate && rootblk == InvalidBlockNumber)
 	{
@@ -193,7 +190,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 		rootbuf = zs_getnewbuf(rel);
 		rootblk = BufferGetBlockNumber(rootbuf);
 
-		metapg->tree_root_dir[attno - 1].root = rootblk;
+		metapg->tree_root_dir[attno].root = rootblk;
 
 		/* initialize the page to look like a root leaf */
 		rootpage = BufferGetPage(rootbuf);
@@ -233,10 +230,10 @@ zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno,
 
 	metapg = (ZSMetaPage *) PageGetContents(BufferGetPage(metabuf));
 
-	if (attno <= 0 || attno > metapg->nattributes)
+	if ((attno != ZS_META_ATTRIBUTE_NUM) && (attno <= 0 || attno > metapg->nattributes))
 		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
 
-	metapg->tree_root_dir[attno - 1].root = rootblk;
+	metapg->tree_root_dir[attno].root = rootblk;
 
 	MarkBufferDirty(metabuf);
 }

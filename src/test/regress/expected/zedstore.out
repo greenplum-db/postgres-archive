@@ -309,6 +309,17 @@ select * from t_zedcopy;
      5 | 100 | stuff | test_5 | 
 (9 rows)
 
+--
+-- Test zero column table
+--
+create table t_zwithzerocols() using zedstore;
+insert into t_zwithzerocols select t.* from t_zwithzerocols t right join generate_series(1,1) on true;
+select count(*) from t_zwithzerocols;
+ count 
+-------
+     1
+(1 row)
+
 -- Test for alter table add column force rewrite
 create table t_zaddcol(a int) using zedstore;
 insert into t_zaddcol select * from generate_series(1, 3);

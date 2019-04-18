@@ -150,9 +150,9 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	zstid		tid;
 	ZSUndoRecPtr undorecptr;
 	TransactionId xid = GetCurrentTransactionId();
+	bool        isnull;
+	Datum       datum;
 
-	if (slot->tts_tupleDescriptor->natts == 0)
-		elog(ERROR, "zero-column tables not supported in zedstore yet");
 	if (slot->tts_tupleDescriptor->natts != relation->rd_att->natts)
 		elog(ERROR, "slot's attribute count doesn't match relcache entry");
 
@@ -162,12 +162,18 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 	tid = InvalidZSTid;
 	ZSUndoRecPtrInitialize(&undorecptr);
+
+	isnull = true;
+	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
+					  &datum, &isnull, &tid, 1,
+					  xid, cid, &undorecptr);
+
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
 		Form_pg_attribute attr = &slot->tts_tupleDescriptor->attrs[attno - 1];
-		Datum		datum = d[attno - 1];
-		bool		isnull = isnulls[attno - 1];
 		Datum		toastptr = (Datum) 0;
+		datum = d[attno - 1];
+		isnull = isnulls[attno - 1];
 
 		if (!isnull && attr->attlen < 0 && VARATT_IS_EXTERNAL(datum))
 			datum = PointerGetDatum(heap_tuple_fetch_attr((struct varlena *) DatumGetPointer(datum)));
@@ -226,15 +232,19 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	bool	   *isnulls;
 	zstid	   *tids;
 
-	if (relation->rd_att->natts == 0)
-		elog(ERROR, "zero-column tables not supported in zedstore yet");
-
 	tupletoasted = palloc(ntuples * sizeof(int));
-	datums = palloc(ntuples * sizeof(Datum));
+	datums = palloc0(ntuples * sizeof(Datum));
 	isnulls = palloc(ntuples * sizeof(bool));
-	tids = palloc(ntuples * sizeof(zstid));
+	tids = palloc0(ntuples * sizeof(zstid));
 
 	ZSUndoRecPtrInitialize(&undorecptr);
+
+	for (i = 0; i < ntuples; i++)
+		isnulls[i] = true;
+
+	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
+					  datums, isnulls, tids, ntuples,
+					  xid, cid, &undorecptr);
 
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
@@ -249,7 +259,6 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			if (slotgetandset)
 			{
 				slot_getallattrs(slots[i]);
-				tids[i] = InvalidZSTid;
 			}
 
 			/* If this datum is too large, toast it */
@@ -302,7 +311,7 @@ zedstoream_delete(Relation relation, ItemPointer tid_p, CommandId cid,
 	TM_Result result = TM_Ok;
 
 retry:
-	for (attno = 1; attno <= relation->rd_att->natts; attno++)
+	for (attno = 0; attno <= relation->rd_att->natts; attno++)
 	{
 		result = zsbt_delete(relation, attno, tid, xid, cid,
 							 snapshot, crosscheck, wait, hufd, changingPart);
@@ -403,6 +412,7 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	bool	   *isnulls;
 	TM_Result	result;
 	zstid		newtid;
+	Datum       newdatum = 0;
 
 	slot_getallattrs(slot);
 	d = slot->tts_values;
@@ -412,35 +422,42 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	 * TODO: Since we have visibility information on each column, we could skip
 	 * updating columns whose value didn't change.
 	 */
-retry:
-	result = TM_Ok;
 	newtid = InvalidZSTid;
-	for (attno = 1; attno <= relation->rd_att->natts; attno++)
+	result = zsbt_update(relation, ZS_META_ATTRIBUTE_NUM, otid, newdatum, true,
+						 xid, cid, snapshot, crosscheck,
+						 wait, hufd, &newtid);
+
+	if (result == TM_Ok)
 	{
-		Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
-		Datum		newdatum = d[attno - 1];
-		bool		newisnull = isnulls[attno - 1];
-		Datum		toastptr = (Datum) 0;
-
-		if (!newisnull && attr->attlen < 0 && VARATT_IS_EXTERNAL(newdatum))
-			newdatum = PointerGetDatum(heap_tuple_fetch_attr((struct varlena *) DatumGetPointer(newdatum)));
-
-		/* If this datum is too large, toast it */
-		if (!newisnull && attr->attlen < 0 &&
-			VARSIZE_ANY_EXHDR(newdatum) > MaxZedStoreDatumSize)
+retry:
+		newtid = InvalidZSTid;
+		for (attno = 1; attno <= relation->rd_att->natts; attno++)
 		{
-			toastptr = newdatum = zedstore_toast_datum(relation, attno, newdatum);
+			Form_pg_attribute attr = &relation->rd_att->attrs[attno - 1];
+			Datum		newdatum = d[attno - 1];
+			bool		newisnull = isnulls[attno - 1];
+			Datum		toastptr = (Datum) 0;
+
+			if (!newisnull && attr->attlen < 0 && VARATT_IS_EXTERNAL(newdatum))
+				newdatum = PointerGetDatum(heap_tuple_fetch_attr((struct varlena *) DatumGetPointer(newdatum)));
+
+			/* If this datum is too large, toast it */
+			if (!newisnull && attr->attlen < 0 &&
+				VARSIZE_ANY_EXHDR(newdatum) > MaxZedStoreDatumSize)
+			{
+				toastptr = newdatum = zedstore_toast_datum(relation, attno, newdatum);
+			}
+
+			result = zsbt_update(relation, attno, otid, newdatum, newisnull,
+								 xid, cid, snapshot, crosscheck,
+								 wait, hufd, &newtid);
+
+			if (result != TM_Ok)
+				break;
+
+			if (toastptr != (Datum) 0)
+				zedstore_toast_finish(relation, attno, toastptr, newtid);
 		}
-
-		result = zsbt_update(relation, attno, otid, newdatum, newisnull,
-							 xid, cid, snapshot, crosscheck,
-							 wait, hufd, &newtid);
-
-		if (result != TM_Ok)
-			break;
-
-		if (toastptr != (Datum) 0)
-			zedstore_toast_finish(relation, attno, toastptr, newtid);
 	}
 
 	if (result != TM_Ok)
@@ -492,6 +509,8 @@ zs_initialize_proj_attributes(ZedStoreDesc scan, int natts)
 {
 	if (scan->num_proj_atts == 0)
 	{
+		scan->proj_atts[scan->num_proj_atts++] = ZS_META_ATTRIBUTE_NUM;
+
 		/*
 		 * convert booleans array into an array of the attribute numbers of the
 		 * required columns.
@@ -501,7 +520,7 @@ zs_initialize_proj_attributes(ZedStoreDesc scan, int natts)
 			/* project_columns empty also conveys need all the columns */
 			if (scan->project_columns == NULL || scan->project_columns[i])
 			{
-				scan->proj_atts[scan->num_proj_atts++] = i;
+				scan->proj_atts[scan->num_proj_atts++] = i + 1;
 			}
 		}
 
@@ -535,6 +554,7 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 											bool temp_snap)
 {
 	ZedStoreDesc scan;
+	int natts = relation->rd_att->natts + 1;
 
 	/* Sample scans have no snapshot, but we need one */
 	if (!snapshot)
@@ -576,10 +596,10 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	else
 		scan->rs_scan.rs_key = NULL;
 
-	scan->proj_atts = palloc(relation->rd_att->natts * sizeof(int));
+	scan->proj_atts = palloc(natts * sizeof(int));
 	scan->project_columns = project_columns;
 
-	scan->btree_scans = palloc0(relation->rd_att->natts * sizeof(ZSBtreeScan));
+	scan->btree_scans = palloc0(natts * sizeof(ZSBtreeScan));
 	scan->num_proj_atts = 0;
 
 	/*
@@ -659,15 +679,9 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	Datum	   *slot_values = slot->tts_values;
 	bool	   *slot_isnull = slot->tts_isnull;
 
-	if (scan->num_proj_atts == 0)
-	{
-		if (slot_natts == 0)
-			elog(ERROR, "zero-column tables not supported in zedstore yet");
+	zs_initialize_proj_attributes(scan, slot_natts);
 
-		zs_initialize_proj_attributes(scan, slot_natts);
-	}
-
-	Assert(scan->num_proj_atts <= slot_natts);
+	Assert((scan->num_proj_atts - 1) <= slot_natts);
 
 	/*
 	 * Initialize the slot.
@@ -717,7 +731,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			{
 				int			natt = scan->proj_atts[i];
 
-				zsbt_begin_scan(scan->rs_scan.rs_rd, natt + 1,
+				zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
 								scan->cur_range_start,
 								scan->cur_range_end,
 								scan->rs_scan.rs_snapshot,
@@ -761,7 +775,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			if (!isnull && btscan->attlen == -1 &&
 				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 			{
-				datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt + 1, tid, datum);
+				datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, tid, datum);
 			}
 
 			/* Check that the values coming out of the b-tree are aligned properly */
@@ -770,8 +784,12 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				Assert (VARATT_IS_1B(datum) || INTALIGN(datum) == datum);
 			}
 
-			slot_values[natt] = datum;
-			slot_isnull[natt] = isnull;
+			if (natt != ZS_META_ATTRIBUTE_NUM)
+			{
+				Assert(natt > 0);
+				slot_values[natt - 1] = datum;
+				slot_isnull[natt - 1] = isnull;
+			}
 		}
 
 		if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
@@ -815,8 +833,8 @@ zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	Datum		datum;
 	bool		isnull;
 
-	/* Use the first column for the visibility information. */
-	zsbt_begin_scan(rel, 1, tid, tid + 1, snapshot, &btree_scan);
+	/* Use the meta-data tree for the visibility information. */
+	zsbt_begin_scan(rel, ZS_META_ATTRIBUTE_NUM, tid, tid + 1, snapshot, &btree_scan);
 
 	found = zsbt_scan_next(&btree_scan, &datum, &isnull, &ftid);
 	Assert (!found || ftid == tid);
@@ -846,7 +864,7 @@ zedstoream_begin_index_fetch(Relation rel)
 
 	zscan->proj_atts = NULL;
 	zscan->num_proj_atts = 0;
-	zscan->btree_scans = palloc0(rel->rd_att->natts * sizeof(ZSBtreeScan));
+	zscan->btree_scans = palloc0((rel->rd_att->natts + 1) * sizeof(ZSBtreeScan));
 
 	return (IndexFetchTableData *) zscan;
 }
@@ -858,8 +876,10 @@ zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch)scan;
 	Relation	rel = zscan->idx_fetch_data.rel;
 
-	zscan->proj_atts = palloc(rel->rd_att->natts * sizeof(int));
+	zscan->proj_atts = palloc((rel->rd_att->natts + 1) * sizeof(int));
 	zscan->num_proj_atts = 0;
+
+	zscan->proj_atts[zscan->num_proj_atts++] = ZS_META_ATTRIBUTE_NUM;
 
 	/*
 	 * convert booleans array into an array of the attribute numbers of the
@@ -870,7 +890,7 @@ zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
 		/* if project_columns is empty means need all the columns */
 		if (project_column == NULL || project_column[i])
 		{
-			zscan->proj_atts[zscan->num_proj_atts++] = i;
+			zscan->proj_atts[zscan->num_proj_atts++] = i + 1;
 		}
 	}
 }
@@ -948,26 +968,33 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 			slot->tts_isnull[i] = true;
 	}
 	else
-		num_proj_atts = slot->tts_tupleDescriptor->natts;
+		num_proj_atts = slot->tts_tupleDescriptor->natts + 1;
+
 	fetch->num_proj_atts = num_proj_atts;
 
 	for (int i = 0; i < num_proj_atts && found; i++)
 	{
 		int         natt = proj_atts ? proj_atts[i] : i;
-		Form_pg_attribute att = &rel->rd_att->attrs[natt];
-		ZSBtreeScan *btscan = &fetch->btree_scans[i];
+		ZSBtreeScan *btscan = &fetch->btree_scans[natt];
+
 		Datum		datum;
 		bool        isnull;
 		zstid		this_tid;
 
-		if (att->attisdropped)
+		if (natt != ZS_META_ATTRIBUTE_NUM)
 		{
-			slot->tts_values[natt] = (Datum) 0;
-			slot->tts_isnull[natt] = true;
-			continue;
+			Form_pg_attribute att = &rel->rd_att->attrs[natt - 1];
+			Assert(natt > 0);
+
+			if	(att->attisdropped)
+			{
+				slot->tts_values[natt - 1] = (Datum) 0;
+				slot->tts_isnull[natt - 1] = true;
+				continue;
+			}
 		}
 
-		zsbt_begin_scan(rel, natt + 1, tid, tid + 1, snapshot, btscan);
+		zsbt_begin_scan(rel, natt, tid, tid + 1, snapshot, btscan);
 
 		if (zsbt_scan_next(btscan, &datum, &isnull, &this_tid))
 		{
@@ -980,11 +1007,15 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 			if (!isnull && btscan->attlen == -1 &&
 				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 			{
-				datum = zedstore_toast_flatten(rel, natt + 1, tid, datum);
+				datum = zedstore_toast_flatten(rel, natt, tid, datum);
 			}
 
-			slot->tts_values[natt] = datum;
-			slot->tts_isnull[natt] = isnull;
+			if (natt != ZS_META_ATTRIBUTE_NUM)
+			{
+				Assert(natt > 0);
+				slot->tts_values[natt - 1] = datum;
+				slot->tts_isnull[natt - 1] = isnull;
+			}
 		}
 		else
 			found = false;
@@ -1296,7 +1327,7 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 			{
 				int			natt = zscan->proj_atts[i];
 
-				zsbt_begin_scan(zscan->rs_scan.rs_rd, natt + 1,
+				zsbt_begin_scan(zscan->rs_scan.rs_rd, natt,
 								zscan->cur_range_start,
 								zscan->cur_range_end,
 								zscan->rs_scan.rs_snapshot,
@@ -1562,7 +1593,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 		Datum	   *datums = scan->bmscan_datums[natt];
 		bool	   *isnulls = scan->bmscan_isnulls[natt];
 
-		zsbt_begin_scan(scan->rs_scan.rs_rd, natt + 1,
+		zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
 						ZSTidFromBlkOff(blockno, 1),
 						ZSTidFromBlkOff(blockno + 1, 1),
 						scan->rs_scan.rs_snapshot,
@@ -1620,15 +1651,16 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin
 		return false;
 
 	tid = scan->bmscan_tids[scan->bmscan_nexttuple];
-	for (int i = 0; i < scan->num_proj_atts; i++)
+	for (int i = 1; i < scan->num_proj_atts; i++)
 	{
-		Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[i];
 		int			natt = scan->proj_atts[i];
+		Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[natt];
+
 		Datum		datum;
 		bool        isnull;
 
-		datum = (scan->bmscan_datums[i])[scan->bmscan_nexttuple];
-		isnull = (scan->bmscan_isnulls[i])[scan->bmscan_nexttuple];
+		datum = (scan->bmscan_datums[natt])[scan->bmscan_nexttuple];
+		isnull = (scan->bmscan_isnulls[natt])[scan->bmscan_nexttuple];
 
 		/*
 		 * flatten any ZS-TOASTed values, becaue the rest of the system
@@ -1637,11 +1669,11 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin
 		if (!isnull && att->attlen == -1 &&
 			VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 		{
-			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt + 1, tid, datum);
+			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, tid, datum);
 		}
 
-		slot->tts_values[natt] = datum;
-		slot->tts_isnull[natt] = isnull;
+		slot->tts_values[natt - 1] = datum;
+		slot->tts_isnull[natt - 1] = isnull;
 	}
 	slot->tts_tid = ItemPointerFromZSTid(tid);
 	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
@@ -1802,7 +1834,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 		bool	   *isnulls = scan->bmscan_isnulls[natt];
 		int			noff = 0;
 
-		zsbt_begin_scan(scan->rs_scan.rs_rd, natt + 1,
+		zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
 						ZSTidFromBlkOff(tid_blkno, 1),
 						ZSTidFromBlkOff(tid_blkno + 1, 1),
 						scan->rs_scan.rs_snapshot,
@@ -1869,15 +1901,15 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 		return false;
 
 	tid = scan->bmscan_tids[scan->bmscan_nexttuple];
-	for (int i = 0; i < scan->num_proj_atts; i++)
+	for (int i = 1; i < scan->num_proj_atts; i++)
 	{
-		Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[i];
 		int			natt = scan->proj_atts[i];
+		Form_pg_attribute att = &scan->rs_scan.rs_rd->rd_att->attrs[natt];
 		Datum		datum;
 		bool        isnull;
 
-		datum = (scan->bmscan_datums[i])[scan->bmscan_nexttuple];
-		isnull = (scan->bmscan_isnulls[i])[scan->bmscan_nexttuple];
+		datum = (scan->bmscan_datums[natt])[scan->bmscan_nexttuple];
+		isnull = (scan->bmscan_isnulls[natt])[scan->bmscan_nexttuple];
 
 		/*
 		 * flatten any ZS-TOASTed values, becaue the rest of the system
@@ -1886,11 +1918,11 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 		if (!isnull && att->attlen == -1 &&
 			VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 		{
-			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt + 1, tid, datum);
+			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, tid, datum);
 		}
 
-		slot->tts_values[natt] = datum;
-		slot->tts_isnull[natt] = isnull;
+		slot->tts_values[natt - 1] = datum;
+		slot->tts_isnull[natt - 1] = isnull;
 	}
 	slot->tts_tid = ItemPointerFromZSTid(tid);
 	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;

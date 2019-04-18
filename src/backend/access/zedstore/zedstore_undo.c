@@ -362,7 +362,7 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 			 * the indexes first, and we must refrain from removing index entries for
 			 * new items, too.
 			 */
-			for (int attno = 1; attno <= RelationGetNumberOfAttributes(rel); attno++)
+			for (int attno = 0; attno <= RelationGetNumberOfAttributes(rel); attno++)
 			{
 				for (int i = 0; i < trimstats->num_dead_tuples; i++)
 					zsbt_mark_item_dead(rel, attno,
