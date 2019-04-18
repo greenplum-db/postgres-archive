@@ -505,24 +505,33 @@ zedstoream_slot_callbacks(Relation relation)
 }
 
 static void
-zs_initialize_proj_attributes(ZedStoreDesc scan, int natts)
+zs_initialize_proj_attributes(int in_natts, bool *in_project_columns,
+							  int *out_num_proj_atts, int *out_proj_atts)
 {
-	if (scan->num_proj_atts == 0)
+	if (*out_num_proj_atts == 0)
 	{
-		scan->proj_atts[scan->num_proj_atts++] = ZS_META_ATTRIBUTE_NUM;
+		out_proj_atts[(*out_num_proj_atts)++] = ZS_META_ATTRIBUTE_NUM;
 
 		/*
 		 * convert booleans array into an array of the attribute numbers of the
 		 * required columns.
 		 */
-		for (int i = 0; i < natts; i++)
+		for (int i = 0; i < in_natts; i++)
 		{
 			/* project_columns empty also conveys need all the columns */
-			if (scan->project_columns == NULL || scan->project_columns[i])
-			{
-				scan->proj_atts[scan->num_proj_atts++] = i + 1;
-			}
+			if (in_project_columns == NULL || in_project_columns[i])
+				out_proj_atts[(*out_num_proj_atts)++] = i + 1;
 		}
+	}
+}
+
+static void
+zs_initialize_proj_attributes_extended(ZedStoreDesc scan, int natts)
+{
+	if (scan->num_proj_atts == 0)
+	{
+		zs_initialize_proj_attributes(natts, scan->project_columns,
+									  &scan->num_proj_atts, scan->proj_atts);
 
 		/* Extra setup for bitmap and sample scans */
 		if (scan->rs_scan.rs_bitmapscan || scan->rs_scan.rs_samplescan)
@@ -679,7 +688,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	Datum	   *slot_values = slot->tts_values;
 	bool	   *slot_isnull = slot->tts_isnull;
 
-	zs_initialize_proj_attributes(scan, slot_natts);
+	zs_initialize_proj_attributes_extended(scan, slot_natts);
 
 	Assert((scan->num_proj_atts - 1) <= slot_natts);
 
@@ -866,33 +875,18 @@ zedstoream_begin_index_fetch(Relation rel)
 	zscan->num_proj_atts = 0;
 	zscan->btree_scans = palloc0((rel->rd_att->natts + 1) * sizeof(ZSBtreeScan));
 
+	zscan->proj_atts = palloc((rel->rd_att->natts + 1) * sizeof(int));
+	zscan->num_proj_atts = 0;
 	return (IndexFetchTableData *) zscan;
 }
 
 static void
 zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
-									   bool *project_column)
+									   bool *project_columns)
 {
-	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch)scan;
-	Relation	rel = zscan->idx_fetch_data.rel;
-
-	zscan->proj_atts = palloc((rel->rd_att->natts + 1) * sizeof(int));
-	zscan->num_proj_atts = 0;
-
-	zscan->proj_atts[zscan->num_proj_atts++] = ZS_META_ATTRIBUTE_NUM;
-
-	/*
-	 * convert booleans array into an array of the attribute numbers of the
-	 * required columns.
-	 */
-	for (int i = 0; i < rel->rd_att->natts; i++)
-	{
-		/* if project_columns is empty means need all the columns */
-		if (project_column == NULL || project_column[i])
-		{
-			zscan->proj_atts[zscan->num_proj_atts++] = i + 1;
-		}
-	}
+	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
+	zs_initialize_proj_attributes(scan->rel->rd_att->natts, project_columns,
+								  &zscan->num_proj_atts, zscan->proj_atts);
 }
 
 static void
@@ -1571,7 +1565,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 	bool		firstcol;
 
 	/* TODO: for now, assume that we need all columns */
-	zs_initialize_proj_attributes(scan, RelationGetNumberOfAttributes(rel));
+	zs_initialize_proj_attributes_extended(scan, RelationGetNumberOfAttributes(rel));
 
 	/*
 	 * Our strategy for a bitmap scan is to scan the tree of each attribute,
@@ -1811,7 +1805,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 	int			first_ntuples = 0;
 	bool		firstcol;
 
-	zs_initialize_proj_attributes(scan, scan->rs_scan.rs_rd->rd_att->natts);
+	zs_initialize_proj_attributes_extended(scan, scan->rs_scan.rs_rd->rd_att->natts);
 
 	/*
 	 * Our strategy for a bitmap scan is to scan the tree of each attribute,
