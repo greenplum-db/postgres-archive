@@ -505,8 +505,9 @@ zedstoream_slot_callbacks(Relation relation)
 }
 
 static inline void
-zs_initialize_proj_attributes(int in_natts, bool *in_project_columns,
-							  int *out_num_proj_atts, int *out_proj_atts)
+zs_initialize_proj_attributes(Relation rel, int in_natts,
+							  bool *in_project_columns, int *out_num_proj_atts,
+							  int *out_proj_atts)
 {
 	if (*out_num_proj_atts == 0)
 	{
@@ -516,11 +517,21 @@ zs_initialize_proj_attributes(int in_natts, bool *in_project_columns,
 		 * convert booleans array into an array of the attribute numbers of the
 		 * required columns.
 		 */
-		for (int i = 0; i < in_natts; i++)
+		for (int idx = 0; idx < in_natts; idx++)
 		{
+			Form_pg_attribute att = TupleDescAttr(rel->rd_att, idx);
+			int att_no = idx + 1;
+
+			/*
+			 * never project dropped columns, null will be returned for them
+			 * in slot by default.
+			 */
+			if  (att->attisdropped)
+				continue;
+
 			/* project_columns empty also conveys need all the columns */
-			if (in_project_columns == NULL || in_project_columns[i])
-				out_proj_atts[(*out_num_proj_atts)++] = i + 1;
+			if (in_project_columns == NULL || in_project_columns[idx])
+				out_proj_atts[(*out_num_proj_atts)++] = att_no;
 		}
 	}
 }
@@ -530,7 +541,8 @@ zs_initialize_proj_attributes_extended(ZedStoreDesc scan, int natts)
 {
 	if (scan->num_proj_atts == 0)
 	{
-		zs_initialize_proj_attributes(natts, scan->project_columns,
+		zs_initialize_proj_attributes(scan->rs_scan.rs_rd, natts,
+									  scan->project_columns,
 									  &scan->num_proj_atts, scan->proj_atts);
 
 		/* Extra setup for bitmap and sample scans */
@@ -885,7 +897,8 @@ zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
 									   bool *project_columns)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
-	zs_initialize_proj_attributes(RelationGetNumberOfAttributes(scan->rel),
+	zs_initialize_proj_attributes(scan->rel,
+								  RelationGetNumberOfAttributes(scan->rel),
 								  project_columns, &zscan->num_proj_atts,
 								  zscan->proj_atts);
 }
@@ -975,19 +988,6 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 		Datum		datum;
 		bool        isnull;
 		zstid		this_tid;
-
-		if (natt != ZS_META_ATTRIBUTE_NUM)
-		{
-			Form_pg_attribute att = TupleDescAttr(rel->rd_att, natt - 1);
-			Assert(natt > 0);
-
-			if	(att->attisdropped)
-			{
-				slot->tts_values[natt - 1] = (Datum) 0;
-				slot->tts_isnull[natt - 1] = true;
-				continue;
-			}
-		}
 
 		zsbt_begin_scan(rel, natt, tid, tid + 1, snapshot, btscan);
 
