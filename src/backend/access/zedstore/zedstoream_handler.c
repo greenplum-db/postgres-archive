@@ -504,7 +504,7 @@ zedstoream_slot_callbacks(Relation relation)
 	return &TTSOpsVirtual;
 }
 
-static void
+static inline void
 zs_initialize_proj_attributes(int in_natts, bool *in_project_columns,
 							  int *out_num_proj_atts, int *out_proj_atts)
 {
@@ -525,7 +525,7 @@ zs_initialize_proj_attributes(int in_natts, bool *in_project_columns,
 	}
 }
 
-static void
+static inline void
 zs_initialize_proj_attributes_extended(ZedStoreDesc scan, int natts)
 {
 	if (scan->num_proj_atts == 0)
@@ -970,7 +970,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 	for (int i = 0; i < num_proj_atts && found; i++)
 	{
 		int         natt = proj_atts ? proj_atts[i] : i;
-		ZSBtreeScan *btscan = &fetch->btree_scans[natt];
+		ZSBtreeScan *btscan = &fetch->btree_scans[i];
 
 		Datum		datum;
 		bool        isnull;
@@ -1585,8 +1585,8 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 		Datum		datum;
 		bool        isnull;
 		zstid		tid;
-		Datum	   *datums = scan->bmscan_datums[natt];
-		bool	   *isnulls = scan->bmscan_isnulls[natt];
+		Datum	   *datums = scan->bmscan_datums[i];
+		bool	   *isnulls = scan->bmscan_isnulls[i];
 
 		zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
 						ZSTidFromBlkOff(blockno, 1),
@@ -1654,8 +1654,8 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin
 		Datum		datum;
 		bool        isnull;
 
-		datum = (scan->bmscan_datums[natt])[scan->bmscan_nexttuple];
-		isnull = (scan->bmscan_isnulls[natt])[scan->bmscan_nexttuple];
+		datum = (scan->bmscan_datums[i])[scan->bmscan_nexttuple];
+		isnull = (scan->bmscan_isnulls[i])[scan->bmscan_nexttuple];
 
 		/*
 		 * flatten any ZS-TOASTed values, becaue the rest of the system
@@ -1825,8 +1825,8 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 		Datum		datum;
 		bool        isnull;
 		zstid		tid;
-		Datum	   *datums = scan->bmscan_datums[natt];
-		bool	   *isnulls = scan->bmscan_isnulls[natt];
+		Datum	   *datums = scan->bmscan_datums[i];
+		bool	   *isnulls = scan->bmscan_isnulls[i];
 		int			noff = 0;
 
 		zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
@@ -1903,8 +1903,8 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 		Datum		datum;
 		bool        isnull;
 
-		datum = (scan->bmscan_datums[natt])[scan->bmscan_nexttuple];
-		isnull = (scan->bmscan_isnulls[natt])[scan->bmscan_nexttuple];
+		datum = (scan->bmscan_datums[i])[scan->bmscan_nexttuple];
+		isnull = (scan->bmscan_isnulls[i])[scan->bmscan_nexttuple];
 
 		/*
 		 * flatten any ZS-TOASTed values, becaue the rest of the system

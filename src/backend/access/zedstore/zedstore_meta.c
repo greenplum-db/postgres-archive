@@ -108,8 +108,16 @@ zsmeta_initmetapage(Relation rel)
 	for (int i = 0; i < natts; i++)
 	{
 		metapg->tree_root_dir[i].root = InvalidBlockNumber;
-		metapg->tree_root_dir[i].attlen = rel->rd_att->attrs[i - 1 ].attlen;
-		metapg->tree_root_dir[i].attbyval = rel->rd_att->attrs[i - 1].attbyval;
+		if (i == 0)
+		{
+			metapg->tree_root_dir[i].attlen = 0;
+			metapg->tree_root_dir[i].attbyval = true;
+		}
+		else
+		{
+			metapg->tree_root_dir[i].attlen = rel->rd_att->attrs[i - 1 ].attlen;
+			metapg->tree_root_dir[i].attbyval = rel->rd_att->attrs[i - 1].attbyval;
+		}
 	}
 	((PageHeader) page)->pd_lower += natts * sizeof(ZSRootDirItem);
 
