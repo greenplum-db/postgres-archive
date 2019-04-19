@@ -68,29 +68,16 @@ zs_getnewbuf(Relation rel)
 	return buf;
 }
 
-/*
- * Initialize the metapage for an empty relation.
- */
-void
-zsmeta_initmetapage(Relation rel)
+static void
+zsmeta_add_root_for_attributes(Relation rel, Page page, bool init)
 {
-	int			natts = RelationGetNumberOfAttributes(rel) + 1;
-	Buffer		buf;
-	Page		page;
+	int natts = RelationGetNumberOfAttributes(rel) + 1;
+	int cur_natts;
+	int maxatts;
+	Size freespace;
 	ZSMetaPage *metapg;
-	ZSMetaPageOpaque *opaque;
-	Size		freespace;
-	int			maxatts;
 
-	/*
-	 * It's possible that we error out when building the metapage, if there
-	 * are too many attribute, so work on a temporary copy first, before actually
-	 * allocating the buffer.
-	 */
-	page = palloc(BLCKSZ);
-	PageInit(page, BLCKSZ, sizeof(ZSMetaPageOpaque));
-
-	/* Initialize the attribute root dir */
+	/* Initialize the attribute root dir for new attribute */
 	freespace = PageGetExactFreeSpace(page);
 	maxatts = freespace / sizeof(ZSRootDirItem);
 	if (natts > maxatts)
@@ -104,22 +91,47 @@ zsmeta_initmetapage(Relation rel)
 	}
 
 	metapg = (ZSMetaPage *) PageGetContents(page);
-	metapg->nattributes = natts;
-	for (int i = 0; i < natts; i++)
+
+	if (init)
+		metapg->nattributes = 0;
+
+	for (cur_natts = metapg->nattributes; cur_natts < natts; cur_natts++)
 	{
-		metapg->tree_root_dir[i].root = InvalidBlockNumber;
-		if (i == 0)
+		metapg->tree_root_dir[cur_natts].root = InvalidBlockNumber;
+		if (cur_natts == ZS_META_ATTRIBUTE_NUM)
 		{
-			metapg->tree_root_dir[i].attlen = 0;
-			metapg->tree_root_dir[i].attbyval = true;
+			metapg->tree_root_dir[cur_natts].attlen = 0;
+			metapg->tree_root_dir[cur_natts].attbyval = true;
 		}
 		else
 		{
-			metapg->tree_root_dir[i].attlen = rel->rd_att->attrs[i - 1 ].attlen;
-			metapg->tree_root_dir[i].attbyval = rel->rd_att->attrs[i - 1].attbyval;
+			metapg->tree_root_dir[cur_natts].attlen = rel->rd_att->attrs[cur_natts - 1 ].attlen;
+			metapg->tree_root_dir[cur_natts].attbyval = rel->rd_att->attrs[cur_natts - 1].attbyval;
 		}
 	}
-	((PageHeader) page)->pd_lower += natts * sizeof(ZSRootDirItem);
+
+	metapg->nattributes = natts;
+	((PageHeader) page)->pd_lower += sizeof(ZSRootDirItem);
+}
+
+/*
+ * Initialize the metapage for an empty relation.
+ */
+void
+zsmeta_initmetapage(Relation rel)
+{
+	Buffer		buf;
+	Page		page;
+	ZSMetaPageOpaque *opaque;
+
+	/*
+	 * It's possible that we error out when building the metapage, if there
+	 * are too many attribute, so work on a temporary copy first, before actually
+	 * allocating the buffer.
+	 */
+	page = palloc(BLCKSZ);
+	PageInit(page, BLCKSZ, sizeof(ZSMetaPageOpaque));
+	zsmeta_add_root_for_attributes(rel, page, true);
 
 	opaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(page);
 	opaque->zs_flags = 0;
@@ -161,6 +173,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 	BlockNumber	rootblk;
 	int16		attlen;
 	bool		attbyval;
+	Page        page;
 
 	if (RelationGetNumberOfBlocks(rel) == 0)
 	{
@@ -178,10 +191,33 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 
 	/* TODO: get share lock to begin with */
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
-	metapg = (ZSMetaPage *) PageGetContents(BufferGetPage(metabuf));
+	page = BufferGetPage(metabuf);
+	metapg = (ZSMetaPage *) PageGetContents(page);
 
-	if ((attno != ZS_META_ATTRIBUTE_NUM) && (attno <= 0 || attno > metapg->nattributes))
+	if ((attno != ZS_META_ATTRIBUTE_NUM) && attno <= 0)
 		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
+
+	/*
+	 * file has less number of attributes stored compared to catalog. This
+	 * happens due to add column default value storing value in catalog and
+	 * absent in table. This attribute must be marked with atthasmissing.
+	 */
+	if (attno > metapg->nattributes)
+	{
+		if (forupdate)
+			zsmeta_add_root_for_attributes(rel, page, false);
+		else
+		{
+			if (rel->rd_att->attrs[attno-1].atthasmissing)
+			{
+				UnlockReleaseBuffer(metabuf);
+				elog(ERROR, "yet to handle selects after add column, invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
+				return InvalidBlockNumber;
+			}
+
+			elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
+		}
+	}
 
 	rootblk = metapg->tree_root_dir[attno].root;
 	attlen = metapg->tree_root_dir[attno].attlen;
