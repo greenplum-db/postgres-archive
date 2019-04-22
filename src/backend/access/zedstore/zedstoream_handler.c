@@ -307,27 +307,14 @@ zedstoream_delete(Relation relation, ItemPointer tid_p, CommandId cid,
 {
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	TransactionId xid = GetCurrentTransactionId();
-	AttrNumber	attno;
 	TM_Result result = TM_Ok;
 
 retry:
-	for (attno = 0; attno <= relation->rd_att->natts; attno++)
-	{
-		result = zsbt_delete(relation, attno, tid, xid, cid,
-							 snapshot, crosscheck, wait, hufd, changingPart);
-		if (result != TM_Ok)
-			break;
-	}
+	result = zsbt_delete(relation, ZS_META_ATTRIBUTE_NUM, tid, xid, cid,
+						 snapshot, crosscheck, wait, hufd, changingPart);
 
 	if (result != TM_Ok)
 	{
-		if (attno != 1)
-		{
-			/* failed to delete this attribute, but we might already have
-			 * deleted other attributes. */
-			elog(ERROR, "could not delete all columns of row");
-		}
-
 		if (result == TM_Invisible)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -418,10 +405,6 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	d = slot->tts_values;
 	isnulls = slot->tts_isnull;
 
-	/*
-	 * TODO: Since we have visibility information on each column, we could skip
-	 * updating columns whose value didn't change.
-	 */
 	newtid = InvalidZSTid;
 	result = zsbt_update(relation, ZS_META_ATTRIBUTE_NUM, otid, newdatum, true,
 						 xid, cid, snapshot, crosscheck,
@@ -780,12 +763,20 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			}
 			Assert (tid < scan->cur_range_end);
 
-			if (i == 0)
+			if (i == ZS_META_ATTRIBUTE_NUM)
 				this_tid = tid;
 			else if (this_tid != tid)
 			{
 				elog(ERROR, "scans on different attributes out of sync");
 			}
+
+			/*
+			 * set nexttid for next column based on current column TID. This
+			 * helps to skip scanning all other columns for rows which are not
+			 * visible based on meta column.
+			 */
+			if (i+1 < scan->num_proj_atts)
+				scan->btree_scans[i+1].nexttid = tid;
 
 			/*
 			 * flatten any ZS-TOASTed values, because the rest of the system
@@ -1013,7 +1004,13 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 			}
 		}
 		else
+		{
+			if (natt != ZS_META_ATTRIBUTE_NUM)
+			{
+				elog(ERROR, "scans on different attributes out of sync");
+			}
 			found = false;
+		}
 	}
 
 	if (found)
@@ -1023,17 +1020,8 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 		slot->tts_flags &= ~TTS_FLAG_EMPTY;
 		return true;
 	}
-	else
-	{
-		/*
-		 * not found
-		 *
-		 * TODO: as a sanity check, it would be good to check if we
-		 * get *any* of the columns. Currently, if any of the columns
-		 * is missing, we treat the tuple as non-existent
-		 */
-		return false;
-	}
+
+	return false;
 }
 
 static void
@@ -1595,6 +1583,14 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 						&btree_scan);
 
 		/*
+		 * set nexttid for next column based on current column TID. This
+		 * helps to skip scanning all other columns for rows which are not
+		 * visible based on meta column.
+		 */
+		if (!firstcol)
+			btree_scan.nexttid = scan->bmscan_tids[0];
+
+		/*
 		 * TODO: it would be good to pass the next expected TID down to zsbt_scan_next,
 		 * so that it could skip over to it more efficiently.
 		 */
@@ -1617,6 +1613,14 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 				elog(ERROR, "scans on different attributes out of sync");
 
 			ntuples++;
+
+			/*
+			 * set nexttid for next column based on current column TID. This
+			 * helps to skip scanning all other columns for rows which are not
+			 * visible based on meta column.
+			 */
+			if (!firstcol)
+				btree_scan.nexttid = scan->bmscan_tids[ntuples];
 		}
 		if (firstcol)
 			first_ntuples = ntuples;
@@ -1836,9 +1840,13 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 						&btree_scan);
 
 		/*
-		 * TODO: it would be good to pass the next expected TID down to zsbt_scan_next,
-		 * so that it could skip over to it more efficiently.
+		 * set nexttid for next column based on current column TID. This
+		 * helps to skip scanning all other columns for rows which are not
+		 * visible based on meta column.
 		 */
+		if (!firstcol)
+			btree_scan.nexttid = scan->bmscan_tids[0];
+
 		ntuples = 0;
 		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
 		{
@@ -1867,6 +1875,14 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 				elog(ERROR, "scans on different attributes out of sync");
 
 			ntuples++;
+
+			/*
+			 * set nexttid for next column based on current column TID. This
+			 * helps to skip scanning all other columns for rows which are not
+			 * visible based on meta column.
+			 */
+			if (!firstcol)
+				btree_scan.nexttid = scan->bmscan_tids[ntuples];
 		}
 		if (firstcol)
 			first_ntuples = ntuples;
