@@ -22,6 +22,7 @@
 #include "access/multixact.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/tupdesc_details.h"
 #include "access/tuptoaster.h"
 #include "access/xact.h"
 #include "access/zedstore_internal.h"
@@ -103,7 +104,7 @@ static Size zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan
 static void zs_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan);
 static bool zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
 									  zstid *start, zstid *end);
-
+static void zsbt_fill_missing_attribute_value(ZSBtreeScan *scan, Datum *datum, bool *isnull);
 
 /* ----------------------------------------------------------------
  *				storage AM support routines for zedstoream
@@ -758,8 +759,17 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 			if (!zsbt_scan_next_fast(btscan, &datum, &isnull, &tid))
 			{
-				scan->state = ZSSCAN_STATE_FINISHED_RANGE;
-				break;
+				if ((btscan->attno != ZS_META_ATTRIBUTE_NUM) && btscan->atthasmissing)
+				{
+					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
+					Assert(this_tid != InvalidZSTid);
+					tid = this_tid;
+				}
+				else
+				{
+					scan->state = ZSSCAN_STATE_FINISHED_RANGE;
+					break;
+				}
 			}
 			Assert (tid < scan->cur_range_end);
 
@@ -767,7 +777,14 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				this_tid = tid;
 			else if (this_tid != tid)
 			{
-				elog(ERROR, "scans on different attributes out of sync");
+				if (btscan->atthasmissing)
+				{
+					Assert(btscan->attno != ZS_META_ATTRIBUTE_NUM);
+					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
+					tid = this_tid;
+				}
+				else
+					elog(ERROR, "scans on different attributes out of sync");
 			}
 
 			/*
@@ -1007,7 +1024,10 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 		{
 			if (natt != ZS_META_ATTRIBUTE_NUM)
 			{
-				elog(ERROR, "scans on different attributes out of sync");
+				if (btscan->atthasmissing)
+					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
+				else
+					elog(ERROR, "scans on different attributes out of sync");
 			}
 			found = false;
 		}
@@ -1550,90 +1570,93 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 	Relation	rel = scan->rs_scan.rs_rd;
 	int			ntuples;
-	int			first_ntuples = 0;
-	bool		firstcol;
+	ZSBtreeScan	btree_scan;
+	Datum		datum;
+	bool        isnull;
+	zstid		tid;
 
 	/* TODO: for now, assume that we need all columns */
 	zs_initialize_proj_attributes_extended(scan, RelationGetNumberOfAttributes(rel));
 
+	ntuples = 0;
+	zsbt_begin_scan(scan->rs_scan.rs_rd, ZS_META_ATTRIBUTE_NUM,
+					ZSTidFromBlkOff(blockno, 1),
+					ZSTidFromBlkOff(blockno + 1, 1),
+					scan->rs_scan.rs_snapshot,
+					&btree_scan);
 	/*
-	 * Our strategy for a bitmap scan is to scan the tree of each attribute,
-	 * starting at the given logical block number, and store all the datums
-	 * in the scan struct. zedstoream_scan_bitmap_next_tuple() then just
-	 * needs to store the datums of the next TID in the slot.
-	 *
-	 * An alternative would be to keep the scans of each attribute open,
-	 * like in a sequential scan. I'm not sure which is better.
+	 * TODO: it would be good to pass the next expected TID down to zsbt_scan_next,
+	 * so that it could skip over to it more efficiently.
 	 */
-	firstcol = true;
-	for (int i = 0; i < scan->num_proj_atts; i++)
+	ntuples = 0;
+	while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
 	{
-		int			natt = scan->proj_atts[i];
-		ZSBtreeScan	btree_scan;
-		Datum		datum;
-		bool        isnull;
-		zstid		tid;
-		Datum	   *datums = scan->bmscan_datums[i];
-		bool	   *isnulls = scan->bmscan_isnulls[i];
+		Assert(ZSTidGetBlockNumber(tid) == blockno);
+		Assert(isnull);
+		scan->bmscan_tids[ntuples] = tid;
+		ntuples++;
+	}
+	zsbt_end_scan(&btree_scan);
 
-		zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
-						ZSTidFromBlkOff(blockno, 1),
-						ZSTidFromBlkOff(blockno + 1, 1),
-						scan->rs_scan.rs_snapshot,
-						&btree_scan);
-
-		/*
-		 * set nexttid for next column based on current column TID. This
-		 * helps to skip scanning all other columns for rows which are not
-		 * visible based on meta column.
-		 */
-		if (!firstcol)
-			btree_scan.nexttid = scan->bmscan_tids[0];
-
-		/*
-		 * TODO: it would be good to pass the next expected TID down to zsbt_scan_next,
-		 * so that it could skip over to it more efficiently.
-		 */
-		ntuples = 0;
-		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+	if (ntuples)
+	{
+		for (int i = 1; i < scan->num_proj_atts; i++)
 		{
-			Assert(ZSTidGetBlockNumber(tid) == blockno);
+			int			natt = scan->proj_atts[i];
+			ZSBtreeScan	btree_scan;
+			Datum		datum;
+			bool        isnull;
+			zstid		tid;
+			Datum	   *datums = scan->bmscan_datums[i];
+			bool	   *isnulls = scan->bmscan_isnulls[i];
 
-			/*
-			 * have to make a copy because we close the scan immediately.
-			 * FIXME: I think this leaks into a too-long-lived context
-			 */
-			if (!isnull)
-				datum = zs_datumCopy(datum, btree_scan.attbyval, btree_scan.attlen);
-			datums[ntuples] = datum;
-			isnulls[ntuples] = isnull;
-			if (firstcol)
-				scan->bmscan_tids[ntuples] = tid;
-			else if (tid != scan->bmscan_tids[ntuples])
-				elog(ERROR, "scans on different attributes out of sync");
+			zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
+							ZSTidFromBlkOff(blockno, 1),
+							ZSTidFromBlkOff(blockno + 1, 1),
+							scan->rs_scan.rs_snapshot,
+							&btree_scan);
+			for (int n = 0; n < ntuples; n++)
+			{
+				/*
+				 * set nexttid for next column based on current column TID. This
+				 * helps to skip scanning all other columns for rows which are not
+				 * visible based on meta column.
+				 */
+				btree_scan.nexttid = scan->bmscan_tids[n];
+				if (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+				{
+					Assert(ZSTidGetBlockNumber(tid) == blockno);
+					if (tid != scan->bmscan_tids[n])
+					{
+						if (btree_scan.atthasmissing)
+							zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
+						else
+							elog(ERROR, "scans on different attributes out of sync");
+					}
+				}
+				else
+				{
+					if (btree_scan.atthasmissing)
+						zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
+					else
+						elog(ERROR, "scans on different attributes out of sync");
+				}
 
-			ntuples++;
-
-			/*
-			 * set nexttid for next column based on current column TID. This
-			 * helps to skip scanning all other columns for rows which are not
-			 * visible based on meta column.
-			 */
-			if (!firstcol)
-				btree_scan.nexttid = scan->bmscan_tids[ntuples];
+				/*
+				 * have to make a copy because we close the scan immediately.
+				 * FIXME: I think this leaks into a too-long-lived context
+				 */
+				if (!isnull)
+					datum = zs_datumCopy(datum, btree_scan.attbyval, btree_scan.attlen);
+				datums[n] = datum;
+				isnulls[n] = isnull;
+			}
+			zsbt_end_scan(&btree_scan);
 		}
-		if (firstcol)
-			first_ntuples = ntuples;
-		else if (ntuples != first_ntuples)
-			elog(ERROR, "scans on different attributes out of sync");
-
-		zsbt_end_scan(&btree_scan);
-
-		firstcol = false;
 	}
 
 	scan->bmscan_nexttuple = 0;
-	scan->bmscan_ntuples = first_ntuples;
+	scan->bmscan_ntuples = ntuples;
 
 	return true;
 }
@@ -1807,8 +1830,11 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 	BlockNumber tid_blkno = tbmres->blockno;
 	int			ntuples;
-	int			first_ntuples = 0;
-	bool		firstcol;
+	ZSBtreeScan	btree_scan;
+	Datum		datum;
+	bool        isnull;
+	zstid		tid;
+	int			noff = 0;
 
 	zs_initialize_proj_attributes_extended(scan, scan->rs_scan.rs_rd->rd_att->natts);
 
@@ -1821,83 +1847,90 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 	 * An alternative would be to keep the scans of each attribute open,
 	 * like in a sequential scan. I'm not sure which is better.
 	 */
-	firstcol = true;
-	for (int i = 0; i < scan->num_proj_atts; i++)
+	ntuples = 0;
+	zsbt_begin_scan(scan->rs_scan.rs_rd, ZS_META_ATTRIBUTE_NUM,
+					ZSTidFromBlkOff(tid_blkno, 1),
+					ZSTidFromBlkOff(tid_blkno + 1, 1),
+					scan->rs_scan.rs_snapshot,
+					&btree_scan);
+	while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
 	{
-		int			natt = scan->proj_atts[i];
-		ZSBtreeScan	btree_scan;
-		Datum		datum;
-		bool        isnull;
-		zstid		tid;
-		Datum	   *datums = scan->bmscan_datums[i];
-		bool	   *isnulls = scan->bmscan_isnulls[i];
-		int			noff = 0;
+		Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
 
-		zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
-						ZSTidFromBlkOff(tid_blkno, 1),
-						ZSTidFromBlkOff(tid_blkno + 1, 1),
-						scan->rs_scan.rs_snapshot,
-						&btree_scan);
-
-		/*
-		 * set nexttid for next column based on current column TID. This
-		 * helps to skip scanning all other columns for rows which are not
-		 * visible based on meta column.
-		 */
-		if (!firstcol)
-			btree_scan.nexttid = scan->bmscan_tids[0];
-
-		ntuples = 0;
-		while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+		if (tbmres->ntuples != -1)
 		{
-			Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
+			while (ZSTidGetOffsetNumber(tid) > tbmres->offsets[noff] && noff < tbmres->ntuples)
+				noff++;
 
-			if (tbmres->ntuples != -1)
-			{
-				while (ZSTidGetOffsetNumber(tid) > tbmres->offsets[noff] && noff < tbmres->ntuples)
-					noff++;
+			if (noff == tbmres->ntuples)
+				break;
 
-				if (noff == tbmres->ntuples)
-					break;
-
-				if (ZSTidGetOffsetNumber(tid) < tbmres->offsets[noff])
-					continue;
-			}
-
-			/* have to make a copy because we close the scan immediately. */
-			if (!isnull)
-				datum = zs_datumCopy(datum, btree_scan.attbyval, btree_scan.attlen);
-			datums[ntuples] = datum;
-			isnulls[ntuples] = isnull;
-			if (firstcol)
-				scan->bmscan_tids[ntuples] = tid;
-			else if (tid != scan->bmscan_tids[ntuples])
-				elog(ERROR, "scans on different attributes out of sync");
-
-			ntuples++;
-
-			/*
-			 * set nexttid for next column based on current column TID. This
-			 * helps to skip scanning all other columns for rows which are not
-			 * visible based on meta column.
-			 */
-			if (!firstcol)
-				btree_scan.nexttid = scan->bmscan_tids[ntuples];
+			if (ZSTidGetOffsetNumber(tid) < tbmres->offsets[noff])
+				continue;
 		}
-		if (firstcol)
-			first_ntuples = ntuples;
-		else if (ntuples != first_ntuples)
-			elog(ERROR, "scans on different attributes out of sync");
 
-		zsbt_end_scan(&btree_scan);
-
-		firstcol = false;
+		Assert(isnull);
+		scan->bmscan_tids[ntuples] = tid;
+		ntuples++;
 	}
+	zsbt_end_scan(&btree_scan);
 
+	if (ntuples)
+	{
+		for (int i = 1; i < scan->num_proj_atts; i++)
+		{
+			int			natt = scan->proj_atts[i];
+			ZSBtreeScan	btree_scan;
+			Datum		datum;
+			bool        isnull;
+			zstid		tid;
+			Datum	   *datums = scan->bmscan_datums[i];
+			bool	   *isnulls = scan->bmscan_isnulls[i];
+
+			zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
+							ZSTidFromBlkOff(tid_blkno, 1),
+							ZSTidFromBlkOff(tid_blkno + 1, 1),
+							scan->rs_scan.rs_snapshot,
+							&btree_scan);
+			for (int n = 0; n < ntuples; n++)
+			{
+				/*
+				 * set nexttid for next column based on current column TID. This
+				 * helps to skip scanning all other columns for rows which are not
+				 * visible based on meta column.
+				 */
+				btree_scan.nexttid = scan->bmscan_tids[n];
+				if (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+				{
+					Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
+					if (tid != scan->bmscan_tids[n])
+					{
+						if (btree_scan.atthasmissing)
+							zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
+						else
+							elog(ERROR, "scans on different attributes out of sync");
+					}
+				}
+				else
+				{
+					if (btree_scan.atthasmissing)
+						zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
+					else
+						elog(ERROR, "scans on different attributes out of sync");
+				}
+				/* have to make a copy because we close the scan immediately. */
+				if (!isnull)
+					datum = zs_datumCopy(datum, btree_scan.attbyval, btree_scan.attlen);
+				datums[n] = datum;
+				isnulls[n] = isnull;
+			}
+			zsbt_end_scan(&btree_scan);
+		}
+	}
 	scan->bmscan_nexttuple = 0;
-	scan->bmscan_ntuples = first_ntuples;
+	scan->bmscan_ntuples = ntuples;
 
-	return first_ntuples > 0;
+	return ntuples > 0;
 }
 
 static bool
@@ -2114,4 +2147,33 @@ zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
 	*end = ZSTidFromBlkOff(allocatedtid_blk + 1, 1);
 
 	return *start < pzscan->pzs_endtid;
+}
+
+static void
+zsbt_fill_missing_attribute_value(ZSBtreeScan *scan, Datum *datum, bool *isnull)
+{
+	int attno = scan->attno - 1;
+	AttrMissing *attrmiss = NULL;
+	TupleDesc tupleDesc = scan->rel->rd_att;
+	Form_pg_attribute attr = TupleDescAttr(tupleDesc, attno);
+
+	*isnull = true;
+	if (tupleDesc->constr &&
+		tupleDesc->constr->missing)
+	{
+		/*
+		 * If there are missing values we want to put them into the
+		 * tuple.
+		 */
+		attrmiss = tupleDesc->constr->missing;
+
+		if (attrmiss[attno].am_present)
+		{
+			*isnull = false;
+			if (attr->attbyval)
+				*datum = fetch_att(&attrmiss[attno].am_value, attr->attbyval, attr->attlen);
+			else
+				*datum = zs_datumCopy(attrmiss[attno].am_value, attr->attbyval, attr->attlen);
+		}
+	}
 }

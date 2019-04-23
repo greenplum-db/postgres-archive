@@ -415,6 +415,7 @@ typedef struct ZSBtreeScan
 	AttrNumber	attno;
 	int16		attlen;
 	bool		attbyval;
+	bool        atthasmissing;
 	char		attalign;
 
 	/*

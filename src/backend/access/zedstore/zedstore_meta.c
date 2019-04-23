@@ -202,20 +202,20 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 	 * happens due to add column default value storing value in catalog and
 	 * absent in table. This attribute must be marked with atthasmissing.
 	 */
-	if (attno > metapg->nattributes)
+	if (attno >= metapg->nattributes)
 	{
 		if (forupdate)
 			zsmeta_add_root_for_attributes(rel, page, false);
 		else
 		{
-			if (rel->rd_att->attrs[attno-1].atthasmissing)
+			if (rel->rd_att->attrs[attno - 1].atthasmissing)
 			{
 				UnlockReleaseBuffer(metabuf);
-				elog(ERROR, "yet to handle selects after add column, invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
 				return InvalidBlockNumber;
 			}
 
-			elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
+			elog(ERROR, "invalid attribute number %d (table \"%s\" has only %d attributes)",
+				 attno, RelationGetRelationName(rel), metapg->nattributes);
 		}
 	}
 
@@ -275,7 +275,8 @@ zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno,
 	metapg = (ZSMetaPage *) PageGetContents(BufferGetPage(metabuf));
 
 	if ((attno != ZS_META_ATTRIBUTE_NUM) && (attno <= 0 || attno > metapg->nattributes))
-		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
+		elog(ERROR, "invalid attribute number %d (table \"%s\" has only %d attributes)",
+			 attno, RelationGetRelationName(rel), metapg->nattributes);
 
 	metapg->tree_root_dir[attno].root = rootblk;
 

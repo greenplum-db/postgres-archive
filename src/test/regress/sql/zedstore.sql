@@ -124,8 +124,20 @@ create table t_zwithzerocols() using zedstore;
 insert into t_zwithzerocols select t.* from t_zwithzerocols t right join generate_series(1,1) on true;
 select count(*) from t_zwithzerocols;
 
--- Test for alter table add column force rewrite
+-- Test for alter table add column
 create table t_zaddcol(a int) using zedstore;
 insert into t_zaddcol select * from generate_series(1, 3);
+-- rewrite case
 alter table t_zaddcol add column b int generated always as (a + 1) stored;
 select * from t_zaddcol;
+-- fixed length default value stored in catalog
+alter table t_zaddcol add column c int default 3;
+select * from t_zaddcol;
+-- variable length default value stored in catalog
+alter table t_zaddcol add column d text default 'abcdefgh';
+select d from t_zaddcol;
+-- insert after add column
+insert into t_zaddcol values (2);
+select * from t_zaddcol;
+insert into t_zaddcol (a, c, d) values (3,5, 'test_insert');
+select b,c,d from t_zaddcol;

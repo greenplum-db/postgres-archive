@@ -92,56 +92,48 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, zstid endtid, Sn
 
 	rootblk = zsmeta_get_root_for_attribute(rel, attno, false, &attlen, &attbyval);
 
+	scan->rel = rel;
+	scan->attno = attno;
+	scan->attlen = attlen;
+	scan->attbyval = attbyval;
+	if (attno == ZS_META_ATTRIBUTE_NUM)
+		scan->atthasmissing = false;
+	else
+		scan->atthasmissing = rel->rd_att->attrs[attno - 1].atthasmissing;
+
+	/*
+	 * FIXME: should we store attalign in the metapage, too? Or can we remove
+	 * attlen/attbyval from there as well?
+	 */
+	scan->attalign = rel->rd_att->attrs[attno - 1].attalign;
+
+	scan->snapshot = snapshot;
+	scan->context = CurrentMemoryContext;
+	scan->lastbuf_is_locked = false;
+	scan->lastoff = InvalidOffsetNumber;
+	scan->has_decompressed = false;
+	scan->nexttid = starttid;
+	scan->endtid = endtid;
+	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
+	scan->array_datums = NULL;
+	scan->array_datums_allocated_size = 0;
+	scan->array_elements_left = 0;
+
 	if (rootblk == InvalidBlockNumber)
 	{
 		/* completely empty tree */
-		scan->rel = NULL;
-		scan->attno = InvalidAttrNumber;
-		scan->attlen = 0;
-		scan->attbyval = false;
-		scan->attalign = 0;
 		scan->active = false;
 		scan->lastbuf = InvalidBuffer;
-		scan->lastbuf_is_locked = false;
-		scan->lastoff = InvalidOffsetNumber;
-		scan->snapshot = NULL;
-		scan->context = NULL;
-		memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
-		scan->nexttid = InvalidZSTid;
-		scan->endtid = InvalidZSTid;
-		scan->array_datums = NULL;
-		scan->array_datums_allocated_size = 0;
-		scan->array_elements_left = 0;
 		return;
 	}
 
 	buf = zsbt_descend(rel, rootblk, starttid);
 	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
-	scan->rel = rel;
-	scan->attno = attno;
-	scan->attlen = attlen;
-	scan->attbyval = attbyval;
-	/* FIXME: should we store attalign in the metapage, too? Or can we remove attlen/attbyval
-	 * from there as well? */
-	scan->attalign = rel->rd_att->attrs[attno - 1].attalign;
-	scan->snapshot = snapshot;
-
 	scan->active = true;
 	scan->lastbuf = buf;
-	scan->lastbuf_is_locked = false;
-	scan->lastoff = InvalidOffsetNumber;
-	scan->nexttid = starttid;
-	scan->endtid = endtid;
 
-	scan->context = CurrentMemoryContext;
-
-	scan->has_decompressed = false;
 	zs_decompress_init(&scan->decompressor);
-	scan->array_datums = NULL;
-	scan->array_datums_allocated_size = 0;
-	scan->array_elements_left = 0;
-
 	scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 }
 
