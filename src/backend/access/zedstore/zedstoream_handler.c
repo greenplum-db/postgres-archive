@@ -940,6 +940,13 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
 
 	/*
+	 * if caller didn't set any column projections, then lets scan all the
+	 * columns. Passing NULL as second argument sets to scan all the columns.
+	 */
+	if (zscan->num_proj_atts == 0)
+		zedstoream_fetch_set_column_projection(scan, NULL);
+
+	/*
 	 * we don't do in-place updates, so this is essentially the same as
 	 * fetch_row_version.
 	 */
@@ -947,6 +954,7 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 		*call_again = false;
 	if (all_dead)
 		*all_dead = false;
+
 	return zedstoream_fetch_row((ZedStoreIndexFetchData *) scan, tid_p, snapshot, slot,
 								zscan->num_proj_atts, zscan->proj_atts);
 }
