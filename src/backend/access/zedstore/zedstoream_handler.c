@@ -759,9 +759,12 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 			if (!zsbt_scan_next_fast(btscan, &datum, &isnull, &tid))
 			{
-				if ((btscan->attno != ZS_META_ATTRIBUTE_NUM) && btscan->atthasmissing)
+				if (btscan->attno != ZS_META_ATTRIBUTE_NUM)
 				{
-					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
+					if (btscan->atthasmissing)
+						zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
+					else
+						isnull = true;
 					Assert(this_tid != InvalidZSTid);
 					tid = this_tid;
 				}
@@ -784,7 +787,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 					tid = this_tid;
 				}
 				else
-					elog(ERROR, "scans on different attributes out of sync");
+					isnull = true;
 			}
 
 			/*
@@ -1035,7 +1038,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 				if (btscan->atthasmissing)
 					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
 				else
-					elog(ERROR, "scans on different attributes out of sync");
+					isnull = true;
 			}
 			found = false;
 		}
@@ -1639,7 +1642,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 						if (btree_scan.atthasmissing)
 							zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
 						else
-							elog(ERROR, "scans on different attributes out of sync");
+							isnull = true;
 					}
 				}
 				else
@@ -1647,7 +1650,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 					if (btree_scan.atthasmissing)
 						zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
 					else
-						elog(ERROR, "scans on different attributes out of sync");
+						isnull = true;
 				}
 
 				/*
@@ -1916,7 +1919,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 						if (btree_scan.atthasmissing)
 							zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
 						else
-							elog(ERROR, "scans on different attributes out of sync");
+							isnull = true;
 					}
 				}
 				else
@@ -1924,7 +1927,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 					if (btree_scan.atthasmissing)
 						zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
 					else
-						elog(ERROR, "scans on different attributes out of sync");
+						isnull = true;
 				}
 				/* have to make a copy because we close the scan immediately. */
 				if (!isnull)

@@ -333,6 +333,24 @@ select * from t_zaddcol;
  3 | 4
 (3 rows)
 
+-- test alter table add column with no default
+create table t_zaddcol_simple(a int) using zedstore;
+insert into t_zaddcol_simple values (1);
+alter table t_zaddcol_simple add b int;
+select * from t_zaddcol_simple;
+ a | b 
+---+---
+ 1 |  
+(1 row)
+
+insert into t_zaddcol_simple values(2,3);
+select * from t_zaddcol_simple;
+ a | b 
+---+---
+ 1 |  
+ 2 | 3
+(2 rows)
+
 -- fixed length default value stored in catalog
 alter table t_zaddcol add column c int default 3;
 select * from t_zaddcol;

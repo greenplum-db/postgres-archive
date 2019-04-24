@@ -130,6 +130,13 @@ insert into t_zaddcol select * from generate_series(1, 3);
 -- rewrite case
 alter table t_zaddcol add column b int generated always as (a + 1) stored;
 select * from t_zaddcol;
+-- test alter table add column with no default
+create table t_zaddcol_simple(a int) using zedstore;
+insert into t_zaddcol_simple values (1);
+alter table t_zaddcol_simple add b int;
+select * from t_zaddcol_simple;
+insert into t_zaddcol_simple values(2,3);
+select * from t_zaddcol_simple;
 -- fixed length default value stored in catalog
 alter table t_zaddcol add column c int default 3;
 select * from t_zaddcol;

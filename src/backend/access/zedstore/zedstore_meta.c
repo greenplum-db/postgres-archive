@@ -208,14 +208,8 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 			zsmeta_add_root_for_attributes(rel, page, false);
 		else
 		{
-			if (rel->rd_att->attrs[attno - 1].atthasmissing)
-			{
-				UnlockReleaseBuffer(metabuf);
-				return InvalidBlockNumber;
-			}
-
-			elog(ERROR, "invalid attribute number %d (table \"%s\" has only %d attributes)",
-				 attno, RelationGetRelationName(rel), metapg->nattributes);
+			UnlockReleaseBuffer(metabuf);
+			return InvalidBlockNumber;
 		}
 	}
 
