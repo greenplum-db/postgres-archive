@@ -77,7 +77,7 @@
  * n_distinct options can be set at ShareUpdateExclusiveLock because they
  * are only used during ANALYZE, which uses a ShareUpdateExclusiveLock,
  * so the ANALYZE will not be affected by in-flight changes. Changing those
- * values has no affect until the next ANALYZE, so no need for stronger lock.
+ * values has no effect until the next ANALYZE, so no need for stronger lock.
  *
  * Planner-related parameters can be set with ShareUpdateExclusiveLock because
  * they only affect planning and not the correctness of the execution. Plans
@@ -89,6 +89,11 @@
  * Setting parallel_workers is safe, since it acts the same as
  * max_parallel_workers_per_gather which is a USERSET parameter that doesn't
  * affect existing plans or queries.
+ *
+ * vacuum_truncate can be set at ShareUpdateExclusiveLock because it
+ * is only used during VACUUM, which uses a ShareUpdateExclusiveLock,
+ * so the VACUUM will not be affected by in-flight changes. Changing its
+ * value has no effect until the next VACUUM, so no need for stronger lock.
  */
 
 static relopt_bool boolRelOpts[] =
@@ -143,6 +148,15 @@ static relopt_bool boolRelOpts[] =
 			"vacuum_index_cleanup",
 			"Enables index vacuuming and index cleanup",
 			RELOPT_KIND_HEAP,
+			ShareUpdateExclusiveLock
+		},
+		true
+	},
+	{
+		{
+			"vacuum_truncate",
+			"Enables vacuum to truncate empty pages at the end of this table",
+			RELOPT_KIND_HEAP | RELOPT_KIND_TOAST,
 			ShareUpdateExclusiveLock
 		},
 		true
@@ -1399,7 +1413,9 @@ default_reloptions(Datum reloptions, bool validate, relopt_kind kind)
 		{"vacuum_cleanup_index_scale_factor", RELOPT_TYPE_REAL,
 		offsetof(StdRdOptions, vacuum_cleanup_index_scale_factor)},
 		{"vacuum_index_cleanup", RELOPT_TYPE_BOOL,
-		offsetof(StdRdOptions, vacuum_index_cleanup)}
+		offsetof(StdRdOptions, vacuum_index_cleanup)},
+		{"vacuum_truncate", RELOPT_TYPE_BOOL,
+		offsetof(StdRdOptions, vacuum_truncate)}
 	};
 
 	options = parseRelOptions(reloptions, validate, kind, &numoptions);

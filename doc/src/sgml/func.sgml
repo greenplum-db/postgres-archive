@@ -17397,7 +17397,7 @@ SET search_path TO <replaceable>schema</replaceable> <optional>, <replaceable>sc
     because it needs access to the predicate lock manager's shared
     state for a short time.
    </para>
-   
+
    <indexterm>
     <primary>version</primary>
    </indexterm>
@@ -19835,6 +19835,8 @@ SELECT set_config('log_statement_stats', 'off', false);
     The functions shown in <xref
     linkend="functions-admin-backup-table"/> assist in making on-line backups.
     These functions cannot be executed during recovery (except
+    non-exclusive <function>pg_start_backup</function>,
+    non-exclusive <function>pg_stop_backup</function>,
     <function>pg_is_in_backup</function>, <function>pg_backup_start_time</function>
     and <function>pg_wal_lsn_diff</function>).
    </para>
@@ -21225,7 +21227,7 @@ postgres=# SELECT * FROM pg_walfile_name_offset(pg_stop_backup());
       <row><entry>Name</entry> <entry>Return Type</entry> <entry>Description</entry></row>
      </thead>
 
-     <tbody> 
+     <tbody>
       <row>
        <entry>
         <indexterm><primary>pg_partition_tree</primary></indexterm>

@@ -541,6 +541,7 @@ typedef struct PgStat_MsgChecksumFailure
 	PgStat_MsgHdr m_hdr;
 	Oid			m_databaseid;
 	int			m_failurecount;
+	TimestampTz	m_failure_time;
 } PgStat_MsgChecksumFailure;
 
 
@@ -607,6 +608,7 @@ typedef struct PgStat_StatDBEntry
 	PgStat_Counter n_temp_bytes;
 	PgStat_Counter n_deadlocks;
 	PgStat_Counter n_checksum_failures;
+	TimestampTz last_checksum_failure;
 	PgStat_Counter n_block_read_time;	/* times in microseconds */
 	PgStat_Counter n_block_write_time;
 
@@ -1378,7 +1380,7 @@ extern void pgstat_init_function_usage(FunctionCallInfo fcinfo,
 extern void pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu,
 						  bool finalize);
 
-extern void AtEOXact_PgStat(bool isCommit);
+extern void AtEOXact_PgStat(bool isCommit, bool parallel);
 extern void AtEOSubXact_PgStat(bool isCommit, int nestDepth);
 
 extern void AtPrepare_PgStat(void);

@@ -1523,7 +1523,7 @@ pgstat_report_deadlock(void)
 
 
 /* --------
- * pgstat_report_checksum_failures_in_db(dboid, failure_count) -
+ * pgstat_report_checksum_failures_in_db() -
  *
  *	Tell the collector about one or more checksum failures.
  * --------
@@ -1539,6 +1539,8 @@ pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
 	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_CHECKSUMFAILURE);
 	msg.m_databaseid = dboid;
 	msg.m_failurecount = failurecount;
+	msg.m_failure_time = GetCurrentTimestamp();
+
 	pgstat_send(&msg, sizeof(msg));
 }
 
@@ -2089,18 +2091,22 @@ pgstat_update_heap_dead_tuples(Relation rel, int delta)
  * ----------
  */
 void
-AtEOXact_PgStat(bool isCommit)
+AtEOXact_PgStat(bool isCommit, bool parallel)
 {
 	PgStat_SubXactStatus *xact_state;
 
-	/*
-	 * Count transaction commit or abort.  (We use counters, not just bools,
-	 * in case the reporting message isn't sent right away.)
-	 */
-	if (isCommit)
-		pgStatXactCommit++;
-	else
-		pgStatXactRollback++;
+	/* Don't count parallel worker transaction stats */
+	if (!parallel)
+	{
+		/*
+		 * Count transaction commit or abort.  (We use counters, not just
+		 * bools, in case the reporting message isn't sent right away.)
+		 */
+		if (isCommit)
+			pgStatXactCommit++;
+		else
+			pgStatXactRollback++;
+	}
 
 	/*
 	 * Transfer transactional insert/update counts into the base tabstat
@@ -4647,6 +4653,7 @@ reset_dbentry_counters(PgStat_StatDBEntry *dbentry)
 	dbentry->n_temp_bytes = 0;
 	dbentry->n_deadlocks = 0;
 	dbentry->n_checksum_failures = 0;
+	dbentry->last_checksum_failure = 0;
 	dbentry->n_block_read_time = 0;
 	dbentry->n_block_write_time = 0;
 
@@ -6303,6 +6310,7 @@ pgstat_recv_checksum_failure(PgStat_MsgChecksumFailure *msg, int len)
 	dbentry = pgstat_get_db_entry(msg->m_databaseid, true);
 
 	dbentry->n_checksum_failures += msg->m_failurecount;
+	dbentry->last_checksum_failure = msg->m_failure_time;
 }
 
 /* ----------

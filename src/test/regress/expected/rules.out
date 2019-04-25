@@ -1282,7 +1282,9 @@ drop table cchild;
 --
 -- temporarily disable fancy output, so view changes create less diff noise
 \a\t
-SELECT viewname, definition FROM pg_views WHERE schemaname <> 'information_schema' ORDER BY viewname;
+SELECT viewname, definition FROM pg_views
+WHERE schemaname IN ('pg_catalog', 'public')
+ORDER BY viewname;
 iexit| SELECT ih.name,
     ih.thepath,
     interpt_pp(ih.thepath, r.thepath) AS exit
@@ -1803,7 +1805,10 @@ pg_stat_bgwriter| SELECT pg_stat_get_bgwriter_timed_checkpoints() AS checkpoints
     pg_stat_get_bgwriter_stat_reset_time() AS stats_reset;
 pg_stat_database| SELECT d.oid AS datid,
     d.datname,
-    pg_stat_get_db_numbackends(d.oid) AS numbackends,
+        CASE
+            WHEN (d.oid = (0)::oid) THEN 0
+            ELSE pg_stat_get_db_numbackends(d.oid)
+        END AS numbackends,
     pg_stat_get_db_xact_commit(d.oid) AS xact_commit,
     pg_stat_get_db_xact_rollback(d.oid) AS xact_rollback,
     (pg_stat_get_db_blocks_fetched(d.oid) - pg_stat_get_db_blocks_hit(d.oid)) AS blks_read,
@@ -1818,10 +1823,16 @@ pg_stat_database| SELECT d.oid AS datid,
     pg_stat_get_db_temp_bytes(d.oid) AS temp_bytes,
     pg_stat_get_db_deadlocks(d.oid) AS deadlocks,
     pg_stat_get_db_checksum_failures(d.oid) AS checksum_failures,
+    pg_stat_get_db_checksum_last_failure(d.oid) AS checksum_last_failure,
     pg_stat_get_db_blk_read_time(d.oid) AS blk_read_time,
     pg_stat_get_db_blk_write_time(d.oid) AS blk_write_time,
     pg_stat_get_db_stat_reset_time(d.oid) AS stats_reset
-   FROM pg_database d;
+   FROM ( SELECT 0 AS oid,
+            NULL::name AS datname
+        UNION ALL
+         SELECT pg_database.oid,
+            pg_database.datname
+           FROM pg_database) d;
 pg_stat_database_conflicts| SELECT d.oid AS datid,
     d.datname,
     pg_stat_get_db_conflict_tablespace(d.oid) AS confl_tablespace,
@@ -2418,7 +2429,8 @@ toyemp| SELECT emp.name,
     (12 * emp.salary) AS annualsal
    FROM emp;
 SELECT tablename, rulename, definition FROM pg_rules
-	ORDER BY tablename, rulename;
+WHERE schemaname IN ('pg_catalog', 'public')
+ORDER BY tablename, rulename;
 pg_settings|pg_settings_n|CREATE RULE pg_settings_n AS
     ON UPDATE TO pg_catalog.pg_settings DO INSTEAD NOTHING;
 pg_settings|pg_settings_u|CREATE RULE pg_settings_u AS

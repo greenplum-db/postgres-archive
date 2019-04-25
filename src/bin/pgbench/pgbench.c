@@ -1214,20 +1214,6 @@ doConnect(void)
 	return conn;
 }
 
-/* throw away response from backend */
-static void
-discard_response(CState *state)
-{
-	PGresult   *res;
-
-	do
-	{
-		res = PQgetResult(state->con);
-		if (res)
-			PQclear(res);
-	} while (res);
-}
-
 /* qsort comparator for Variable array */
 static int
 compareVariableNames(const void *v1, const void *v2)
@@ -2732,15 +2718,18 @@ static bool
 readCommandResponse(CState *st, char *varprefix)
 {
 	PGresult   *res;
+	PGresult   *next_res;
 	int			qrynum = 0;
 
 	res = PQgetResult(st->con);
 
 	while (res != NULL)
 	{
-		/* look now at the next result to know whether it is the last */
-		PGresult	*next_res = PQgetResult(st->con);
-		bool is_last = (next_res == NULL);
+		bool	is_last;
+
+		/* peek at the next result to know whether the current is last */
+		next_res = PQgetResult(st->con);
+		is_last = (next_res == NULL);
 
 		switch (PQresultStatus(res))
 		{
@@ -2751,8 +2740,7 @@ readCommandResponse(CState *st, char *varprefix)
 					fprintf(stderr,
 							"client %d script %d command %d query %d: expected one row, got %d\n",
 							st->id, st->use_file, st->command, qrynum, 0);
-					st->ecnt++;
-					return false;
+					goto error;
 				}
 				break;
 
@@ -2764,10 +2752,7 @@ readCommandResponse(CState *st, char *varprefix)
 						fprintf(stderr,
 								"client %d script %d command %d query %d: expected one row, got %d\n",
 								st->id, st->use_file, st->command, qrynum, PQntuples(res));
-						st->ecnt++;
-						PQclear(res);
-						discard_response(st);
-						return false;
+						goto error;
 					}
 
 					/* store results into variables */
@@ -2788,10 +2773,7 @@ readCommandResponse(CState *st, char *varprefix)
 									"client %d script %d command %d query %d: error storing into variable %s\n",
 									st->id, st->use_file, st->command, qrynum,
 									varname);
-							st->ecnt++;
-							PQclear(res);
-							discard_response(st);
-							return false;
+							goto error;
 						}
 
 						if (*varprefix != '\0')
@@ -2807,10 +2789,7 @@ readCommandResponse(CState *st, char *varprefix)
 						"client %d script %d aborted in command %d query %d: %s",
 						st->id, st->use_file, st->command, qrynum,
 						PQerrorMessage(st->con));
-				st->ecnt++;
-				PQclear(res);
-				discard_response(st);
-				return false;
+				goto error;
 		}
 
 		PQclear(res);
@@ -2826,8 +2805,19 @@ readCommandResponse(CState *st, char *varprefix)
 	}
 
 	return true;
-}
 
+error:
+	st->ecnt++;
+	PQclear(res);
+	PQclear(next_res);
+	do
+	{
+		res = PQgetResult(st->con);
+		PQclear(res);
+	} while (res);
+
+	return false;
+}
 
 /*
  * Parse the argument to a \sleep command, and return the requested amount
@@ -5029,16 +5019,19 @@ set_random_seed(const char *seed)
 	}
 	else
 	{
-		/* parse seed unsigned int value */
+		/* parse unsigned-int seed value */
+		unsigned long ulseed;
 		char		garbage;
 
-		if (sscanf(seed, UINT64_FORMAT "%c", &iseed, &garbage) != 1)
+		/* Don't try to use UINT64_FORMAT here; it might not work for sscanf */
+		if (sscanf(seed, "%lu%c", &ulseed, &garbage) != 1)
 		{
 			fprintf(stderr,
 					"unrecognized random seed option \"%s\": expecting an unsigned integer, \"time\" or \"rand\"\n",
 					seed);
 			return false;
 		}
+		iseed = (uint64) ulseed;
 	}
 
 	if (seed != NULL)

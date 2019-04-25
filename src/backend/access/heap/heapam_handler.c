@@ -463,8 +463,14 @@ tuple_lock_retry:
 					if (TransactionIdIsCurrentTransactionId(priorXmax) &&
 						HeapTupleHeaderGetCmin(tuple->t_data) >= cid)
 					{
+						tmfd->xmax = priorXmax;
+						/*
+						 * Cmin is the problematic value, so store that. See
+						 * above.
+						 */
+						tmfd->cmax = HeapTupleHeaderGetCmin(tuple->t_data);
 						ReleaseBuffer(buffer);
-						return TM_Invisible;
+						return TM_SelfModified;
 					}
 
 					/*
@@ -662,8 +668,8 @@ static void
 heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								 Relation OldIndex, bool use_sort,
 								 TransactionId OldestXmin,
-								 TransactionId FreezeXid,
-								 MultiXactId MultiXactCutoff,
+								 TransactionId *xid_cutoff,
+								 MultiXactId *multi_cutoff,
 								 double *num_tuples,
 								 double *tups_vacuumed,
 								 double *tups_recently_dead)
@@ -701,8 +707,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	isnull = (bool *) palloc(natts * sizeof(bool));
 
 	/* Initialize the rewrite operation */
-	rwstate = begin_heap_rewrite(OldHeap, NewHeap, OldestXmin, FreezeXid,
-								 MultiXactCutoff, use_wal);
+	rwstate = begin_heap_rewrite(OldHeap, NewHeap, OldestXmin, *xid_cutoff,
+								 *multi_cutoff, use_wal);
 
 
 	/* Set up sorting if wanted */

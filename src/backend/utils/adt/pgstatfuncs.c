@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/xlog.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_type.h"
 #include "common/ip.h"
@@ -1526,12 +1527,36 @@ pg_stat_get_db_checksum_failures(PG_FUNCTION_ARGS)
 	int64		result;
 	PgStat_StatDBEntry *dbentry;
 
+	if (!DataChecksumsEnabled())
+		PG_RETURN_NULL();
+
 	if ((dbentry = pgstat_fetch_stat_dbentry(dbid)) == NULL)
 		result = 0;
 	else
 		result = (int64) (dbentry->n_checksum_failures);
 
 	PG_RETURN_INT64(result);
+}
+
+Datum
+pg_stat_get_db_checksum_last_failure(PG_FUNCTION_ARGS)
+{
+	Oid			dbid = PG_GETARG_OID(0);
+	TimestampTz result;
+	PgStat_StatDBEntry *dbentry;
+
+	if (!DataChecksumsEnabled())
+		PG_RETURN_NULL();
+
+	if ((dbentry = pgstat_fetch_stat_dbentry(dbid)) == NULL)
+		result = 0;
+	else
+		result = dbentry->last_checksum_failure;
+
+	if (result == 0)
+		PG_RETURN_NULL();
+	else
+		PG_RETURN_TIMESTAMPTZ(result);
 }
 
 Datum

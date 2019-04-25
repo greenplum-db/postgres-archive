@@ -317,7 +317,12 @@ ExecComputeStoredGenerated(EState *estate, TupleTableSlot *slot)
 
 	oldtuple = ExecFetchSlotHeapTuple(slot, true, &should_free);
 	newtuple = heap_modify_tuple(oldtuple, tupdesc, values, nulls, replaces);
-	ExecForceStoreHeapTuple(newtuple, slot);
+	/*
+	 * The tuple will be freed by way of the memory context - the slot might
+	 * only be cleared after the context is reset, and we'd thus potentially
+	 * double free.
+	 */
+	ExecForceStoreHeapTuple(newtuple, slot, false);
 	if (should_free)
 		heap_freetuple(oldtuple);
 
@@ -799,7 +804,7 @@ ldelete:;
 				if (tmfd.cmax != estate->es_output_cid)
 					ereport(ERROR,
 							(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
-							 errmsg("tuple to be updated was already modified by an operation triggered by the current command"),
+							 errmsg("tuple to be deleted was already modified by an operation triggered by the current command"),
 							 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 
 				/* Else, already deleted by self; nothing to do */
@@ -858,6 +863,25 @@ ldelete:;
 							else
 								goto ldelete;
 
+						case TM_SelfModified:
+							/*
+							 * This can be reached when following an update
+							 * chain from a tuple updated by another session,
+							 * reaching a tuple that was already updated in
+							 * this transaction. If previously updated by this
+							 * command, ignore the delete, otherwise error
+							 * out.
+							 *
+							 * See also TM_SelfModified response to
+							 * table_delete() above.
+							 */
+							if (tmfd.cmax != estate->es_output_cid)
+								ereport(ERROR,
+										(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
+										 errmsg("tuple to be deleted was already modified by an operation triggered by the current command"),
+										 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
+							return NULL;
+
 						case TM_Deleted:
 							/* tuple already deleted; nothing to do */
 							return NULL;
@@ -869,10 +893,6 @@ ldelete:;
 							 * waiting for updated row versions, and would
 							 * already have errored out if the first version
 							 * is invisible.
-							 *
-							 * TM_SelfModified should be impossible, as we'd
-							 * otherwise should have hit the TM_SelfModified
-							 * case in response to table_delete above.
 							 *
 							 * TM_Updated should be impossible, because we're
 							 * locking the latest version via
@@ -964,7 +984,7 @@ ldelete:;
 			slot = ExecGetReturningSlot(estate, resultRelInfo);
 			if (oldtuple != NULL)
 			{
-				ExecForceStoreHeapTuple(oldtuple, slot);
+				ExecForceStoreHeapTuple(oldtuple, slot, false);
 			}
 			else
 			{
@@ -1377,6 +1397,25 @@ lreplace:;
 
 						case TM_Deleted:
 							/* tuple already deleted; nothing to do */
+							return NULL;
+
+						case TM_SelfModified:
+							/*
+							 * This can be reached when following an update
+							 * chain from a tuple updated by another session,
+							 * reaching a tuple that was already updated in
+							 * this transaction. If previously modified by
+							 * this command, ignore the redundant update,
+							 * otherwise error out.
+							 *
+							 * See also TM_SelfModified response to
+							 * table_update() above.
+							 */
+							if (tmfd.cmax != estate->es_output_cid)
+								ereport(ERROR,
+										(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
+										 errmsg("tuple to be updated was already modified by an operation triggered by the current command"),
+										 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 							return NULL;
 
 						default:

@@ -1553,8 +1553,8 @@ static void
 zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 									 Relation OldIndex, bool use_sort,
 									 TransactionId OldestXmin,
-									 TransactionId FreezeXid,
-									 MultiXactId MultiXactCutoff,
+									 TransactionId *xid_cutoff,
+									 MultiXactId *multi_cutoff,
 									 double *num_tuples,
 									 double *tups_vacuumed,
 									 double *tups_recently_dead)

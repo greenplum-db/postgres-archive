@@ -9,6 +9,9 @@ setup
  CREATE TABLE accounts (accountid text PRIMARY KEY, balance numeric not null);
  INSERT INTO accounts VALUES ('checking', 600), ('savings', 600);
 
+ CREATE FUNCTION update_checking(int) RETURNS bool LANGUAGE sql AS $$
+     UPDATE accounts SET balance = balance + 1 WHERE accountid = 'checking'; SELECT true;$$;
+
  CREATE TABLE accounts_ext (accountid text PRIMARY KEY, balance numeric not null, other text);
  INSERT INTO accounts_ext VALUES ('checking', 600, 'other'), ('savings', 700, null);
  ALTER TABLE accounts_ext ADD COLUMN newcol int DEFAULT 42;
@@ -29,14 +32,27 @@ setup
 
  CREATE TABLE jointest AS SELECT generate_series(1,10) AS id, 0 AS data;
  CREATE INDEX ON jointest(id);
+
+ CREATE TABLE parttbl (a int, b int, c int) PARTITION BY LIST (a);
+ CREATE TABLE parttbl1 PARTITION OF parttbl FOR VALUES IN (1);
+ CREATE TABLE parttbl2 PARTITION OF parttbl FOR VALUES IN (2);
+ INSERT INTO parttbl VALUES (1, 1, 1);
+
+ CREATE TABLE another_parttbl (a int, b int, c int) PARTITION BY LIST (a);
+ CREATE TABLE another_parttbl1 PARTITION OF another_parttbl FOR VALUES IN (1);
+ CREATE TABLE another_parttbl2 PARTITION OF another_parttbl FOR VALUES IN (2);
+ INSERT INTO another_parttbl VALUES (1, 1, 1);
 }
 
 teardown
 {
  DROP TABLE accounts;
+ DROP FUNCTION update_checking(int);
  DROP TABLE accounts_ext;
  DROP TABLE p CASCADE;
  DROP TABLE table_a, table_b, jointest;
+ DROP TABLE parttbl;
+ DROP TABLE another_parttbl;
 }
 
 session "s1"
@@ -133,6 +149,22 @@ step "selectresultforupdate"	{
 	  where jt.id = y for update of jt, ss1, ss2;
 }
 
+# test for EPQ on a partitioned result table
+
+step "simplepartupdate"	{
+	update parttbl set a = a;
+}
+
+# test scenarios where update may cause row movement
+
+step "simplepartupdate_route1to2" {
+	update parttbl set a = 2 where c = 1 returning *;
+}
+
+step "simplepartupdate_noroute" {
+	update parttbl set b = 2 where c = 1 returning *;
+}
+
 
 session "s2"
 setup		{ BEGIN ISOLATION LEVEL READ COMMITTED; }
@@ -170,6 +202,35 @@ step "updateforcip3"	{
 }
 step "wrtwcte"	{ UPDATE table_a SET value = 'tableAValue2' WHERE id = 1; }
 step "wrjt"	{ UPDATE jointest SET data = 42 WHERE id = 7; }
+step "complexpartupdate"	{
+	with u as (update parttbl set a = a returning parttbl.*)
+	update parttbl set a = u.a from u;
+}
+
+step "complexpartupdate_route_err1" {
+	with u as (update another_parttbl set a = 1 returning another_parttbl.*)
+	update parttbl p set a = u.a from u where p.a = u.a and p.c = 1 returning p.*;
+}
+
+step "complexpartupdate_route" {
+	with u as (update another_parttbl set a = 1 returning another_parttbl.*)
+	update parttbl p set a = p.b from u where p.a = u.a and p.c = 1 returning p.*;
+}
+
+step "complexpartupdate_doesnt_route" {
+	with u as (update another_parttbl set a = 1 returning another_parttbl.*)
+	update parttbl p set a = 3 - p.b from u where p.a = u.a and p.c = 1 returning p.*;
+}
+
+# Use writable CTEs to create self-updated rows, that then are
+# (updated|deleted). The *fail versions of the tests additionally
+# perform an update, via a function, in a different command, to test
+# behaviour relating to that.
+step "updwcte"  { WITH doup AS (UPDATE accounts SET balance = balance + 1100 WHERE accountid = 'checking' RETURNING *) UPDATE accounts a SET balance = doup.balance + 100 FROM doup RETURNING *; }
+step "updwctefail"  { WITH doup AS (UPDATE accounts SET balance = balance + 1100 WHERE accountid = 'checking' RETURNING *, update_checking(999)) UPDATE accounts a SET balance = doup.balance + 100 FROM doup RETURNING *; }
+step "delwcte"  { WITH doup AS (UPDATE accounts SET balance = balance + 1100 WHERE accountid = 'checking' RETURNING *) DELETE FROM accounts a USING doup RETURNING *; }
+step "delwctefail"  { WITH doup AS (UPDATE accounts SET balance = balance + 1100 WHERE accountid = 'checking' RETURNING *, update_checking(999)) DELETE FROM accounts a USING doup RETURNING *; }
+
 step "c2"	{ COMMIT; }
 step "r2"	{ ROLLBACK; }
 
@@ -221,6 +282,19 @@ permutation "wx2" "d2" "d1" "r2" "c1" "read"
 permutation "d1" "wx2" "c1" "c2" "read"
 permutation "d1" "wx2" "r1" "c2" "read"
 
+# test that an update to a self-modified row is ignored when
+# previously updated by the same cid
+permutation "wx1" "updwcte" "c1" "c2" "read"
+# test that an update to a self-modified row throws error when
+# previously updated by a different cid
+permutation "wx1" "updwctefail" "c1" "c2" "read"
+# test that a delete to a self-modified row is ignored when
+# previously updated by the same cid
+permutation "wx1" "delwcte" "c1" "c2" "read"
+# test that a delete to a self-modified row throws error when
+# previously updated by a different cid
+permutation "wx1" "delwctefail" "c1" "c2" "read"
+
 permutation "upsert1" "upsert2" "c1" "c2" "read"
 permutation "readp1" "writep1" "readp2" "c1" "c2"
 permutation "writep2" "returningp1" "c1" "c2"
@@ -234,3 +308,8 @@ permutation "wrtwcte" "readwcte" "c1" "c2"
 permutation "wrjt" "selectjoinforupdate" "c2" "c1"
 permutation "wrjt" "selectresultforupdate" "c2" "c1"
 permutation "wrtwcte" "multireadwcte" "c1" "c2"
+
+permutation "simplepartupdate" "complexpartupdate" "c1" "c2"
+permutation "simplepartupdate_route1to2" "complexpartupdate_route_err1" "c1" "c2"
+permutation "simplepartupdate_noroute" "complexpartupdate_route" "c1" "c2"
+permutation "simplepartupdate_noroute" "complexpartupdate_doesnt_route" "c1" "c2"

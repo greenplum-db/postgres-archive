@@ -136,7 +136,7 @@ tts_virtual_getsomeattrs(TupleTableSlot *slot, int natts)
 static Datum
 tts_virtual_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
 {
-	elog(ERROR, "virtual tuple table slot does not have system atttributes");
+	elog(ERROR, "virtual tuple table slot does not have system attributes");
 
 	return 0; /* silence compiler warnings */
 }
@@ -497,7 +497,7 @@ tts_minimal_getsomeattrs(TupleTableSlot *slot, int natts)
 static Datum
 tts_minimal_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
 {
-	elog(ERROR, "minimal tuple table slot does not have system atttributes");
+	elog(ERROR, "minimal tuple table slot does not have system attributes");
 
 	return 0; /* silence compiler warnings */
 }
@@ -1430,11 +1430,12 @@ ExecStoreMinimalTuple(MinimalTuple mtup,
  */
 void
 ExecForceStoreHeapTuple(HeapTuple tuple,
-						TupleTableSlot *slot)
+						TupleTableSlot *slot,
+						bool shouldFree)
 {
 	if (TTS_IS_HEAPTUPLE(slot))
 	{
-		ExecStoreHeapTuple(tuple, slot, false);
+		ExecStoreHeapTuple(tuple, slot, shouldFree);
 	}
 	else if (TTS_IS_BUFFERTUPLE(slot))
 	{
@@ -1447,6 +1448,9 @@ ExecForceStoreHeapTuple(HeapTuple tuple,
 		oldContext = MemoryContextSwitchTo(slot->tts_mcxt);
 		bslot->base.tuple = heap_copytuple(tuple);
 		MemoryContextSwitchTo(oldContext);
+
+		if (shouldFree)
+			pfree(tuple);
 	}
 	else
 	{
@@ -1454,6 +1458,12 @@ ExecForceStoreHeapTuple(HeapTuple tuple,
 		heap_deform_tuple(tuple, slot->tts_tupleDescriptor,
 						  slot->tts_values, slot->tts_isnull);
 		ExecStoreVirtualTuple(slot);
+
+		if (shouldFree)
+		{
+			ExecMaterializeSlot(slot);
+			pfree(tuple);
+		}
 	}
 }
 
@@ -1481,6 +1491,12 @@ ExecForceStoreMinimalTuple(MinimalTuple mtup,
 		heap_deform_tuple(&htup, slot->tts_tupleDescriptor,
 						  slot->tts_values, slot->tts_isnull);
 		ExecStoreVirtualTuple(slot);
+
+		if (shouldFree)
+		{
+			ExecMaterializeSlot(slot);
+			pfree(mtup);
+		}
 	}
 }
 
