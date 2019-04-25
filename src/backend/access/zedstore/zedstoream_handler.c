@@ -350,11 +350,12 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	TransactionId xid = GetCurrentTransactionId();
 	TM_Result result;
 
+	hufd->traversed = false;
 	/*
 	 * For now, we lock just the first attribute. As long as everyone
 	 * does that, that's enough.
 	 */
-	result = zsbt_lock_item(relation, 1 /* attno */, tid, xid, cid,
+	result = zsbt_lock_item(relation, ZS_META_ATTRIBUTE_NUM /* attno */, tid, xid, cid,
 							snapshot, mode, wait_policy, hufd);
 
 	if (result != TM_Ok)
