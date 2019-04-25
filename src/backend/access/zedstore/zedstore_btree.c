@@ -609,7 +609,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 void
 zsbt_multi_insert(Relation rel, AttrNumber attno,
 				  Datum *datums, bool *isnulls, zstid *tids, int nitems,
-				  TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr)
+				  TransactionId xid, CommandId cid, uint32 speculative_token, ZSUndoRecPtr prevundoptr)
 {
 	Form_pg_attribute attr;
 	bool		assign_tids;
@@ -685,6 +685,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = tids[0];
+		undorec.rec.speculative_token = speculative_token;
 		undorec.rec.prevundorec = prevundoptr;
 		undorec.endtid = tids[nitems - 1];
 
@@ -922,7 +923,7 @@ zsbt_update_insert_new(Relation rel, AttrNumber attno,
 					   Datum newdatum, bool newisnull, zstid *newtid,
 					   TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr)
 {
-	zsbt_multi_insert(rel, attno, &newdatum, &newisnull, newtid, 1, xid, cid, prevundoptr);
+	zsbt_multi_insert(rel, attno, &newdatum, &newisnull, newtid, 1, xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
 }
 
 /*
@@ -1780,6 +1781,25 @@ zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf
 	return stack_head;
 }
 
+void
+zsbt_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete)
+{
+	Buffer		buf;
+	ZSSingleBtreeItem *item = NULL;
+	ZSUndoRecPtr recent_oldest_undo;
+
+	item = zsbt_fetch(rel, ZS_META_ATTRIBUTE_NUM, SnapshotAny, &recent_oldest_undo, tid, &buf);
+
+	if (item == NULL)
+		elog(ERROR, "couldn't find item for meta column for inserted tuple with TID (%u, %u) in rel %s",
+			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), rel->rd_rel->relname.data);
+	Assert(item->t_tid == tid);
+
+	zsundo_clear_speculative_token(rel, item->t_undo_ptr);
+
+	UnlockReleaseBuffer(buf);
+}
+
 static ZSSingleBtreeItem *
 zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, ZSUndoRecPtr *recent_oldest_undo,
 		   zstid tid, Buffer *buf_p)
@@ -2534,7 +2554,6 @@ static bool
 zsbt_recompress_add_to_compressor(zsbt_recompress_context *cxt, ZSBtreeItem *item)
 {
 	bool		result;
-
 	if (cxt->compressed_items == 0)
 		zs_compress_begin(&cxt->compressor, PageGetFreeSpace(cxt->currpage));
 

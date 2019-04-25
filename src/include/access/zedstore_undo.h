@@ -39,6 +39,8 @@ typedef struct
 /* TODO: assert that blkno and offset match, too, if counter matches */
 #define ZSUndoRecPtrEquals(a, b) ((a).counter == (b).counter)
 
+#define INVALID_SPECULATIVE_TOKEN 0
+
 typedef struct
 {
 	int16		size;			/* size of this record, including header */
@@ -47,6 +49,7 @@ typedef struct
 	TransactionId xid;
 	CommandId	cid;
 	zstid		tid;
+	uint32		speculative_token; /* Only used for INSERT records */
 
 	/*
 	 * UNDO-record of the inserter. This is needed if a row is inserted, and
@@ -158,6 +161,7 @@ IsZSUndoRecPtrValid(ZSUndoRecPtr *uptr)
 /* prototypes for functions in zstore_undo.c */
 extern ZSUndoRecPtr zsundo_insert(Relation rel, ZSUndoRec *rec);
 extern ZSUndoRec *zsundo_fetch(Relation rel, ZSUndoRecPtr undorecptr);
+extern void zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr);
 extern void zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy,
 			  TransactionId OldestXmin);
 extern ZSUndoRecPtr zsundo_get_oldest_undo_ptr(Relation rel);

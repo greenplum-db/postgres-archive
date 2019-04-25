@@ -474,7 +474,7 @@ struct zs_split_stack
 /* prototypes for functions in zedstore_btree.c */
 extern void zsbt_multi_insert(Relation rel, AttrNumber attno,
 							  Datum *datums, bool *isnulls, zstid *tids, int ndatums,
-							  TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr);
+							  TransactionId xid, CommandId cid, uint32 speculative_token, ZSUndoRecPtr prevundoptr);
 extern TM_Result zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 							 TransactionId xid, CommandId cid,
 							 Snapshot snapshot, Snapshot crosscheck, bool wait,
@@ -603,6 +603,7 @@ extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);
 extern void zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, zstid tid);
 extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted);
 
+extern void zsbt_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete);
 /* prototypes for functions in zedstore_freepagemap.c */
 extern Buffer zspage_getnewbuf(Relation rel, Buffer metabuf);
 extern Buffer zspage_extendrel_newbuf(Relation rel);

@@ -156,9 +156,9 @@ zedstoream_get_latest_tid(Relation relation,
 			 errmsg("function %s not implemented yet", __func__)));
 }
 
-static void
-zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
-				  int options, struct BulkInsertStateData *bistate)
+static inline void
+zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId cid,
+				  int options, struct BulkInsertStateData *bistate, uint32 speculative_token)
 {
 	AttrNumber	attno;
 	Datum	   *d;
@@ -184,7 +184,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	ZSUndoRecPtrInitialize(&prevundoptr);
 	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
 					  &datum, &isnull, &tid, 1,
-					  xid, cid, prevundoptr);
+					  xid, cid, speculative_token, prevundoptr);
 
 	/*
 	 * We only need to check for table-level SSI locks. Our
@@ -213,7 +213,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 		zsbt_multi_insert(relation, attno,
 						  &datum, &isnull, &tid, 1,
-						  xid, cid, prevundoptr);
+						  xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
 
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, tid);
@@ -227,21 +227,32 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 }
 
 static void
+zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
+					int options, struct BulkInsertStateData *bistate)
+{
+	zedstoream_insert_internal(relation, slot, cid, options, bistate, INVALID_SPECULATIVE_TOKEN);
+}
+
+static void
 zedstoream_insert_speculative(Relation relation, TupleTableSlot *slot, CommandId cid,
 							  int options, BulkInsertState bistate, uint32 specToken)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function %s not implemented yet", __func__)));
+	zedstoream_insert_internal(relation, slot, cid, options, bistate, specToken);
 }
 
 static void
 zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 spekToken,
 								bool succeeded)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function %s not implemented yet", __func__)));
+	zstid tid;
+
+	tid = ZSTidFromItemPointer(slot->tts_tid);
+	zsbt_clear_speculative_token(relation, tid, spekToken, true /* for complete */);
+	/*
+	 * there is a conflict
+	 */
+	if (succeeded)
+		elog(ERROR, "zedstoream_complete_speculative succeeded case is not handled ");
 }
 
 static void
@@ -269,7 +280,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	ZSUndoRecPtrInitialize(&prevundoptr);
 	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
 					  datums, isnulls, tids, ntuples,
-					  xid, cid, prevundoptr);
+					  xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
 
 	/*
 	 * We only need to check for table-level SSI locks. Our
@@ -307,7 +318,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		zsbt_multi_insert(relation, attno,
 						  datums, isnulls, tids, ntuples,
-						  xid, cid, prevundoptr);
+						  xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
 
 		for (i = 0; i < ntupletoasted; i++)
 		{
@@ -822,7 +833,7 @@ retry:
 
 			zsbt_multi_insert(relation, attno,
 							  &newdatum, &newisnull, &newtid, 1,
-							  xid, cid, prevundoptr);
+							  xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
 
 			if (toastptr != (Datum) 0)
 				zedstore_toast_finish(relation, attno, toastptr, newtid);

@@ -227,6 +227,38 @@ zsundo_fetch(Relation rel, ZSUndoRecPtr undoptr)
 	return undorec_copy;
 }
 
+void
+zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr)
+{
+	Buffer		buf;
+	Page		page;
+	PageHeader	pagehdr;
+	ZSUndoPageOpaque *opaque;
+	ZSUndoRec  *undorec;
+
+	buf = ReadBuffer(rel, undoptr.blkno);
+	page = BufferGetPage(buf);
+	pagehdr = (PageHeader) page;
+
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+	opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(page);
+	if (opaque->zs_page_id != ZS_UNDO_PAGE_ID)
+		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u; not an UNDO page",
+			undoptr.counter, undoptr.blkno, undoptr.offset);
+
+	/* Sanity check that the pointer pointed to a valid place */
+	if (undoptr.offset < SizeOfPageHeaderData ||
+		undoptr.offset + sizeof(ZSUndoRec) > pagehdr->pd_lower)
+		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
+			undoptr.counter, undoptr.blkno, undoptr.offset);
+
+	undorec = (ZSUndoRec *) (((char *) page) + undoptr.offset);
+
+	undorec->speculative_token = INVALID_SPECULATIVE_TOKEN;
+	MarkBufferDirty(buf);
+	UnlockReleaseBuffer(buf);
+}
+
 static bool
 zs_lazy_tid_reaped(ItemPointer itemptr, void *state)
 {

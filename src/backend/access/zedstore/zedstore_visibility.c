@@ -450,7 +450,7 @@ zs_SatisfiesDirty(ZSBtreeScan *scan, ZSBtreeItem *item)
 	Assert (snapshot->snapshot_type == SNAPSHOT_DIRTY);
 
 	snapshot->xmin = snapshot->xmax = InvalidTransactionId;
-	snapshot->speculativeToken = 0;
+	snapshot->speculativeToken = INVALID_SPECULATIVE_TOKEN;
 
 	undo_ptr = zsbt_item_undoptr(item);
 
@@ -463,6 +463,7 @@ fetch_undo_record:
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
+		snapshot->speculativeToken = undorec->speculative_token;
 		/* Inserted tuple */
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 			return true;		/* inserted by me */
