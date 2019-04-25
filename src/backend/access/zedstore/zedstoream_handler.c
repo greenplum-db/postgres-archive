@@ -643,7 +643,7 @@ zedstoream_endscan(TableScanDesc sscan)
 	if (scan->proj_atts)
 		pfree(scan->proj_atts);
 
-	for (int i = 0; i < sscan->rs_rd->rd_att->natts; i++)
+	for (int i = 0; i < scan->num_proj_atts; i++)
 		zsbt_end_scan(&scan->btree_scans[i]);
 
 	if (scan->rs_scan.rs_temp_snap)
@@ -670,9 +670,8 @@ zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
 	}
 
 	for (int i = 0; i < scan->num_proj_atts; i++)
-	{
 		zsbt_end_scan(&scan->btree_scans[i]);
-	}
+
 	scan->state = ZSSCAN_STATE_UNSTARTED;
 }
 
@@ -828,11 +827,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
 		{
 			for (int i = 0; i < scan->num_proj_atts; i++)
-			{
-				int			natt = scan->proj_atts[i];
-
-				zsbt_end_scan(&scan->btree_scans[natt]);
-			}
+				zsbt_end_scan(&scan->btree_scans[i]);
 		}
 		else
 		{
