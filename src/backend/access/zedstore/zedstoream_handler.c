@@ -760,6 +760,8 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 
 	ZSUndoRecPtrInitialize(&prevundoptr);
 
+	*update_indexes = true;
+
 	slot_getallattrs(slot);
 	d = slot->tts_values;
 	isnulls = slot->tts_isnull;
