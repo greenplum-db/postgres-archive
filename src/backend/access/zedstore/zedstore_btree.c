@@ -1325,7 +1325,7 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level,
 
 	Assert(key1 < key2);
 
-	buf = zs_getnewbuf(rel);
+	buf = zspage_getnewbuf(rel, metabuf);
 	page = BufferGetPage(buf);
 	PageInit(page, BLCKSZ, sizeof(ZSBtreePageOpaque));
 	opaque = ZSBtreePageGetOpaque(page);
@@ -1474,7 +1474,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer 
 	/* any previous incomplete split must be finished first */
 	Assert((leftopaque->zs_flags & ZS_FOLLOW_RIGHT) == 0);
 
-	rightbuf = zs_getnewbuf(rel);
+	rightbuf = zspage_getnewbuf(rel, InvalidBuffer);
 	rightpage = BufferGetPage(rightbuf);
 	rightblkno = BufferGetBlockNumber(rightbuf);
 	PageInit(rightpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
@@ -2366,7 +2366,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 			if (recent_oldest_undo.counter == 0)
 				recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 
-			if (zsbt_item_undoptr(uitem).counter < recent_oldest_undo.counter)
+			if (zsbt_item_undoptr(uitem).counter <= recent_oldest_undo.counter)
 				continue;
 		}
 
@@ -2417,7 +2417,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	bufs = list_make1_int(oldbuf);
 	for (i = 0; i < list_length(cxt.pages) - 1; i++)
 	{
-		Buffer		newbuf = zs_getnewbuf(rel);
+		Buffer		newbuf = zspage_getnewbuf(rel, InvalidBuffer);
 
 		bufs = lappend_int(bufs, newbuf);
 	}

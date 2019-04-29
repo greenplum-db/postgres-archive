@@ -60,7 +60,7 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value)
 	{
 		Size		thisbytes;
 
-		buf = zs_getnewbuf(rel);
+		buf = zspage_getnewbuf(rel, InvalidBuffer);
 		if (prevbuf == InvalidBuffer)
 			firstblk = BufferGetBlockNumber(buf);
 

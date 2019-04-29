@@ -87,6 +87,7 @@ ZSTidGetOffsetNumber(zstid tid)
 #define	ZS_BTREE_PAGE_ID	0xF084
 #define	ZS_UNDO_PAGE_ID		0xF085
 #define	ZS_TOAST_PAGE_ID	0xF086
+#define	ZS_FPM_PAGE_ID		0xF087
 
 /* like nbtree/gist FOLLOW_RIGHT flag, used to detect concurrent page splits */
 #define ZS_FOLLOW_RIGHT		0x0002
@@ -399,6 +400,8 @@ typedef struct ZSMetaPageOpaque
 	BlockNumber	zs_undo_tail;
 	ZSUndoRecPtr zs_undo_oldestptr;
 
+	BlockNumber zs_fpm_root;		/* root of the Free Page Map */
+
 	uint16		zs_flags;
 	uint16		padding1;			/* padding, to put zs_page_id last */
 	uint16		padding2;			/* padding, to put zs_page_id last */
@@ -572,7 +575,6 @@ zsbt_scan_next_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 
 /* prototypes for functions in zedstore_meta.c */
 extern void zsmeta_initmetapage(Relation rel);
-extern Buffer zs_getnewbuf(Relation rel);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update, int16 *attlen_p, bool *attbyval_p);
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
 extern void zsmeta_add_root_for_new_attributes(Relation rel, Page page);
@@ -587,5 +589,11 @@ extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item);
 extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);
 extern void zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, zstid tid);
 extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted);
+
+/* prototypes for functions in zedstore_freepagemap.c */
+extern Buffer zspage_getnewbuf(Relation rel, Buffer metabuf);
+extern Buffer zspage_extendrel_newbuf(Relation rel);
+extern void zspage_delete_page(Relation rel, Buffer buf);
+
 
 #endif							/* ZEDSTORE_INTERNAL_H */

@@ -88,8 +88,8 @@ static void lazy_vacuum_index(Relation indrel,
 static void lazy_cleanup_index(Relation indrel,
 				   IndexBulkDeleteResult *stats,
 				   ZSVacRelStats *vacrelstats);
-static ZSUndoRecPtr zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats, BlockNumber *oldest_undopage);
-static void zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumber oldest_undopage);
+static ZSUndoRecPtr zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats, BlockNumber *oldest_undopage, List **unused_pages);
+static void zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumber oldest_undopage, List *unused_pages);
 static void zsundo_record_dead_tuple(ZSUndoTrimStats *trimstats, zstid tid);
 
 /*
@@ -135,7 +135,7 @@ zsundo_insert(Relation rel, ZSUndoRec *rec)
 		ZSUndoPageOpaque *newopaque;
 
 		/* new page */
-		newbuf = zs_getnewbuf(rel);
+		newbuf = zspage_getnewbuf(rel, metabuf);
 		newblk = BufferGetBlockNumber(newbuf);
 		newpage = BufferGetPage(newbuf);
 		PageInit(newpage, BLCKSZ, sizeof(ZSUndoPageOpaque));
@@ -314,12 +314,13 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 		ZSUndoRecPtr reaped_upto;
 		BlockNumber oldest_undopage;
 		int			j;
+		List	   *unused_pages = NIL;
 
 		trimstats->dead_tuples_overflowed = false;
 		trimstats->num_dead_tuples = 0;
 		trimstats->deleted_undo_pages = 0;
 
-		reaped_upto = zsundo_scan(rel, OldestXmin, trimstats, &oldest_undopage);
+		reaped_upto = zsundo_scan(rel, OldestXmin, trimstats, &oldest_undopage, &unused_pages);
 
 		if (trimstats->num_dead_tuples > 0)
 		{
@@ -377,7 +378,7 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 		 * interesting to anyone. Advance the UNDO tail, so that the UNDO pages
 		 * can be recycled.
 		 */
-		zsundo_update_oldest_ptr(rel, reaped_upto, oldest_undopage);
+		zsundo_update_oldest_ptr(rel, reaped_upto, oldest_undopage, unused_pages);
 
 		ereport(vacrelstats->elevel,
 				(errmsg("\"%s\": removed %d row versions and %d undo pages",
@@ -554,7 +555,7 @@ lazy_cleanup_index(Relation indrel,
  */
 static ZSUndoRecPtr
 zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
-			BlockNumber *oldest_undopage)
+			BlockNumber *oldest_undopage, List **unused_pages)
 {
 	/* Scan the undo log from oldest to newest */
 	Buffer		metabuf;
@@ -691,6 +692,7 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 		{
 			/* We processed all records on the page. Step to the next one, if any. */
 			Assert(ptr == endptr);
+			*unused_pages = lappend_int(*unused_pages, lastblk);
 			lastblk = opaque->next;
 			UnlockReleaseBuffer(buf);
 			if (lastblk != InvalidBlockNumber)
@@ -716,12 +718,13 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 
 /* Update metapage with the oldest value */
 static void
-zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumber oldest_undopage)
+zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumber oldest_undopage, List *unused_pages)
 {
 	/* Scan the undo log from oldest to newest */
 	Buffer		metabuf;
 	Page		metapage;
 	ZSMetaPageOpaque *metaopaque;
+	ListCell   *lc;
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	metapage = BufferGetPage(metabuf);
@@ -743,6 +746,31 @@ zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumb
 	UnlockReleaseBuffer(metabuf);
 
 	/* TODO: we leak all the removed undo pages */
+	foreach(lc, unused_pages)
+	{
+		BlockNumber blk = (BlockNumber) lfirst_int(lc);
+		Buffer		buf;
+		Page		page;
+		ZSUndoPageOpaque *opaque;
+
+		/* check that the page still looks like what we'd expect. */
+		buf = ReadBuffer(rel, blk);
+		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+		page = BufferGetPage(buf);
+		opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(page);
+		if (opaque->zs_page_id != ZS_UNDO_PAGE_ID)
+		{
+			UnlockReleaseBuffer(buf);
+			continue;
+		}
+
+		/* FIXME: Also check here that the max UndoRecPtr on the page is less
+		 * than the new 'oldest_undorecptr'
+		 */
+
+		zspage_delete_page(rel, buf);
+		UnlockReleaseBuffer(buf);
+	}
 }
 
 /*
@@ -779,6 +807,7 @@ zsundo_get_oldest_undo_ptr(Relation rel)
 	ZSUndoRecPtr result;
 	ZSUndoTrimStats trimstats;
 	BlockNumber oldest_undopage;
+	List	   *unused_pages = NIL;
 
 	if (RelationGetNumberOfBlocks(rel) == 0)
 	{
@@ -803,10 +832,10 @@ zsundo_get_oldest_undo_ptr(Relation rel)
 	trimstats.dead_tuples = NULL;
 	trimstats.dead_tuples_overflowed = false;
 	trimstats.deleted_undo_pages = 0;
-	result = zsundo_scan(rel, RecentGlobalXmin, &trimstats, &oldest_undopage);
+	result = zsundo_scan(rel, RecentGlobalXmin, &trimstats, &oldest_undopage, &unused_pages);
 
 	if (trimstats.can_advance_oldestundorecptr)
-		zsundo_update_oldest_ptr(rel, result, oldest_undopage);
+		zsundo_update_oldest_ptr(rel, result, oldest_undopage, unused_pages);
 
 	return result;
 }

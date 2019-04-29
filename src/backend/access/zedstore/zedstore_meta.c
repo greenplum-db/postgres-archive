@@ -24,50 +24,6 @@
 #include "storage/lmgr.h"
 #include "utils/rel.h"
 
-/*
- * Allocate a new page.
- *
- * The page is exclusive-locked, but not initialized.
- *
- * Currently, this just extends the relation, but we should have a free space
- * map of some kind.
- */
-Buffer
-zs_getnewbuf(Relation rel)
-{
-	Buffer		buf;
-	bool		needLock;
-
-	/*
-	 * Extend the relation by one page.
-	 *
-	 * We have to use a lock to ensure no one else is extending the rel at
-	 * the same time, else we will both try to initialize the same new
-	 * page.  We can skip locking for new or temp relations, however,
-	 * since no one else could be accessing them.
-	 */
-	needLock = !RELATION_IS_LOCAL(rel);
-
-	if (needLock)
-		LockRelationForExtension(rel, ExclusiveLock);
-
-	buf = ReadBuffer(rel, P_NEW);
-
-	/* Acquire buffer lock on new page */
-	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-
-	/*
-	 * Release the file-extension lock; it's now OK for someone else to
-	 * extend the relation some more.  Note that we cannot release this
-	 * lock before we have buffer lock on the new page, or we risk a race
-	 * condition against btvacuumscan --- see comments therein.
-	 */
-	if (needLock)
-		UnlockRelationForExtension(rel, ExclusiveLock);
-
-	return buf;
-}
-
 static void
 zsmeta_add_root_for_attributes(Relation rel, Page page, bool init)
 {
@@ -143,6 +99,7 @@ zsmeta_initmetapage(Relation rel)
 	opaque->zs_undo_tail = InvalidBlockNumber;
 	opaque->zs_undo_oldestptr.counter = 1;
 
+	opaque->zs_fpm_root = InvalidBlockNumber;
 
 	/* Ok, write it out to disk */
 	buf = ReadBuffer(rel, P_NEW);
@@ -225,7 +182,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 		ZSBtreePageOpaque *opaque;
 
 		/* TODO: release lock on metapage while we do I/O */
-		rootbuf = zs_getnewbuf(rel);
+		rootbuf = zspage_getnewbuf(rel, metabuf);
 		rootblk = BufferGetBlockNumber(rootbuf);
 
 		metapg->tree_root_dir[attno].root = rootblk;
