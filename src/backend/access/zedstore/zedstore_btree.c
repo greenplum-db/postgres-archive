@@ -781,10 +781,9 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 }
 
 /*
- * If 'newtid' is valid, then that TID is used for the new item. It better not
- * be in use already. If it's invalid, then a new TID is allocated, as we see
- * best. (When inserting the first column of the row, pass invalid, and for
- * other columns, pass the TID you got for the first column.)
+ * A new TID is allocated, as we see best and returned to the caller. This
+ * function is only called for META attribute btree. Data columns will use the
+ * returned tid to insert new items.
  */
 TM_Result
 zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
@@ -801,6 +800,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	 * start doing the equivalent of HOT updates, where the TID doesn't change.
 	 */
 	Assert(attno == ZS_META_ATTRIBUTE_NUM);
+	Assert(*newtid_p == InvalidZSTid);
 
 	/*
 	 * Find and lock the old item.

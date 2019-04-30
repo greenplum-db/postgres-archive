@@ -441,23 +441,16 @@ retry:
 							  &newdatum, &newisnull, &newtid, 1,
 							  xid, cid, NULL);
 
-			if (result != TM_Ok)
-				break;
-
 			if (toastptr != (Datum) 0)
 				zedstore_toast_finish(relation, attno, toastptr, newtid);
 		}
+
+		slot->tts_tid = ItemPointerFromZSTid(newtid);
+
+		pgstat_count_heap_update(relation, false);
 	}
-
-	if (result != TM_Ok)
+	else
 	{
-		if (attno != 1)
-		{
-			/* failed to delete this attribute, but we might already have
-			 * deleted other attributes. */
-			elog(ERROR, "could not delete all columns of row");
-		}
-
 		if (result == TM_Invisible)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -474,15 +467,6 @@ retry:
 			}
 		}
 	}
-	else
-	{
-		slot->tts_tid = ItemPointerFromZSTid(newtid);
-
-		pgstat_count_heap_update(relation, false);
-	}
-
-	/* TODO: could we do HOT udates? */
-	/* TODO: What should we set lockmode to? */
 
 	return result;
 }
