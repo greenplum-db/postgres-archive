@@ -469,41 +469,106 @@ extern TM_Result zsbt_update(Relation rel, AttrNumber attno, zstid otid,
 							 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 							 bool wait, TM_FailureData *hufd, zstid *newtid_p);
 extern void zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr);
+extern void zsbt_remove_item(Relation rel, AttrNumber attno, zstid tid);
 extern TM_Result zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 			   TransactionId xid, CommandId cid, Snapshot snapshot,
 			   LockTupleMode lockmode, LockWaitPolicy wait_policy,
 			   TM_FailureData *hufd);
 extern void zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undoptr);
 extern void zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan);
-extern bool zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid);
+extern bool zsbt_scan_next(ZSBtreeScan *scan);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
 
 /*
- * A fast-path version of zsbt_scan_next(), where the common case where we just
- * return the next element from an array item is inlined.
+ * Return the next visible TID in a scan.
  *
- * Keep this fast-path in sync with zsbt_scan_next().
+ * This should be used only on the "meta" attribute. To get the the actualy
+ * values of the row, use zsbt_scan_next_fetch()
+ */
+static inline zstid
+zsbt_scan_next_tid(ZSBtreeScan *scan)
+{
+	if (!scan->active)
+		return InvalidZSTid;
+
+	do
+	{
+		/* If we already have a value in scan->array_*, return that. */
+		if (scan->array_elements_left > 0)
+		{
+			zstid		tid;
+
+			tid = scan->nexttid++;
+			scan->array_elements_left--;
+
+			return tid;
+		}
+	} while(zsbt_scan_next(scan));
+
+	return InvalidZSTid;
+
+}
+
+/*
+ * Return the value of row identified with 'tid' in a scan.
+ *
+ * 'tid' must be greater than any previously returned item.
+ *
+ * Returns true if a matching item is found, false otherwise. After
+ * a false return, it's OK to call this again with another greater TID.
  */
 static inline bool
-zsbt_scan_next_fast(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
+zsbt_scan_next_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 {
 	if (!scan->active)
 		return false;
 
-	if (scan->array_elements_left > 0)
+	/* skip to the given tid. */
+	if (tid > scan->nexttid)
 	{
-		*isnull = scan->array_isnull;
-		*datum = *(scan->array_next_datum++);
-		*tid = (scan->nexttid++);
-		scan->array_elements_left--;
-		return true;
+		if (scan->array_elements_left > 0)
+		{
+			int64		skip = tid - scan->nexttid - 1;
+
+			if (skip < scan->array_elements_left)
+			{
+				scan->array_next_datum += skip;
+				scan->array_elements_left -= skip;
+			}
+			else
+			{
+				scan->array_elements_left = 0;
+			}
+		}
+		scan->nexttid = tid;
 	}
 
-	/* slow path */
-	return zsbt_scan_next(scan, datum, isnull, tid);
-}
+	/*
+	 * Fetch the next item from the scan. The item we're looking for might
+	 * already be in scan->array_*.
+	 */
+	do
+	{
+		if (tid < scan->nexttid)
+		{
+			/* The next item from this scan is beyond the TID we're looking for. */
+			return false;
+		}
 
+		if (scan->array_elements_left > 0)
+		{
+			*isnull = scan->array_isnull;
+			*datum = *(scan->array_next_datum++);
+			scan->nexttid++;
+			scan->array_elements_left--;
+			return true;
+		}
+		/* Advance the scan, and check again. */
+	} while (zsbt_scan_next(scan));
+
+	return false;
+}
 
 /* prototypes for functions in zedstore_meta.c */
 extern void zsmeta_initmetapage(Relation rel);

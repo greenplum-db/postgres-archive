@@ -115,8 +115,8 @@ zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, zstid endtid, Sn
 	scan->nexttid = starttid;
 	scan->endtid = endtid;
 	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
-	scan->array_datums = NULL;
-	scan->array_datums_allocated_size = 0;
+	scan->array_datums = palloc(sizeof(Datum));
+	scan->array_datums_allocated_size = 1;
 	scan->array_elements_left = 0;
 
 	if (rootblk == InvalidBlockNumber)
@@ -285,11 +285,17 @@ zsbt_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 }
 
 /*
- * Return true if there was another tuple. The datum is returned in *datum,
- * and its TID in *tid. For a pass-by-ref datum, it's a palloc'd copy.
+ * Advance scan to next item.
+ *
+ * Return true if there was another item. The Datum/isnull of the item is
+ * placed in scan->array_* fields. For a pass-by-ref datum, it's a palloc'd
+ * copy that's valid until the next call.
+ *
+ * This is normally not used directly. See zsbt_scan_next_tid() and
+ * zsbt_scan_next_fetch() wrappers, instead.
  */
 bool
-zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
+zsbt_scan_next(ZSBtreeScan *scan)
 {
 	Buffer		buf;
 	bool		buf_is_locked = false;
@@ -311,16 +317,9 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 	{
 		/*
 		 * If we are still processing an array item, return next element from it.
-		 *
-		 * NB: Keep this in sync with the fast path in zsbt_scan_next_fast()!
 		 */
 		if (scan->array_elements_left > 0)
 		{
-			*isnull = scan->array_isnull;
-			*datum = *(scan->array_next_datum++);
-			*tid = (scan->nexttid++);
-			scan->array_elements_left--;
-			Assert(*tid < scan->endtid);
 			return true;
 		}
 
@@ -372,17 +371,18 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 				/* single item */
 				ZSSingleBtreeItem *sitem = (ZSSingleBtreeItem *) uitem;
 
-				*tid = sitem->t_tid;
+				scan->nexttid = sitem->t_tid;
+				scan->array_elements_left = 1;
+				scan->array_next_datum = &scan->array_datums[0];
 				if (sitem->t_flags & ZSBT_NULL)
-					*isnull = true;
+					scan->array_isnull = true;
 				else
 				{
-					*isnull = false;
-					*datum = fetch_att(sitem->t_payload, scan->attbyval, scan->attlen);
+					scan->array_isnull = false;
+					scan->array_datums[0] = fetch_att(sitem->t_payload, scan->attbyval, scan->attlen);
 					/* no need to copy, because the uncompression buffer is a copy already */
 					/* FIXME: do we need to copy anyway, to make sure it's aligned correctly? */
 				}
-				scan->nexttid = sitem->t_tid + 1;
 
 				if (buf_is_locked)
 					LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
@@ -465,16 +465,17 @@ zsbt_scan_next(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid *tid)
 					/* single item */
 					ZSSingleBtreeItem *sitem = (ZSSingleBtreeItem *) item;
 
-					*tid = item->t_tid;
+					scan->nexttid = sitem->t_tid;
+					scan->array_elements_left = 1;
+					scan->array_next_datum = &scan->array_datums[0];
 					if (item->t_flags & ZSBT_NULL)
-						*isnull = true;
+						scan->array_isnull = true;
 					else
 					{
-						*isnull = false;
-						*datum = fetch_att(sitem->t_payload, scan->attbyval, scan->attlen);
-						*datum = zs_datumCopy(*datum, scan->attbyval, scan->attlen);
+						scan->array_isnull = false;
+						scan->array_datums[0] = fetch_att(sitem->t_payload, scan->attbyval, scan->attlen);
+						scan->array_datums[0] = zs_datumCopy(scan->array_datums[0], scan->attbyval, scan->attlen);
 					}
-					scan->nexttid = sitem->t_tid + 1;
 					LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
 					buf_is_locked = false;
 					return true;
@@ -563,7 +564,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 void
 zsbt_multi_insert(Relation rel, AttrNumber attno,
 				  Datum *datums, bool *isnulls, zstid *tids, int nitems,
-				  TransactionId xid, CommandId cid, ZSUndoRecPtr *undorecptr)
+				  TransactionId xid, CommandId cid, ZSUndoRecPtr *undorecptr_p)
 {
 	Form_pg_attribute attr;
 	int16		attlen;
@@ -579,6 +580,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 	ZSUndoRec_Insert undorec;
 	int			i;
 	List	   *newitems;
+	ZSUndoRecPtr undorecptr;
 
 	rootblk = zsmeta_get_root_for_attribute(rel, attno, true, &attlen, &attbyval);
 
@@ -640,16 +642,23 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 	}
 
 	/* Form an undo record */
-	if (!IsZSUndoRecPtrValid(undorecptr))
+	if (undorecptr_p)
 	{
+		Assert(attno == ZS_META_ATTRIBUTE_NUM);
+
 		undorec.rec.size = sizeof(ZSUndoRec_Insert);
 		undorec.rec.type = ZSUNDO_TYPE_INSERT;
-		undorec.rec.attno = attno;
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = tids[0];
 		undorec.endtid = tids[nitems - 1];
-		*undorecptr = zsundo_insert(rel, &undorec.rec);
+
+		undorecptr = zsundo_insert(rel, &undorec.rec);
+		*undorecptr_p = undorecptr;
+	}
+	else
+	{
+		ZSUndoRecPtrInitialize(&undorecptr);
 	}
 
 	/* Create items to insert */
@@ -682,7 +691,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 			}
 		}
 
-		newitem = zsbt_create_item(attr, tids[i], *undorecptr,
+		newitem = zsbt_create_item(attr, tids[i], undorecptr,
 								   j - i, &datums[i], NULL, datasz, isnulls[i]);
 
 		newitems = lappend(newitems, newitem);
@@ -711,6 +720,12 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	ZSSingleBtreeItem *deleteditem;
 	Buffer		buf;
 
+	/*
+	 * This is currently only used on the meta-attribute. Other attributes don't
+	 * carry visibility information.
+	 */
+	Assert(attno == ZS_META_ATTRIBUTE_NUM);
+
 	/* Find the item to delete. (It could be compressed) */
 	item = zsbt_fetch(rel, attno, snapshot, &recent_oldest_undo, tid, &buf);
 	if (item == NULL)
@@ -737,7 +752,6 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 
 		undorec.rec.size = sizeof(ZSUndoRec_Delete);
 		undorec.rec.type = ZSUNDO_TYPE_DELETE;
-		undorec.rec.attno = attno;
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = tid;
@@ -779,6 +793,14 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 			zstid *newtid_p)
 {
 	TM_Result	result;
+
+	/*
+	 * This is currently only used on the meta-attribute. The other attributes
+	 * don't need to carry visibility information, so the caller just inserts
+	 * the new values with (multi_)insert() instead. This will change once we
+	 * start doing the equivalent of HOT updates, where the TID doesn't change.
+	 */
+	Assert(attno == ZS_META_ATTRIBUTE_NUM);
 
 	/*
 	 * Find and lock the old item.
@@ -864,7 +886,7 @@ zsbt_update_insert_new(Relation rel, AttrNumber attno,
 
 	ZSUndoRecPtrInitialize(&undorecptr);
 	zsbt_multi_insert(rel, attno, &newdatum, &newisnull, newtid, 1,
-					  xid, cid, &undorecptr);
+					  xid, cid, attno == ZS_META_ATTRIBUTE_NUM ? &undorecptr : NULL);
 }
 
 /*
@@ -915,7 +937,6 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 
 		undorec.rec.size = sizeof(ZSUndoRec_Update);
 		undorec.rec.type = ZSUNDO_TYPE_UPDATE;
-		undorec.rec.attno = attno;
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = otid;
@@ -956,6 +977,13 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 	ZSUndoRecPtr undorecptr;
 	ZSSingleBtreeItem *newitem;
 
+	/*
+	 * This is currently only used on the meta-attribute. The other attributes
+	 * currently don't carry visibility information. This might need to change,
+	 * if we start supporting locking individual (key) columns.
+	 */
+	Assert(attno == ZS_META_ATTRIBUTE_NUM);
+
 	/* Find the item to delete. (It could be compressed) */
 	item = zsbt_fetch(rel, attno, snapshot, &recent_oldest_undo, tid, &buf);
 	if (item == NULL)
@@ -988,7 +1016,6 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 
 		undorec.rec.size = sizeof(ZSUndoRec_TupleLock);
 		undorec.rec.type = ZSUNDO_TYPE_TUPLE_LOCK;
-		undorec.rec.attno = attno;
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = tid;
@@ -1028,6 +1055,12 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 	ZSSingleBtreeItem *item;
 	ZSSingleBtreeItem deaditem;
 
+	/*
+	 * This is currently only used on the meta-attribute. Other attributes can
+	 * be deleted immediately.
+	 */
+	Assert(attno == ZS_META_ATTRIBUTE_NUM);
+
 	/* Find the item to delete. (It could be compressed) */
 	item = zsbt_fetch(rel, attno, NULL, NULL, tid, &buf);
 	if (item == NULL)
@@ -1056,6 +1089,28 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 	ReleaseBuffer(buf); 	/* zsbt_replace_item released */
 }
 
+void
+zsbt_remove_item(Relation rel, AttrNumber attno, zstid tid)
+{
+	Buffer		buf;
+	ZSSingleBtreeItem *item;
+
+	/* Find the item to delete. (It could be compressed) */
+	item = zsbt_fetch(rel, attno, NULL, NULL, tid, &buf);
+	if (item == NULL)
+	{
+		elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
+			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
+		return;
+	}
+
+	/* remove it */
+	zsbt_replace_item(rel, attno, buf,
+					  tid, NULL,
+					  NIL);
+	ReleaseBuffer(buf); 	/* zsbt_replace_item released */
+}
+
 /*
  * Clear an item's UNDO pointer.
  *
@@ -1067,6 +1122,12 @@ zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr 
 	Buffer		buf;
 	ZSSingleBtreeItem *item;
 	ZSSingleBtreeItem *copy;
+
+	/*
+	 * This is currently only used on the meta-attribute. Other attributes don't
+	 * carry visibility information.
+	 */
+	Assert(attno == ZS_META_ATTRIBUTE_NUM);
 
 	/* Find the item to delete. (It could be compressed) */
 	item = zsbt_fetch(rel, attno, NULL, NULL, tid, &buf);

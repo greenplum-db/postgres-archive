@@ -43,7 +43,6 @@ typedef struct
 {
 	int16		size;			/* size of this record, including header */
 	uint8		type;			/* ZSUNDO_TYPE_* */
-	AttrNumber	attno;
 	ZSUndoRecPtr undorecptr;
 	TransactionId xid;
 	CommandId	cid;

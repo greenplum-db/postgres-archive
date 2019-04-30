@@ -188,7 +188,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 		zsbt_multi_insert(relation, attno,
 						  &datum, &isnull, &tid, 1,
-						  xid, cid, &undorecptr);
+						  xid, cid, NULL);
 
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, tid);
@@ -275,7 +275,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		zsbt_multi_insert(relation, attno,
 						  datums, isnulls, tids, ntuples,
-						  xid, cid, &undorecptr);
+						  xid, cid, NULL);
 
 		for (i = 0; i < ntupletoasted; i++)
 		{
@@ -407,6 +407,12 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	d = slot->tts_values;
 	isnulls = slot->tts_isnull;
 
+	/*
+	 * The meta-attribute holds the visibility information, including the "t_ctid"
+	 * pointer to the updated version. All the real attributes are just inserted,
+	 * as if for a new row.
+	 */
+retry:
 	newtid = InvalidZSTid;
 	result = zsbt_update(relation, ZS_META_ATTRIBUTE_NUM, otid, newdatum, true,
 						 xid, cid, snapshot, crosscheck,
@@ -414,8 +420,6 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 
 	if (result == TM_Ok)
 	{
-retry:
-		newtid = InvalidZSTid;
 		for (attno = 1; attno <= relation->rd_att->natts; attno++)
 		{
 			Form_pg_attribute attr = TupleDescAttr(relation->rd_att, attno - 1);
@@ -433,9 +437,9 @@ retry:
 				toastptr = newdatum = zedstore_toast_datum(relation, attno, newdatum);
 			}
 
-			result = zsbt_update(relation, attno, otid, newdatum, newisnull,
-								 xid, cid, snapshot, crosscheck,
-								 wait, hufd, &newtid);
+			zsbt_multi_insert(relation, attno,
+							  &newdatum, &newisnull, &newtid, 1,
+							  xid, cid, NULL);
 
 			if (result != TM_Ok)
 				break;
@@ -703,6 +707,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	while (scan->state != ZSSCAN_STATE_FINISHED)
 	{
 		zstid		this_tid;
+		Datum		datum;
+		bool        isnull;
 
 		if (scan->state == ZSSCAN_STATE_UNSTARTED ||
 			scan->state == ZSSCAN_STATE_FINISHED_RANGE)
@@ -746,81 +752,56 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			scan->state = ZSSCAN_STATE_SCANNING;
 		}
 
-		/* We now have a range to scan */
+		/* We now have a range to scan. Find the next visible TID. */
 		Assert(scan->state == ZSSCAN_STATE_SCANNING);
-		this_tid = InvalidZSTid;
-		for (int i = 0; i < scan->num_proj_atts; i++)
-		{
-			ZSBtreeScan	*btscan = &scan->btree_scans[i];
-			int			natt;
-			Datum		datum;
-			bool        isnull;
-			zstid		tid;
 
-			if (!zsbt_scan_next_fast(btscan, &datum, &isnull, &tid))
+		this_tid = zsbt_scan_next_tid(&scan->btree_scans[0]);
+		if (this_tid == InvalidZSTid)
+		{
+			scan->state = ZSSCAN_STATE_FINISHED_RANGE;
+		}
+		else
+		{
+			Assert (this_tid < scan->cur_range_end);
+
+			/* Fetch the datums of each attribute for this row */
+			for (int i = 1; i < scan->num_proj_atts; i++)
 			{
-				if (btscan->attno != ZS_META_ATTRIBUTE_NUM)
+				ZSBtreeScan	*btscan = &scan->btree_scans[i];
+				int			natt;
+
+				if (!zsbt_scan_next_fetch(btscan, &datum, &isnull, this_tid))
 				{
 					if (btscan->atthasmissing)
 						zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
 					else
 						isnull = true;
-					Assert(this_tid != InvalidZSTid);
-					tid = this_tid;
 				}
-				else
+
+				/*
+				 * flatten any ZS-TOASTed values, because the rest of the system
+				 * doesn't know how to deal with them.
+				 */
+				natt = scan->proj_atts[i];
+
+				if (!isnull && btscan->attlen == -1 &&
+					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 				{
-					scan->state = ZSSCAN_STATE_FINISHED_RANGE;
-					break;
+					datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, this_tid, datum);
 				}
-			}
-			Assert (tid < scan->cur_range_end);
 
-			if (i == ZS_META_ATTRIBUTE_NUM)
-				this_tid = tid;
-			else if (this_tid != tid)
-			{
-				if (btscan->atthasmissing)
+				/* Check that the values coming out of the b-tree are aligned properly */
+				if (!isnull && btscan->attlen == -1)
 				{
-					Assert(btscan->attno != ZS_META_ATTRIBUTE_NUM);
-					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
-					tid = this_tid;
+					Assert (VARATT_IS_1B(datum) || INTALIGN(datum) == datum);
 				}
-				else
-					isnull = true;
-			}
 
-			/*
-			 * set nexttid for next column based on current column TID. This
-			 * helps to skip scanning all other columns for rows which are not
-			 * visible based on meta column.
-			 */
-			if (i+1 < scan->num_proj_atts)
-				scan->btree_scans[i+1].nexttid = tid;
-
-			/*
-			 * flatten any ZS-TOASTed values, because the rest of the system
-			 * doesn't know how to deal with them.
-			 */
-			natt = scan->proj_atts[i];
-
-			if (!isnull && btscan->attlen == -1 &&
-				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
-			{
-				datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, tid, datum);
-			}
-
-			/* Check that the values coming out of the b-tree are aligned properly */
-			if (!isnull && btscan->attlen == -1)
-			{
-				Assert (VARATT_IS_1B(datum) || INTALIGN(datum) == datum);
-			}
-
-			if (natt != ZS_META_ATTRIBUTE_NUM)
-			{
-				Assert(natt > 0);
-				slot_values[natt - 1] = datum;
-				slot_isnull[natt - 1] = isnull;
+				if (natt != ZS_META_ATTRIBUTE_NUM)
+				{
+					Assert(natt > 0);
+					slot_values[natt - 1] = datum;
+					slot_isnull[natt - 1] = isnull;
+				}
 			}
 		}
 
@@ -855,17 +836,13 @@ zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	 * good idea..
 	 */
 	zstid		tid = ZSTidFromItemPointer(slot->tts_tid);
-	zstid		ftid;
 	ZSBtreeScan btree_scan;
 	bool		found;
-	Datum		datum;
-	bool		isnull;
 
 	/* Use the meta-data tree for the visibility information. */
 	zsbt_begin_scan(rel, ZS_META_ATTRIBUTE_NUM, tid, tid + 1, snapshot, &btree_scan);
 
-	found = zsbt_scan_next(&btree_scan, &datum, &isnull, &ftid);
-	Assert (!found || ftid == tid);
+	found = zsbt_scan_next_tid(&btree_scan) != InvalidZSTid;
 
 	zsbt_end_scan(&btree_scan);
 
@@ -995,48 +972,44 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 
 	fetch->num_proj_atts = num_proj_atts;
 
-	for (int i = 0; i < num_proj_atts && found; i++)
+	zsbt_begin_scan(rel, 0, tid, tid + 1, snapshot, &fetch->btree_scans[0]);
+	found = zsbt_scan_next_tid(&fetch->btree_scans[0]) != InvalidZSTid;
+	if (found)
 	{
-		int         natt = proj_atts ? proj_atts[i] : i;
-		ZSBtreeScan *btscan = &fetch->btree_scans[i];
-
-		Datum		datum;
-		bool        isnull;
-		zstid		this_tid;
-
-		zsbt_begin_scan(rel, natt, tid, tid + 1, snapshot, btscan);
-
-		if (zsbt_scan_next(btscan, &datum, &isnull, &this_tid))
+		for (int i = 1; i < num_proj_atts; i++)
 		{
-			Assert(this_tid == tid);
+			int         natt = proj_atts ? proj_atts[i] : i;
+			ZSBtreeScan *btscan = &fetch->btree_scans[i];
+			Datum		datum;
+			bool        isnull;
 
-			/*
-			 * flatten any ZS-TOASTed values, because the rest of the system
-			 * doesn't know how to deal with them.
-			 */
-			if (!isnull && btscan->attlen == -1 &&
-				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
-			{
-				datum = zedstore_toast_flatten(rel, natt, tid, datum);
-			}
+			zsbt_begin_scan(rel, natt, tid, tid + 1, snapshot, btscan);
 
-			if (natt != ZS_META_ATTRIBUTE_NUM)
+			if (zsbt_scan_next_fetch(btscan, &datum, &isnull, tid))
 			{
-				Assert(natt > 0);
-				slot->tts_values[natt - 1] = datum;
-				slot->tts_isnull[natt - 1] = isnull;
+				/*
+				 * flatten any ZS-TOASTed values, because the rest of the system
+				 * doesn't know how to deal with them.
+				 */
+				if (!isnull && btscan->attlen == -1 &&
+					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+				{
+					datum = zedstore_toast_flatten(rel, natt, tid, datum);
+				}
 			}
-		}
-		else
-		{
-			if (natt != ZS_META_ATTRIBUTE_NUM)
+			else
 			{
 				if (btscan->atthasmissing)
 					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
 				else
+				{
 					isnull = true;
+					datum = (Datum) 0;
+				}
 			}
-			found = false;
+
+			slot->tts_values[natt - 1] = datum;
+			slot->tts_isnull[natt - 1] = isnull;
 		}
 	}
 
@@ -1578,8 +1551,6 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 	Relation	rel = scan->rs_scan.rs_rd;
 	int			ntuples;
 	ZSBtreeScan	btree_scan;
-	Datum		datum;
-	bool        isnull;
 	zstid		tid;
 
 	/* TODO: for now, assume that we need all columns */
@@ -1596,10 +1567,9 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 	 * so that it could skip over to it more efficiently.
 	 */
 	ntuples = 0;
-	while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+	while ((tid = zsbt_scan_next_tid(&btree_scan)) != InvalidZSTid)
 	{
 		Assert(ZSTidGetBlockNumber(tid) == blockno);
-		Assert(isnull);
 		scan->bmscan_tids[ntuples] = tid;
 		ntuples++;
 	}
@@ -1613,7 +1583,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 			ZSBtreeScan	btree_scan;
 			Datum		datum;
 			bool        isnull;
-			zstid		tid;
+			zstid		tid = scan->bmscan_tids[i];
 			Datum	   *datums = scan->bmscan_datums[i];
 			bool	   *isnulls = scan->bmscan_isnulls[i];
 
@@ -1624,22 +1594,9 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 							&btree_scan);
 			for (int n = 0; n < ntuples; n++)
 			{
-				/*
-				 * set nexttid for next column based on current column TID. This
-				 * helps to skip scanning all other columns for rows which are not
-				 * visible based on meta column.
-				 */
-				btree_scan.nexttid = scan->bmscan_tids[n];
-				if (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+				if (zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, tid))
 				{
 					Assert(ZSTidGetBlockNumber(tid) == blockno);
-					if (tid != scan->bmscan_tids[n])
-					{
-						if (btree_scan.atthasmissing)
-							zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
-						else
-							isnull = true;
-					}
 				}
 				else
 				{
@@ -1838,8 +1795,6 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 	BlockNumber tid_blkno = tbmres->blockno;
 	int			ntuples;
 	ZSBtreeScan	btree_scan;
-	Datum		datum;
-	bool        isnull;
 	zstid		tid;
 	int			noff = 0;
 
@@ -1860,7 +1815,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 					ZSTidFromBlkOff(tid_blkno + 1, 1),
 					scan->rs_scan.rs_snapshot,
 					&btree_scan);
-	while (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
+	while ((tid = zsbt_scan_next_tid(&btree_scan)) != InvalidZSTid)
 	{
 		Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
 
@@ -1876,7 +1831,8 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 				continue;
 		}
 
-		Assert(isnull);
+		Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
+
 		scan->bmscan_tids[ntuples] = tid;
 		ntuples++;
 	}
@@ -1890,7 +1846,6 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 			ZSBtreeScan	btree_scan;
 			Datum		datum;
 			bool        isnull;
-			zstid		tid;
 			Datum	   *datums = scan->bmscan_datums[i];
 			bool	   *isnulls = scan->bmscan_isnulls[i];
 
@@ -1901,24 +1856,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 							&btree_scan);
 			for (int n = 0; n < ntuples; n++)
 			{
-				/*
-				 * set nexttid for next column based on current column TID. This
-				 * helps to skip scanning all other columns for rows which are not
-				 * visible based on meta column.
-				 */
-				btree_scan.nexttid = scan->bmscan_tids[n];
-				if (zsbt_scan_next(&btree_scan, &datum, &isnull, &tid))
-				{
-					Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
-					if (tid != scan->bmscan_tids[n])
-					{
-						if (btree_scan.atthasmissing)
-							zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
-						else
-							isnull = true;
-					}
-				}
-				else
+				if (!zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, scan->bmscan_tids[n]))
 				{
 					if (btree_scan.atthasmissing)
 						zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);

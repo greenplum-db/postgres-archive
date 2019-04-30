@@ -355,19 +355,20 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 			 * 4. We start VACUUM again. We will now try to remove the item again, but
 			 *    we will remove the new item with the same TID instead.
 			 *
-			 * There would be other ways to deal with it. One easy optimization would be
-			 * to leave the DEAD item in only one of the attributes, and remove all others
-			 * completely. Or in step #4, we could refrain from removing items, whose
-			 * UNDO pointers are newer than expected. But that's tricky, because we scan
-			 * the indexes first, and we must refrain from removing index entries for
-			 * new items, too.
+			 * There would be other ways to deal with it. For example in step #4, we could
+			 * refrain from removing items, whose UNDO pointers are newer than expected.
+			 * But that's tricky, because we scan the indexes first, and we must refrain
+			 * from removing index entries for new items, too.
 			 */
-			for (int attno = 0; attno <= RelationGetNumberOfAttributes(rel); attno++)
+			for (int i = 0; i < trimstats->num_dead_tuples; i++)
+				zsbt_mark_item_dead(rel, ZS_META_ATTRIBUTE_NUM,
+									ZSTidFromItemPointer(trimstats->dead_tuples[i]),
+									reaped_upto);
+
+			for (int attno = 1; attno <= RelationGetNumberOfAttributes(rel); attno++)
 			{
 				for (int i = 0; i < trimstats->num_dead_tuples; i++)
-					zsbt_mark_item_dead(rel, attno,
-										ZSTidFromItemPointer(trimstats->dead_tuples[i]),
-										reaped_upto);
+					zsbt_remove_item(rel, attno, ZSTidFromItemPointer(trimstats->dead_tuples[i]));
 			}
 		}
 
@@ -664,7 +665,7 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 						 * becomes visible to everyone when the UNDO record is trimmed
 						 * away
 						 */
-						zsbt_undo_item_deletion(rel, undorec->attno, undorec->tid, undorec->undorecptr);
+						zsbt_undo_item_deletion(rel, ZS_META_ATTRIBUTE_NUM, undorec->tid, undorec->undorecptr);
 					}
 					break;
 				case ZSUNDO_TYPE_UPDATE:
@@ -695,6 +696,17 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 			if (lastblk != InvalidBlockNumber)
 				trimstats->deleted_undo_pages++;
 		}
+	}
+
+	if (can_advance_oldestundorecptr && lastblk == InvalidBlockNumber)
+	{
+		/*
+		 * We stopped after the last valid record. Advance by one, to the next
+		 * record which hasn't been created yet, and which  is still needed
+		 */
+		oldest_undorecptr.counter++;
+		oldest_undorecptr.blkno = InvalidBlockNumber;
+		oldest_undorecptr.offset = 0;
 	}
 
 	trimstats->can_advance_oldestundorecptr = can_advance_oldestundorecptr;
