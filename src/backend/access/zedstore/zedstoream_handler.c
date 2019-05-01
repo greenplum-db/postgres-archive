@@ -1567,7 +1567,6 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 			ZSBtreeScan	btree_scan;
 			Datum		datum;
 			bool        isnull;
-			zstid		tid = scan->bmscan_tids[i];
 			Datum	   *datums = scan->bmscan_datums[i];
 			bool	   *isnulls = scan->bmscan_isnulls[i];
 
@@ -1578,6 +1577,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 							&btree_scan);
 			for (int n = 0; n < ntuples; n++)
 			{
+				zstid       tid = scan->bmscan_tids[n];
 				if (zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, tid))
 				{
 					Assert(ZSTidGetBlockNumber(tid) == blockno);
