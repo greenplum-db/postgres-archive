@@ -148,3 +148,22 @@ insert into t_zaddcol values (2);
 select * from t_zaddcol;
 insert into t_zaddcol (a, c, d) values (3,5, 'test_insert');
 select b,c,d from t_zaddcol;
+
+--
+-- Test TABLESAMPLE
+--
+-- regular test tablesample.sql doesn't directly work for zedstore as
+-- its using fillfactor to create specific block layout for
+-- heap. Hence, output differs between heap and zedstore table while
+-- sampling. We need to use many tuples here to have multiple logical
+-- blocks as don't have way to force TIDs spread / jump for zedstore.
+--
+CREATE TABLE t_ztablesample (id int, name text) using zedstore;
+INSERT INTO t_ztablesample
+       SELECT i, repeat(i::text, 2) FROM generate_series(0, 299) s(i);
+-- lets delete half (even numbered ids) rows to limit the output
+DELETE FROM t_ztablesample WHERE id%2 = 0;
+-- should return ALL visible tuples from SOME blocks
+SELECT ctid,t.id FROM t_ztablesample AS t TABLESAMPLE SYSTEM (50) REPEATABLE (0);
+-- should return SOME visible tuples but from ALL the blocks
+SELECT ctid,id FROM t_ztablesample TABLESAMPLE BERNOULLI (50) REPEATABLE (0);

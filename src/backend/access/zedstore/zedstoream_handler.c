@@ -22,6 +22,7 @@
 #include "access/multixact.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "access/tsmapi.h"
 #include "access/tupdesc_details.h"
 #include "access/tuptoaster.h"
 #include "access/xact.h"
@@ -72,6 +73,10 @@ typedef struct ZedStoreDescData
 	Datum	  **bmscan_datums;
 	bool	  **bmscan_isnulls;
 	int			bmscan_nexttuple;
+
+	/* These fields are use for TABLESAMPLE scans */
+	zstid       max_tid_to_scan;
+	zstid       next_tid_to_scan;
 
 } ZedStoreDescData;
 
@@ -595,6 +600,9 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 
 	scan->btree_scans = palloc0(natts * sizeof(ZSBtreeScan));
 	scan->num_proj_atts = 0;
+
+	scan->max_tid_to_scan = InvalidZSTid;
+	scan->next_tid_to_scan = InvalidZSTid;
 
 	/*
 	 * Currently, we don't have a stats counter for bitmap heap scans (but the
@@ -1909,22 +1917,163 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 }
 
 static bool
-zedstoream_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
+zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstate)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("function %s not implemented yet", __func__)));
-	return false;
+	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	Relation	rel = scan->rs_scan.rs_rd;
+	TsmRoutine *tsm = scanstate->tsmroutine;
+	int			ntuples;
+	ZSBtreeScan	btree_scan;
+	zstid		tid;
+	BlockNumber blockno;
+
+	/* TODO: for now, assume that we need all columns */
+	zs_initialize_proj_attributes_extended(scan, RelationGetNumberOfAttributes(rel));
+
+	if (scan->max_tid_to_scan == InvalidZSTid)
+	{
+		/*
+		 * get the max tid once and store it, used to calculate max blocks to
+		 * scan either for SYSTEM or BERNOULLI sampling.
+		 */
+		scan->max_tid_to_scan = zsbt_get_last_tid(rel, ZS_META_ATTRIBUTE_NUM);
+		/*
+		 * TODO: should get lowest tid instead of starting from 0
+		 */
+		scan->next_tid_to_scan = ZSTidFromBlkOff(0, 1);
+	}
+
+	if (tsm->NextSampleBlock)
+	{
+		/* Adding one below to convert block number to number of blocks. */
+		blockno = tsm->NextSampleBlock(scanstate,
+									   ZSTidGetBlockNumber(scan->max_tid_to_scan) + 1);
+
+		if (!BlockNumberIsValid(blockno))
+			return false;
+	}
+	else
+	{
+		/* scanning table sequentially */
+		if (scan->next_tid_to_scan > scan->max_tid_to_scan)
+			return false;
+
+		blockno = ZSTidGetBlockNumber(scan->next_tid_to_scan);
+		/* move on to next block of tids for next iteration of scan */
+		scan->next_tid_to_scan = ZSTidFromBlkOff(blockno + 1, 1);
+	}
+
+	Assert(BlockNumberIsValid(blockno));
+
+	ntuples = 0;
+	zsbt_begin_scan(scan->rs_scan.rs_rd, ZS_META_ATTRIBUTE_NUM,
+					ZSTidFromBlkOff(blockno, 1),
+					ZSTidFromBlkOff(blockno + 1, 1),
+					scan->rs_scan.rs_snapshot,
+					&btree_scan);
+	while ((tid = zsbt_scan_next_tid(&btree_scan)) != InvalidZSTid)
+	{
+		Assert(ZSTidGetBlockNumber(tid) == blockno);
+		scan->bmscan_tids[ntuples] = tid;
+		ntuples++;
+	}
+	zsbt_end_scan(&btree_scan);
+
+	scan->bmscan_nexttuple = 0;
+	scan->bmscan_ntuples = ntuples;
+
+	return true;
 }
 
 static bool
-zedstoream_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
+zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstate,
 								  TupleTableSlot *slot)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("function %s not implemented yet", __func__)));
-	return false;
+	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	TsmRoutine *tsm = scanstate->tsmroutine;
+	zstid		tid;
+	BlockNumber blockno;
+	OffsetNumber tupoffset;
+	bool found;
+
+	/* all tuples on this block are invisible */
+	if (scan->bmscan_ntuples == 0)
+		return false;
+
+	blockno = ZSTidGetBlockNumber(scan->bmscan_tids[0]);
+
+	/* find which visible tuple in this block to sample */
+	for (;;)
+	{
+		zstid lasttid_for_block = scan->bmscan_tids[scan->bmscan_ntuples - 1];
+		OffsetNumber maxoffset = ZSTidGetOffsetNumber(lasttid_for_block);
+		/* Ask the tablesample method which tuples to check on this page. */
+		tupoffset = tsm->NextSampleTuple(scanstate, blockno, maxoffset);
+
+		if (!OffsetNumberIsValid(tupoffset))
+			return false;
+
+		tid = ZSTidFromBlkOff(blockno, tupoffset);
+
+		found = false;
+		for (int n = 0; n < scan->bmscan_ntuples; n++)
+		{
+			if (scan->bmscan_tids[n] == tid)
+			{
+				/* visible tuple */
+				found = true;
+				break;
+			}
+		}
+
+		if (found)
+			break;
+		else
+			continue;
+	}
+
+	/* fetch values for tuple pointed by tid to sample */
+	for (int i = 1; i < scan->num_proj_atts; i++)
+	{
+		int			natt = scan->proj_atts[i];
+		ZSBtreeScan btree_scan;
+		Datum		datum;
+		bool        isnull;
+
+		zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
+						tid, tid + 1,
+						scan->rs_scan.rs_snapshot,
+						&btree_scan);
+
+		if (zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, tid))
+		{
+			Assert(ZSTidGetBlockNumber(tid) == blockno);
+		}
+		else
+		{
+			if (btree_scan.atthasmissing)
+				zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
+			else
+				isnull = true;
+		}
+
+		/*
+		 * have to make a copy because we close the scan immediately.
+		 * FIXME: I think this leaks into a too-long-lived context
+		 */
+		if (!isnull)
+			datum = zs_datumCopy(datum, btree_scan.attbyval, btree_scan.attlen);
+
+		slot->tts_values[natt - 1] = datum;
+		slot->tts_isnull[natt - 1] = isnull;
+
+		zsbt_end_scan(&btree_scan);
+	}
+	slot->tts_tid = ItemPointerFromZSTid(tid);
+	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
+	slot->tts_flags &= ~TTS_FLAG_EMPTY;
+
+	return true;
 }
 
 static void
