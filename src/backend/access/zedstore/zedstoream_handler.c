@@ -762,11 +762,12 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			for (int i = 1; i < scan->num_proj_atts; i++)
 			{
 				ZSBtreeScan	*btscan = &scan->btree_scans[i];
+				Form_pg_attribute attr = ZSBtreeScanGetAttInfo(btscan);
 				int			natt;
 
 				if (!zsbt_scan_next_fetch(btscan, &datum, &isnull, this_tid))
 				{
-					if (btscan->atthasmissing)
+					if (attr->atthasmissing)
 						zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
 					else
 						isnull = true;
@@ -778,14 +779,14 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				 */
 				natt = scan->proj_atts[i];
 
-				if (!isnull && btscan->attlen == -1 &&
+				if (!isnull && attr->attlen == -1 &&
 					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 				{
 					datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, this_tid, datum);
 				}
 
 				/* Check that the values coming out of the b-tree are aligned properly */
-				if (!isnull && btscan->attlen == -1)
+				if (!isnull && attr->attlen == -1)
 				{
 					Assert (VARATT_IS_1B(datum) || INTALIGN(datum) == datum);
 				}
@@ -975,19 +976,21 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 		{
 			int         natt = proj_atts ? proj_atts[i] : i;
 			ZSBtreeScan *btscan = &fetch->btree_scans[i];
+			Form_pg_attribute attr;
 			Datum		datum;
 			bool        isnull;
 
 			zsbt_begin_scan(rel, slot->tts_tupleDescriptor, natt, tid, tid + 1,
 							snapshot, btscan);
 
+			attr = ZSBtreeScanGetAttInfo(btscan);
 			if (zsbt_scan_next_fetch(btscan, &datum, &isnull, tid))
 			{
 				/*
 				 * flatten any ZS-TOASTed values, because the rest of the system
 				 * doesn't know how to deal with them.
 				 */
-				if (!isnull && btscan->attlen == -1 &&
+				if (!isnull && attr->attlen == -1 &&
 					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 				{
 					datum = zedstore_toast_flatten(rel, natt, tid, datum);
@@ -995,7 +998,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 			}
 			else
 			{
-				if (btscan->atthasmissing)
+				if (attr->atthasmissing)
 					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
 				else
 				{
@@ -1602,7 +1605,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 				}
 				else
 				{
-					if (btree_scan.atthasmissing)
+					if (ZSBtreeScanGetAttInfo(&btree_scan)->atthasmissing)
 						zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
 					else
 						isnull = true;
@@ -1613,7 +1616,9 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 				 * FIXME: I think this leaks into a too-long-lived context
 				 */
 				if (!isnull)
-					datum = zs_datumCopy(datum, btree_scan.attbyval, btree_scan.attlen);
+					datum = zs_datumCopy(datum,
+										 ZSBtreeScanGetAttInfo(&btree_scan)->attbyval,
+										 ZSBtreeScanGetAttInfo(&btree_scan)->attlen);
 				datums[n] = datum;
 				isnulls[n] = isnull;
 			}
@@ -1863,14 +1868,16 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 			{
 				if (!zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, scan->bmscan_tids[n]))
 				{
-					if (btree_scan.atthasmissing)
+					if (ZSBtreeScanGetAttInfo(&btree_scan)->atthasmissing)
 						zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
 					else
 						isnull = true;
 				}
 				/* have to make a copy because we close the scan immediately. */
 				if (!isnull)
-					datum = zs_datumCopy(datum, btree_scan.attbyval, btree_scan.attlen);
+					datum = zs_datumCopy(datum,
+										 ZSBtreeScanGetAttInfo(&btree_scan)->attbyval,
+										 ZSBtreeScanGetAttInfo(&btree_scan)->attlen);
 				datums[n] = datum;
 				isnulls[n] = isnull;
 			}
@@ -2052,6 +2059,7 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 	{
 		int			natt = scan->proj_atts[i];
 		ZSBtreeScan btree_scan;
+		Form_pg_attribute attr;
 		Datum		datum;
 		bool        isnull;
 
@@ -2062,13 +2070,14 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 						scan->rs_scan.rs_snapshot,
 						&btree_scan);
 
+		attr = ZSBtreeScanGetAttInfo(&btree_scan);
 		if (zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, tid))
 		{
 			Assert(ZSTidGetBlockNumber(tid) == blockno);
 		}
 		else
 		{
-			if (btree_scan.atthasmissing)
+			if (attr->atthasmissing)
 				zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
 			else
 				isnull = true;
@@ -2079,7 +2088,7 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 		 * FIXME: I think this leaks into a too-long-lived context
 		 */
 		if (!isnull)
-			datum = zs_datumCopy(datum, btree_scan.attbyval, btree_scan.attlen);
+			datum = zs_datumCopy(datum, attr->attbyval, attr->attlen);
 
 		slot->tts_values[natt - 1] = datum;
 		slot->tts_isnull[natt - 1] = isnull;

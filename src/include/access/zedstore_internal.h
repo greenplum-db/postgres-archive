@@ -406,10 +406,6 @@ typedef struct ZSBtreeScan
 	Relation	rel;
 	AttrNumber	attno;
 	TupleDesc   tupledesc;
-	int16		attlen;
-	bool		attbyval;
-	bool        atthasmissing;
-	char		attalign;
 
 	/*
 	 * memory context that should be used for any allocations that go with the scan,
@@ -447,6 +443,12 @@ typedef struct ZSBtreeScan
 	bool		array_isnull;
 
 } ZSBtreeScan;
+
+static inline Form_pg_attribute
+ZSBtreeScanGetAttInfo(ZSBtreeScan *scan)
+{
+	return TupleDescAttr(scan->tupledesc, scan->attno - 1);
+}
 
 /*
  * zs_split_stack is used during page split, or page merge, to keep track

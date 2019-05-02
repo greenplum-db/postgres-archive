@@ -92,22 +92,9 @@ zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,
 	scan->rel = rel;
 	scan->attno = attno;
 	if (attno == ZS_META_ATTRIBUTE_NUM)
-	{
-		scan->attlen = 0;
-		scan->attbyval = true;
-		scan->atthasmissing = false;
-		scan->attalign = 0;
 		scan->tupledesc = NULL;
-	}
 	else
-	{
 		scan->tupledesc = tdesc;
-		/* TODO: remove storing these directly in scan, as can be fetched from tupledesc */
-		scan->attlen = tdesc->attrs[attno - 1].attlen;
-		scan->attbyval = tdesc->attrs[attno - 1].attbyval;
-		scan->atthasmissing = tdesc->attrs[attno - 1].atthasmissing;
-		scan->attalign = tdesc->attrs[attno - 1].attalign;
-	}
 
 	scan->snapshot = snapshot;
 	scan->context = CurrentMemoryContext;
@@ -171,16 +158,17 @@ zsbt_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 	/* skip over elements that we are not interested in */
 	while (tid < scan->nexttid && nelements > 0)
 	{
+		Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
 		if (!isnull)
 		{
-			if (scan->attlen > 0)
+			if (attr->attlen > 0)
 			{
-				p += att_align_nominal(scan->attlen, scan->attalign);
+				p += att_align_nominal(attr->attlen, attr->attalign);
 			}
 			else
 			{
-				p = (Pointer) att_align_pointer(p, scan->attalign, scan->attlen, p);
-				p = att_addlength_pointer(p, scan->attlen, p);
+				p = (Pointer) att_align_pointer(p, attr->attalign, attr->attlen, p);
+				p = att_addlength_pointer(p, attr->attlen, p);
 			}
 		}
 		tid++;
@@ -223,9 +211,10 @@ zsbt_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 		 * For example, storing an array of sizes or an array of offsets, followed
 		 * by the data itself, might incur fewer pipeline stalls in the CPU.
 		 */
-		int16		attlen = scan->attlen;
+		Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
+		int16		attlen = attr->attlen;
 
-		if (scan->attbyval)
+		if (attr->attbyval)
 		{
 			if (attlen == sizeof(Datum))
 			{
@@ -263,16 +252,16 @@ zsbt_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 			for (int i = 0; i < nelements; i++)
 			{
 				scan->array_datums[i] = PointerGetDatum(p);
-				p += att_align_nominal(scan->attlen, scan->attalign);
+				p += att_align_nominal(attr->attlen, attr->attalign);
 			}
 		}
 		else if (attlen == -1)
 		{
 			for (int i = 0; i < nelements; i++)
 			{
-				p = (Pointer) att_align_pointer(p, scan->attalign, scan->attlen, p);
+				p = (Pointer) att_align_pointer(p, attr->attalign, attr->attlen, p);
 				scan->array_datums[i] = PointerGetDatum(p);
-				p = att_addlength_pointer(p, scan->attlen, p);
+				p = att_addlength_pointer(p, attr->attlen, p);
 			}
 		}
 		else
@@ -305,6 +294,7 @@ zsbt_scan_next(ZSBtreeScan *scan)
 	OffsetNumber off;
 	OffsetNumber maxoff;
 	BlockNumber	next;
+	Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
 
 	if (!scan->active)
 		return false;
@@ -380,7 +370,7 @@ zsbt_scan_next(ZSBtreeScan *scan)
 				else
 				{
 					scan->array_isnull = false;
-					scan->array_datums[0] = fetch_att(sitem->t_payload, scan->attbyval, scan->attlen);
+					scan->array_datums[0] = fetch_att(sitem->t_payload, attr->attbyval, attr->attlen);
 					/* no need to copy, because the uncompression buffer is a copy already */
 					/* FIXME: do we need to copy anyway, to make sure it's aligned correctly? */
 				}
@@ -515,8 +505,8 @@ zsbt_scan_next(ZSBtreeScan *scan)
 					else
 					{
 						scan->array_isnull = false;
-						scan->array_datums[0] = fetch_att(sitem->t_payload, scan->attbyval, scan->attlen);
-						scan->array_datums[0] = zs_datumCopy(scan->array_datums[0], scan->attbyval, scan->attlen);
+						scan->array_datums[0] = fetch_att(sitem->t_payload, attr->attbyval, attr->attlen);
+						scan->array_datums[0] = zs_datumCopy(scan->array_datums[0], attr->attbyval, attr->attlen);
 					}
 					LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
 					buf_is_locked = false;
