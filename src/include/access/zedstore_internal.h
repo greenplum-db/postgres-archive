@@ -365,21 +365,10 @@ zs_datumCopy(Datum value, bool typByVal, int typLen)
 
 /*
  * The metapage stores one of these for each attribute.
- *
- * We have copy the atributes 'attlen' and 'attbyval' here, because we need
- * them when reading the rows. Normally, they match the values in the
- * relcache, of course, but there is a time during ALTER TABLE SET TYPE
- * where the tuple descriptor in the relcache entry already shows the new
- * type, but we're still reading the old relfile, which must happen using
- * the old type. We work around that by not relying on the relcache entry,
- * but on these copied values. And it seems like a good sanity check,
- * anyway.
  */
 typedef struct ZSRootDirItem
 {
 	BlockNumber root;
-	int16		attlen;
-	bool		attbyval;
 } ZSRootDirItem;
 
 typedef struct ZSMetaPage
@@ -416,6 +405,7 @@ typedef struct ZSBtreeScan
 {
 	Relation	rel;
 	AttrNumber	attno;
+	TupleDesc   tupledesc;
 	int16		attlen;
 	bool		attbyval;
 	bool        atthasmissing;
@@ -497,7 +487,8 @@ extern TM_Result zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 			   LockTupleMode lockmode, LockWaitPolicy wait_policy,
 			   TM_FailureData *hufd);
 extern void zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undoptr);
-extern void zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan);
+extern void zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
+							zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan);
 extern bool zsbt_scan_next(ZSBtreeScan *scan);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
@@ -594,7 +585,7 @@ zsbt_scan_next_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 
 /* prototypes for functions in zedstore_meta.c */
 extern void zsmeta_initmetapage(Relation rel);
-extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update, int16 *attlen_p, bool *attbyval_p);
+extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
 extern void zsmeta_add_root_for_new_attributes(Relation rel, Page page);
 

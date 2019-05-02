@@ -734,7 +734,9 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			{
 				int			natt = scan->proj_atts[i];
 
-				zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
+				zsbt_begin_scan(scan->rs_scan.rs_rd,
+								slot->tts_tupleDescriptor,
+								natt,
 								scan->cur_range_start,
 								scan->cur_range_end,
 								scan->rs_scan.rs_snapshot,
@@ -832,7 +834,8 @@ zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	bool		found;
 
 	/* Use the meta-data tree for the visibility information. */
-	zsbt_begin_scan(rel, ZS_META_ATTRIBUTE_NUM, tid, tid + 1, snapshot, &btree_scan);
+	zsbt_begin_scan(rel, slot->tts_tupleDescriptor, ZS_META_ATTRIBUTE_NUM, tid,
+					tid + 1, snapshot, &btree_scan);
 
 	found = zsbt_scan_next_tid(&btree_scan) != InvalidZSTid;
 
@@ -964,7 +967,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 
 	fetch->num_proj_atts = num_proj_atts;
 
-	zsbt_begin_scan(rel, 0, tid, tid + 1, snapshot, &fetch->btree_scans[0]);
+	zsbt_begin_scan(rel, slot->tts_tupleDescriptor, 0, tid, tid + 1, snapshot, &fetch->btree_scans[0]);
 	found = zsbt_scan_next_tid(&fetch->btree_scans[0]) != InvalidZSTid;
 	if (found)
 	{
@@ -975,7 +978,8 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 			Datum		datum;
 			bool        isnull;
 
-			zsbt_begin_scan(rel, natt, tid, tid + 1, snapshot, btscan);
+			zsbt_begin_scan(rel, slot->tts_tupleDescriptor, natt, tid, tid + 1,
+							snapshot, btscan);
 
 			if (zsbt_scan_next_fetch(btscan, &datum, &isnull, tid))
 			{
@@ -1302,7 +1306,9 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 			{
 				int			natt = zscan->proj_atts[i];
 
-				zsbt_begin_scan(zscan->rs_scan.rs_rd, natt,
+				zsbt_begin_scan(zscan->rs_scan.rs_rd,
+								RelationGetDescr(zscan->rs_scan.rs_rd),
+								natt,
 								zscan->cur_range_start,
 								zscan->cur_range_end,
 								zscan->rs_scan.rs_snapshot,
@@ -1549,7 +1555,9 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 	zs_initialize_proj_attributes_extended(scan, RelationGetNumberOfAttributes(rel));
 
 	ntuples = 0;
-	zsbt_begin_scan(scan->rs_scan.rs_rd, ZS_META_ATTRIBUTE_NUM,
+	zsbt_begin_scan(scan->rs_scan.rs_rd,
+					RelationGetDescr(scan->rs_scan.rs_rd),
+					ZS_META_ATTRIBUTE_NUM,
 					ZSTidFromBlkOff(blockno, 1),
 					ZSTidFromBlkOff(blockno + 1, 1),
 					scan->rs_scan.rs_snapshot,
@@ -1578,7 +1586,9 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 			Datum	   *datums = scan->bmscan_datums[i];
 			bool	   *isnulls = scan->bmscan_isnulls[i];
 
-			zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
+			zsbt_begin_scan(scan->rs_scan.rs_rd,
+							RelationGetDescr(scan->rs_scan.rs_rd),
+							natt,
 							ZSTidFromBlkOff(blockno, 1),
 							ZSTidFromBlkOff(blockno + 1, 1),
 							scan->rs_scan.rs_snapshot,
@@ -1632,7 +1642,7 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin
 	for (int i = 1; i < scan->num_proj_atts; i++)
 	{
 		int			natt = scan->proj_atts[i];
-		Form_pg_attribute att = TupleDescAttr(scan->rs_scan.rs_rd->rd_att, natt - 1);
+		Form_pg_attribute att = TupleDescAttr(slot->tts_tupleDescriptor, natt - 1);
 
 		Datum		datum;
 		bool        isnull;
@@ -1802,7 +1812,8 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 	 * like in a sequential scan. I'm not sure which is better.
 	 */
 	ntuples = 0;
-	zsbt_begin_scan(scan->rs_scan.rs_rd, ZS_META_ATTRIBUTE_NUM,
+	zsbt_begin_scan(scan->rs_scan.rs_rd, RelationGetDescr(scan->rs_scan.rs_rd),
+					ZS_META_ATTRIBUTE_NUM,
 					ZSTidFromBlkOff(tid_blkno, 1),
 					ZSTidFromBlkOff(tid_blkno + 1, 1),
 					scan->rs_scan.rs_snapshot,
@@ -1841,7 +1852,9 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 			Datum	   *datums = scan->bmscan_datums[i];
 			bool	   *isnulls = scan->bmscan_isnulls[i];
 
-			zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
+			zsbt_begin_scan(scan->rs_scan.rs_rd,
+							RelationGetDescr(scan->rs_scan.rs_rd),
+							natt,
 							ZSTidFromBlkOff(tid_blkno, 1),
 							ZSTidFromBlkOff(tid_blkno + 1, 1),
 							scan->rs_scan.rs_snapshot,
@@ -1885,7 +1898,7 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 	for (int i = 1; i < scan->num_proj_atts; i++)
 	{
 		int			natt = scan->proj_atts[i];
-		Form_pg_attribute att = TupleDescAttr(scan->rs_scan.rs_rd->rd_att, natt - 1);
+		Form_pg_attribute att = TupleDescAttr(slot->tts_tupleDescriptor, natt - 1);
 		Datum		datum;
 		bool        isnull;
 
@@ -1966,7 +1979,9 @@ zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstat
 	Assert(BlockNumberIsValid(blockno));
 
 	ntuples = 0;
-	zsbt_begin_scan(scan->rs_scan.rs_rd, ZS_META_ATTRIBUTE_NUM,
+	zsbt_begin_scan(scan->rs_scan.rs_rd,
+					RelationGetDescr(scan->rs_scan.rs_rd),
+					ZS_META_ATTRIBUTE_NUM,
 					ZSTidFromBlkOff(blockno, 1),
 					ZSTidFromBlkOff(blockno + 1, 1),
 					scan->rs_scan.rs_snapshot,
@@ -2040,7 +2055,9 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 		Datum		datum;
 		bool        isnull;
 
-		zsbt_begin_scan(scan->rs_scan.rs_rd, natt,
+		zsbt_begin_scan(scan->rs_scan.rs_rd,
+						slot->tts_tupleDescriptor,
+						natt,
 						tid, tid + 1,
 						scan->rs_scan.rs_snapshot,
 						&btree_scan);
@@ -2232,8 +2249,11 @@ zsbt_fill_missing_attribute_value(ZSBtreeScan *scan, Datum *datum, bool *isnull)
 {
 	int attno = scan->attno - 1;
 	AttrMissing *attrmiss = NULL;
-	TupleDesc tupleDesc = scan->rel->rd_att;
-	Form_pg_attribute attr = TupleDescAttr(tupleDesc, attno);
+	TupleDesc tupleDesc = scan->tupledesc;
+	Form_pg_attribute attr;
+
+	Assert(tupleDesc != NULL);
+	attr = TupleDescAttr(tupleDesc, attno);
 
 	*isnull = true;
 	if (tupleDesc->constr &&

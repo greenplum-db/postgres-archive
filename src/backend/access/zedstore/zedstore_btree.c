@@ -82,34 +82,32 @@ static void zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zs
  * Begin a scan of the btree.
  */
 void
-zsbt_begin_scan(Relation rel, AttrNumber attno, zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan)
+zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,
+				zstid endtid, Snapshot snapshot, ZSBtreeScan *scan)
 {
-	int16		attlen;
-	bool		attbyval;
 	Buffer		buf;
 
-	/*
-	 * Fetch attlen/attbyval.
-	 *
-	 * XXX: This is duplicative with the zsmeta_get_root_for_attribute()
-	 * call in zsbt_descend.
-	 */
-	(void) zsmeta_get_root_for_attribute(rel, attno, false, &attlen, &attbyval);
+	(void) zsmeta_get_root_for_attribute(rel, attno, false);
 
 	scan->rel = rel;
 	scan->attno = attno;
-	scan->attlen = attlen;
-	scan->attbyval = attbyval;
 	if (attno == ZS_META_ATTRIBUTE_NUM)
+	{
+		scan->attlen = 0;
+		scan->attbyval = true;
 		scan->atthasmissing = false;
+		scan->attalign = 0;
+		scan->tupledesc = NULL;
+	}
 	else
-		scan->atthasmissing = rel->rd_att->attrs[attno - 1].atthasmissing;
-
-	/*
-	 * FIXME: should we store attalign in the metapage, too? Or can we remove
-	 * attlen/attbyval from there as well?
-	 */
-	scan->attalign = rel->rd_att->attrs[attno - 1].attalign;
+	{
+		scan->tupledesc = tdesc;
+		/* TODO: remove storing these directly in scan, as can be fetched from tupledesc */
+		scan->attlen = tdesc->attrs[attno - 1].attlen;
+		scan->attbyval = tdesc->attrs[attno - 1].attbyval;
+		scan->atthasmissing = tdesc->attrs[attno - 1].atthasmissing;
+		scan->attalign = tdesc->attrs[attno - 1].attalign;
+	}
 
 	scan->snapshot = snapshot;
 	scan->context = CurrentMemoryContext;
@@ -1213,12 +1211,10 @@ zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level)
 	BlockNumber rootblk;
 	int			nextlevel = -1;
 	BlockNumber failblk = InvalidBlockNumber;
-	int16		attlen;
-	bool		attbyval;
 
 	/* start from root */
 restart:
-	rootblk = zsmeta_get_root_for_attribute(rel, attno, true, &attlen, &attbyval);
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
 
 	if (rootblk == InvalidBlockNumber)
 	{
@@ -1779,8 +1775,6 @@ static ZSSingleBtreeItem *
 zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, ZSUndoRecPtr *recent_oldest_undo,
 		   zstid tid, Buffer *buf_p)
 {
-	int16		attlen;
-	bool		attbyval;
 	Buffer		buf;
 	Page		page;
 	ZSBtreeItem *item = NULL;
@@ -1789,13 +1783,10 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, ZSUndoRecPtr *rece
 	OffsetNumber off;
 
 	/*
-	 * Fetch attlen/attbyval. We might need them to extract the single item
-	 * from an array item.
-	 *
 	 * XXX: This is duplicative with the zsmeta_get_root_for_attribute()
 	 * call in zsbt_descend.
 	 */
-	(void) zsmeta_get_root_for_attribute(rel, attno, true, &attlen, &attbyval);
+	(void) zsmeta_get_root_for_attribute(rel, attno, true);
 
 	buf = zsbt_descend(rel, attno, tid, 0);
 	if (buf == InvalidBuffer)
@@ -1884,6 +1875,20 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, ZSUndoRecPtr *rece
 
 			if ((item->t_flags & ZSBT_NULL) == 0)
 			{
+				/*
+				 * TODO: Currently, zsbt_fetch() is called from functions
+				 * which don't have Slot, and Relation object can be trusted
+				 * for attlen and attbyval. Ideally, we wish to not rely on
+				 * Relation object and see how to decouple it. Previously, we
+				 * stored these two values in meta-page and get these values
+				 * from it but just storing them for this purpose, seems
+				 * heavy. Ideally, catalog stores those values so shouldn't
+				 * need to duplicate storing the same.
+				 */
+				TupleDesc tdesc = RelationGetDescr(rel);
+				int attlen = tdesc->attrs[attno - 1].attlen;
+				bool attbyval = tdesc->attrs[attno - 1].attbyval;
+
 				if (attlen > 0)
 				{
 					dataptr = aitem->t_payload + elemno * attlen;

@@ -54,16 +54,6 @@ zsmeta_add_root_for_attributes(Relation rel, Page page, bool init)
 	for (cur_natts = metapg->nattributes; cur_natts < natts; cur_natts++)
 	{
 		metapg->tree_root_dir[cur_natts].root = InvalidBlockNumber;
-		if (cur_natts == ZS_META_ATTRIBUTE_NUM)
-		{
-			metapg->tree_root_dir[cur_natts].attlen = 0;
-			metapg->tree_root_dir[cur_natts].attbyval = true;
-		}
-		else
-		{
-			metapg->tree_root_dir[cur_natts].attlen = rel->rd_att->attrs[cur_natts - 1 ].attlen;
-			metapg->tree_root_dir[cur_natts].attbyval = rel->rd_att->attrs[cur_natts - 1].attbyval;
-		}
 	}
 
 	metapg->nattributes = natts;
@@ -122,24 +112,17 @@ zsmeta_initmetapage(Relation rel)
  * the root doesn't exist.
  */
 BlockNumber
-zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
-							  int16 *attlen_p, bool *attbyval_p)
+zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
 {
 	Buffer		metabuf;
 	ZSMetaPage *metapg;
 	BlockNumber	rootblk;
-	int16		attlen;
-	bool		attbyval;
 	Page        page;
 
 	if (RelationGetNumberOfBlocks(rel) == 0)
 	{
 		if (!forupdate)
-		{
-			*attlen_p = 0;
-			*attbyval_p = false;
 			return InvalidBlockNumber;
-		}
 
 		zsmeta_initmetapage(rel);
 	}
@@ -171,8 +154,6 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 	}
 
 	rootblk = metapg->tree_root_dir[attno].root;
-	attlen = metapg->tree_root_dir[attno].attlen;
-	attbyval = metapg->tree_root_dir[attno].attbyval;
 
 	if (forupdate && rootblk == InvalidBlockNumber)
 	{
@@ -208,8 +189,6 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 
 	UnlockReleaseBuffer(metabuf);
 
-	*attlen_p = attlen;
-	*attbyval_p = attbyval;
 	return rootblk;
 }
 
