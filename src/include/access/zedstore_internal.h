@@ -90,7 +90,8 @@ ZSTidGetOffsetNumber(zstid tid)
 #define	ZS_FPM_PAGE_ID		0xF087
 
 /* like nbtree/gist FOLLOW_RIGHT flag, used to detect concurrent page splits */
-#define ZS_FOLLOW_RIGHT		0x0002
+#define ZSBT_FOLLOW_RIGHT		0x0002
+#define ZSBT_ROOT				0x0001
 
 typedef struct ZSBtreePageOpaque
 {

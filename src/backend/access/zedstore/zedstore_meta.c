@@ -196,7 +196,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate,
 		opaque->zs_lokey = MinZSTid;
 		opaque->zs_hikey = MaxPlusOneZSTid;
 		opaque->zs_level = 0;
-		opaque->zs_flags = 0;
+		opaque->zs_flags = ZSBT_ROOT;
 		opaque->zs_page_id = ZS_BTREE_PAGE_ID;
 
 		MarkBufferDirty(rootbuf);

@@ -1086,20 +1086,22 @@ zsfpm_descend(Relation rel, Buffer metabuf, BlockNumber key, int level)
 		/*
 		 * Do we need to walk right? This could happen if the page was concurrently split.
 		 *
-		 * XXX: actually, we restart from root.
+		 * XXX: actually, we restart from root. We're holding a lock on the metapage,
+		 * so the root cannot change.
 		 */
 		if (key >= opaque->zs_hikey)
 		{
-			/* follow the right-link */
+			/* Restart from the root */
 			failblk = next;
 			next = rootblk;
+			nextlevel = -1;
 		}
 		else
 		{
 			if (opaque->zs_level == level)
 				return buf;
 
-			/* follow the downlink */
+			/* Find the downlink and follow it */
 			items = ZSFreePageMapPageGetItems(page);
 			nitems = ZSFreePageMapPageGetNumItems(page);
 
