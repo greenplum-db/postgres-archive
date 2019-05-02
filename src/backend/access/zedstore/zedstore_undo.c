@@ -757,6 +757,12 @@ zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumb
 		buf = ReadBuffer(rel, blk);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		page = BufferGetPage(buf);
+		if (PageIsEmpty(page) ||
+			PageGetSpecialSize(page) != MAXALIGN(sizeof(ZSUndoPageOpaque)))
+		{
+			UnlockReleaseBuffer(buf);
+			continue;
+		}
 		opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(page);
 		if (opaque->zs_page_id != ZS_UNDO_PAGE_ID)
 		{
