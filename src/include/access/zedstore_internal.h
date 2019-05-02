@@ -89,8 +89,7 @@ ZSTidGetOffsetNumber(zstid tid)
 #define	ZS_TOAST_PAGE_ID	0xF086
 #define	ZS_FPM_PAGE_ID		0xF087
 
-/* like nbtree/gist FOLLOW_RIGHT flag, used to detect concurrent page splits */
-#define ZSBT_FOLLOW_RIGHT		0x0002
+/* flags for zedstore b-tree pages */
 #define ZSBT_ROOT				0x0001
 
 typedef struct ZSBtreePageOpaque
@@ -458,6 +457,20 @@ typedef struct ZSBtreeScan
 	bool		array_isnull;
 
 } ZSBtreeScan;
+
+/*
+ * zs_split_stack is used during page split, or page merge, to keep track
+ * of all the modified pages.
+ */
+typedef struct zs_split_stack zs_split_stack;
+
+struct zs_split_stack
+{
+	zs_split_stack *next;
+
+	Buffer		buf;
+	Page		page;
+};
 
 /* prototypes for functions in zedstore_btree.c */
 extern void zsbt_multi_insert(Relation rel, AttrNumber attno,

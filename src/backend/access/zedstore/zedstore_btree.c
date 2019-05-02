@@ -41,15 +41,13 @@
 static Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level);
 static void zsbt_recompress_replace(Relation rel, AttrNumber attno,
 									Buffer oldbuf, List *items);
-static void zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
-								 zstid rightlokey, BlockNumber rightblkno);
-static void zsbt_split_internal_page(Relation rel, AttrNumber attno,
-									 Buffer leftbuf, Buffer childbuf,
-									 OffsetNumber newoff, zstid newkey, BlockNumber childblk);
-static void zsbt_newroot(Relation rel, AttrNumber attno, int level,
-						 zstid key1, BlockNumber blk1,
-						 zstid key2, BlockNumber blk2,
-						 Buffer leftchildbuf);
+static zs_split_stack *zsbt_insert_downlinks(Relation rel, AttrNumber attno,
+					  zstid leftlokey, BlockNumber leftblkno, int level,
+					  List *downlinks);
+static zs_split_stack *zsbt_split_internal_page(Relation rel, AttrNumber attno,
+												Buffer leftbuf, OffsetNumber newoff, List *downlinks);
+static zs_split_stack *zsbt_newroot(Relation rel, AttrNumber attno, int level,
+									List *downlinks);
 static ZSSingleBtreeItem *zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot,
 		   ZSUndoRecPtr *recent_oldest_undo, zstid tid, Buffer *buf_p);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
@@ -1194,7 +1192,7 @@ restart:
 		 * added back at the same location, and removed again. So perhaps retry
 		 * a few times?
 		 */
-		if (next == failblk)
+		if (next == failblk || next == ZS_META_BLK)
 			elog(ERROR, "arrived at incorrect block %u while descending zedstore btree", next);
 
 		buf = ReadBuffer(rel, next);
@@ -1212,29 +1210,18 @@ restart:
 		 */
 		if (key >= opaque->zs_hikey)
 		{
-			if ((opaque->zs_flags & ZSBT_FOLLOW_RIGHT) != 0)
-			{
-				/*
-				 * the page was concurrently split, and the right page doesn't have
-				 * a downlink yet. follow the right-link to it.
-				 */
-				next = opaque->zs_next;
-			}
-			else
-			{
-				/*
-				 * We arrived at an unexpected page. This can happen with concurrent
-				 * splits, or page deletions. We could try following the right-link, but
-				 * there's no guarantee that's the correct page either, so let's restart
-				 * from the root. If we landed here because of concurrent modifications,
-				 * the next attempt should land on the correct page. Remember that we
-				 * incorrectly ended up on this page, so that if this happens because
-				 * the tree is corrupt, rather than concurrent splits, and we land here
-				 * again, we won't loop forever.
-				 */
-				failblk = next;
-				goto restart;
-			}
+			/*
+			 * We arrived at an unexpected page. This can happen with concurrent
+			 * splits, or page deletions. We could try following the right-link, but
+			 * there's no guarantee that's the correct page either, so let's restart
+			 * from the root. If we landed here because of concurrent modifications,
+			 * the next attempt should land on the correct page. Remember that we
+			 * incorrectly ended up on this page, so that if this happens because
+			 * the tree is corrupt, rather than concurrent splits, and we land here
+			 * again, we won't loop forever.
+			 */
+			failblk = next;
+			goto restart;
 		}
 		else
 		{
@@ -1249,6 +1236,7 @@ restart:
 			if (itemno < 0)
 				elog(ERROR, "could not descend tree for tid (%u, %u)",
 					 ZSTidGetBlockNumber(key), ZSTidGetOffsetNumber(key));
+
 			next = items[itemno].childblk;
 			nextlevel--;
 		}
@@ -1261,88 +1249,96 @@ restart:
  *
  * NOTE: the very first root page of a btree, which is also the leaf, is created
  * in zsmeta_get_root_for_attribute(), not here.
+ *
+ * XXX: What if there are too many downlinks to fit on a page? Shouldn't happen
+ * in practice..
  */
-static void
-zsbt_newroot(Relation rel, AttrNumber attno, int level,
-			 zstid key1, BlockNumber blk1,
-			 zstid key2, BlockNumber blk2,
-			 Buffer leftchildbuf)
+static zs_split_stack *
+zsbt_newroot(Relation rel, AttrNumber attno, int level, List *downlinks)
 {
-	ZSBtreePageOpaque *opaque;
-	ZSBtreePageOpaque *leftchildopaque;
-	Buffer		buf;
-	Page		page;
+	Page		metapage;
+	ZSMetaPage *metapg;
+	Buffer		newrootbuf;
+	Page		newrootpage;
+	ZSBtreePageOpaque *newrootopaque;
 	ZSBtreeInternalPageItem *items;
 	Buffer		metabuf;
+	zs_split_stack *stack1;
+	zs_split_stack *stack2;
+	ListCell   *lc;
+	int			i;
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
-	Assert(key1 < key2);
+	/* allocate a new root page */
+	newrootbuf = zspage_getnewbuf(rel, metabuf);
+	newrootpage = palloc(BLCKSZ);
+	PageInit(newrootpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
+	newrootopaque = ZSBtreePageGetOpaque(newrootpage);
+	newrootopaque->zs_attno = attno;
+	newrootopaque->zs_next = InvalidBlockNumber;
+	newrootopaque->zs_lokey = MinZSTid;
+	newrootopaque->zs_hikey = MaxPlusOneZSTid;
+	newrootopaque->zs_level = level;
+	newrootopaque->zs_flags = ZSBT_ROOT;
+	newrootopaque->zs_page_id = ZS_BTREE_PAGE_ID;
 
-	buf = zspage_getnewbuf(rel, metabuf);
-	page = BufferGetPage(buf);
-	PageInit(page, BLCKSZ, sizeof(ZSBtreePageOpaque));
-	opaque = ZSBtreePageGetOpaque(page);
-	opaque->zs_attno = attno;
-	opaque->zs_next = InvalidBlockNumber;
-	opaque->zs_lokey = MinZSTid;
-	opaque->zs_hikey = MaxPlusOneZSTid;
-	opaque->zs_level = level;
-	opaque->zs_flags = ZSBT_ROOT;
-	opaque->zs_page_id = ZS_BTREE_PAGE_ID;
+	items = ZSBtreeInternalPageGetItems(newrootpage);
 
-	items = ZSBtreeInternalPageGetItems(page);
-	items[0].tid = key1;
-	items[0].childblk =  blk1;
-	items[1].tid = key2;
-	items[1].childblk = blk2;
-	((PageHeader) page)->pd_lower += 2 * sizeof(ZSBtreeInternalPageItem);
-	Assert(ZSBtreeInternalPageGetNumItems(page) == 2);
+	/* add all the downlinks */
+	i = 0;
+	foreach (lc, downlinks)
+	{
+		ZSBtreeInternalPageItem *downlink = (ZSBtreeInternalPageItem *) lfirst(lc);
 
-	/* clear the follow-right and root flags on left child */
-	leftchildopaque = ZSBtreePageGetOpaque(BufferGetPage(leftchildbuf));
-	leftchildopaque->zs_flags &= ~(ZSBT_FOLLOW_RIGHT | ZSBT_ROOT);
+		items[i++] = *downlink;
+	}
+	((PageHeader) newrootpage)->pd_lower += i * sizeof(ZSBtreeInternalPageItem);
 
-	/* TODO: wal-log all, including metapage */
+	/* FIXME: Check that all the downlinks fit on the page. */
 
-	MarkBufferDirty(buf);
-	MarkBufferDirty(leftchildbuf);
+	/* update the metapage */
+	metapage = PageGetTempPageCopy(BufferGetPage(metabuf));
 
-	/* Before exiting, update the metapage */
-	zsmeta_update_root_for_attribute(rel, attno, metabuf, BufferGetBlockNumber(buf));
+	metapg = (ZSMetaPage *) PageGetContents(metapage);
+	if ((attno != ZS_META_ATTRIBUTE_NUM) && (attno <= 0 || attno > metapg->nattributes))
+		elog(ERROR, "invalid attribute number %d (table \"%s\" has only %d attributes)",
+			 attno, RelationGetRelationName(rel), metapg->nattributes);
 
-	UnlockReleaseBuffer(leftchildbuf);
-	UnlockReleaseBuffer(buf);
-	UnlockReleaseBuffer(metabuf);
+	metapg->tree_root_dir[attno].root = BufferGetBlockNumber(newrootbuf);
+
+	stack1 = palloc(sizeof(zs_split_stack));
+	stack1->next = NULL;
+	stack1->buf = metabuf;
+	stack1->page = metapage;
+
+	stack2 = palloc(sizeof(zs_split_stack));
+	stack2->next = stack1;
+	stack2->buf = newrootbuf;
+	stack2->page = newrootpage;
+
+	return stack2;
 }
 
 /*
  * After page split, insert the downlink of 'rightblkno' to the parent.
  *
- * On entry, 'leftbuf' must be pinned exclusive-locked. It is released on exit.
+ * On entry, 'leftbuf' must be pinned exclusive-locked.
  */
-static void
-zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
-					 zstid rightlokey, BlockNumber rightblkno)
+static zs_split_stack *
+zsbt_insert_downlinks(Relation rel, AttrNumber attno,
+					  zstid leftlokey, BlockNumber leftblkno, int level,
+					  List *downlinks)
 {
-	BlockNumber	leftblkno = BufferGetBlockNumber(leftbuf);
-	Page		leftpage = BufferGetPage(leftbuf);
-	ZSBtreePageOpaque *leftopaque = ZSBtreePageGetOpaque(leftpage);
-	zstid		leftlokey = leftopaque->zs_lokey;
+	int			numdownlinks = list_length(downlinks);
 	ZSBtreeInternalPageItem *items;
 	int			nitems;
 	int			itemno;
 	Buffer		parentbuf;
 	Page		parentpage;
-
-	if ((leftopaque->zs_flags & ZSBT_ROOT) != 0)
-	{
-		zsbt_newroot(rel, attno, leftopaque->zs_level + 1,
-					 leftlokey, BufferGetBlockNumber(leftbuf),
-					 rightlokey, rightblkno, leftbuf);
-		return;
-	}
+	zs_split_stack *split_stack;
+	ZSBtreeInternalPageItem *firstdownlink;
 
 	/*
 	 * re-find parent
@@ -1351,13 +1347,15 @@ zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
 	 * tree, and if we just remembered the path we descended, we could just
 	 * walk back up.
 	 */
-	parentbuf = zsbt_descend(rel, attno, leftlokey, leftopaque->zs_level + 1);
+	parentbuf = zsbt_descend(rel, attno, leftlokey, level);
 	parentpage = BufferGetPage(parentbuf);
+
+	firstdownlink = (ZSBtreeInternalPageItem *) linitial(downlinks);
 
 	/* Find the position in the parent for the downlink */
 	items = ZSBtreeInternalPageGetItems(parentpage);
 	nitems = ZSBtreeInternalPageGetNumItems(parentpage);
-	itemno = zsbt_binsrch_internal(rightlokey, items, nitems);
+	itemno = zsbt_binsrch_internal(firstdownlink->tid, items, nitems);
 
 	/* sanity checks */
 	if (itemno < 0 || items[itemno].tid != leftlokey ||
@@ -1369,146 +1367,171 @@ zsbt_insert_downlink(Relation rel, AttrNumber attno, Buffer leftbuf,
 	}
 	itemno++;
 
-	if (ZSBtreeInternalPageIsFull(parentpage))
+	if (PageGetExactFreeSpace(parentpage) < numdownlinks * sizeof(ZSBtreeInternalPageItem))
 	{
 		/* split internal page */
-		zsbt_split_internal_page(rel, attno, parentbuf, leftbuf, itemno, rightlokey, rightblkno);
+		split_stack = zsbt_split_internal_page(rel, attno, parentbuf, itemno, downlinks);
 	}
 	else
 	{
+		ZSBtreeInternalPageItem *newitems;
+		Page		newpage;
+		int			i;
+		ListCell   *lc;
+
+		newpage = PageGetTempPageCopySpecial(parentpage);
+
+		split_stack = palloc(sizeof(zs_split_stack));
+		split_stack->next = NULL;
+		split_stack->buf = parentbuf;
+		split_stack->page = newpage;
+
 		/* insert the new downlink for the right page. */
-		memmove(&items[itemno + 1],
-				&items[itemno],
-				(nitems - itemno) * sizeof(ZSBtreeInternalPageItem));
-		items[itemno].tid = rightlokey;
-		items[itemno].childblk = rightblkno;
-		((PageHeader) parentpage)->pd_lower += sizeof(ZSBtreeInternalPageItem);
+		newitems = ZSBtreeInternalPageGetItems(newpage);
+		memcpy(newitems, items, itemno * sizeof(ZSBtreeInternalPageItem));
 
-		leftopaque->zs_flags &= ~ZSBT_FOLLOW_RIGHT;
+		i = itemno;
+		foreach(lc, downlinks)
+		{
+			ZSBtreeInternalPageItem *downlink = (ZSBtreeInternalPageItem *) lfirst(lc);
 
-		/* TODO: WAL-log */
+			Assert(downlink->childblk != 0);
+			newitems[i++] = *downlink;
+		}
 
-		MarkBufferDirty(leftbuf);
-		MarkBufferDirty(parentbuf);
-		UnlockReleaseBuffer(leftbuf);
-		UnlockReleaseBuffer(parentbuf);
+		memcpy(&newitems[i], &items[itemno], (nitems - itemno) * sizeof(ZSBtreeInternalPageItem));
+		((PageHeader) newpage)->pd_lower += (nitems + numdownlinks) * sizeof(ZSBtreeInternalPageItem);
 	}
+	return split_stack;
 }
 
 /*
  * Split an internal page.
  *
- * The new downlink specified by 'newkey' and 'childblk' is inserted to
- * position 'newoff', on 'leftbuf'. The page is split.
+ * The new downlink specified by 'newkey' is inserted to position 'newoff', on 'leftbuf'.
+ * The page is split.
  */
-static void
-zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer childbuf,
-						 OffsetNumber newoff, zstid newkey, BlockNumber childblk)
+static zs_split_stack *
+zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer origbuf,
+						 OffsetNumber newoff, List *newitems)
 {
-	Buffer		rightbuf;
-	Page		origpage = BufferGetPage(leftbuf);
-	Page		leftpage;
-	Page		rightpage;
-	BlockNumber rightblkno;
-	ZSBtreePageOpaque *leftopaque;
-	ZSBtreePageOpaque *rightopaque;
+	Page		origpage = BufferGetPage(origbuf);
+	ZSBtreePageOpaque *origopaque = ZSBtreePageGetOpaque(origpage);
+	Buffer		buf;
+	Page		page;
 	ZSBtreeInternalPageItem *origitems;
-	ZSBtreeInternalPageItem *leftitems;
-	ZSBtreeInternalPageItem *rightitems;
 	int			orignitems;
-	int			leftnitems;
-	int			rightnitems;
-	int			splitpoint;
-	zstid		splittid;
-	bool		newitemonleft;
-	int			i;
-	ZSBtreeInternalPageItem newitem;
+	zs_split_stack *stack_first;
+	zs_split_stack *stack;
+	Size		splitthreshold;
+	ListCell   *lc;
+	int			origitemno;
+	List	   *downlinks = NIL;
 
-	leftpage = PageGetTempPageCopySpecial(origpage);
-	leftopaque = ZSBtreePageGetOpaque(leftpage);
-	Assert(leftopaque->zs_level > 0);
-	/* any previous incomplete split must be finished first */
-	Assert((leftopaque->zs_flags & ZSBT_FOLLOW_RIGHT) == 0);
-
-	rightbuf = zspage_getnewbuf(rel, InvalidBuffer);
-	rightpage = BufferGetPage(rightbuf);
-	rightblkno = BufferGetBlockNumber(rightbuf);
-	PageInit(rightpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
-	rightopaque = ZSBtreePageGetOpaque(rightpage);
-
-	/*
-	 * Figure out the split point.
-	 *
-	 * TODO: currently, always do 90/10 split.
-	 */
 	origitems = ZSBtreeInternalPageGetItems(origpage);
 	orignitems = ZSBtreeInternalPageGetNumItems(origpage);
-	splitpoint = orignitems * 0.9;
-	splittid = origitems[splitpoint].tid;
-	newitemonleft = (newkey < splittid);
 
-	/* Set up the page headers */
-	rightopaque->zs_attno = attno;
-	rightopaque->zs_next = leftopaque->zs_next;
-	rightopaque->zs_lokey = splittid;
-	rightopaque->zs_hikey = leftopaque->zs_hikey;
-	rightopaque->zs_level = leftopaque->zs_level;
-	rightopaque->zs_flags = 0;
-	rightopaque->zs_page_id = ZS_BTREE_PAGE_ID;
+	page = PageGetTempPageCopySpecial(origpage);
+	buf = origbuf;
 
-	leftopaque->zs_next = rightblkno;
-	leftopaque->zs_hikey = splittid;
-	leftopaque->zs_flags |= ZSBT_FOLLOW_RIGHT;
+	stack = palloc(sizeof(zs_split_stack));
+	stack->next = NULL;
+	stack->buf = buf;
+	stack->page = page;
+	stack_first = stack;
 
-	/* copy the items */
-	leftitems = ZSBtreeInternalPageGetItems(leftpage);
-	leftnitems = 0;
-	rightitems = ZSBtreeInternalPageGetItems(rightpage);
-	rightnitems = 0;
+	/* XXX: currently, we always do 90/10 splits */
+	splitthreshold = PageGetExactFreeSpace(page) * 0.90;
 
-	newitem.tid = newkey;
-	newitem.childblk = childblk;
-
-	for (i = 0; i < orignitems; i++)
+	lc = list_head(newitems);
+	origitemno = 0;
+	for (;;)
 	{
-		if (i == newoff)
+		ZSBtreeInternalPageItem *item;
+		ZSBtreeInternalPageItem *p;
+
+		if (origitemno == newoff && lc)
 		{
-			if (newitemonleft)
-				leftitems[leftnitems++] = newitem;
-			else
-				rightitems[rightnitems++] = newitem;
+			item = lfirst(lc);
+			lc = lnext(lc);
+		}
+		else
+		{
+			if (origitemno == orignitems)
+				break;
+			item = &origitems[origitemno];
+			origitemno++;
 		}
 
-		if (i < splitpoint)
-			leftitems[leftnitems++] = origitems[i];
-		else
-			rightitems[rightnitems++] = origitems[i];
+		if (PageGetExactFreeSpace(page) < splitthreshold)
+		{
+			/* have to split to another page */
+			ZSBtreePageOpaque *prevopaque = ZSBtreePageGetOpaque(page);
+			ZSBtreePageOpaque *opaque = ZSBtreePageGetOpaque(page);
+			BlockNumber blkno;
+			ZSBtreeInternalPageItem *downlink;
+
+			buf = zspage_getnewbuf(rel, InvalidBuffer);
+			blkno = BufferGetBlockNumber(buf);
+			page = palloc(BLCKSZ);
+			PageInit(page, BLCKSZ, sizeof(ZSBtreePageOpaque));
+
+			opaque = ZSBtreePageGetOpaque(page);
+			opaque->zs_attno = attno;
+			opaque->zs_next = prevopaque->zs_next;
+			opaque->zs_lokey = item->tid;
+			opaque->zs_hikey = prevopaque->zs_hikey;
+			opaque->zs_level = prevopaque->zs_level;
+			opaque->zs_flags = 0;
+			opaque->zs_page_id = ZS_BTREE_PAGE_ID;
+
+			prevopaque->zs_next = blkno;
+			prevopaque->zs_hikey = item->tid;
+
+			stack->next = palloc(sizeof(zs_split_stack));
+			stack = stack->next;
+			stack->buf = buf;
+			stack->page = page;
+
+			downlink = palloc(sizeof(ZSBtreeInternalPageItem));
+			downlink->tid = item->tid;
+			downlink->childblk = blkno;
+			downlinks = lappend(downlinks, downlink);
+		}
+
+		p = (ZSBtreeInternalPageItem *) ((char *) page + ((PageHeader) page)->pd_lower);
+		*p = *item;
+		((PageHeader) page)->pd_lower += sizeof(ZSBtreeInternalPageItem);
 	}
-	/* cope with possibility that newitem goes at the end */
-	if (i <= newoff)
+
+	/* recurse to insert downlinks, if we had to split. */
+	if (downlinks)
 	{
-		Assert(!newitemonleft);
-		rightitems[rightnitems++] = newitem;
+		if ((origopaque->zs_flags & ZSBT_ROOT) != 0)
+		{
+			ZSBtreeInternalPageItem *downlink;
+
+			downlink = palloc(sizeof(ZSBtreeInternalPageItem));
+			downlink->tid = MinZSTid;
+			downlink->childblk = BufferGetBlockNumber(origbuf);
+			downlinks = lcons(downlink, downlinks);
+
+			stack->next = zsbt_newroot(rel, attno, origopaque->zs_level + 1, downlinks);
+
+			/* clear the ZSBT_ROOT flag on the old root page */
+			origopaque->zs_flags &= ~ZSBT_ROOT;
+		}
+		else
+		{
+			stack->next = zsbt_insert_downlinks(rel, attno,
+												origopaque->zs_lokey,
+												BufferGetBlockNumber(origbuf),
+												origopaque->zs_level + 1,
+												downlinks);
+		}
 	}
-	((PageHeader) leftpage)->pd_lower += leftnitems * sizeof(ZSBtreeInternalPageItem);
-	((PageHeader) rightpage)->pd_lower += rightnitems * sizeof(ZSBtreeInternalPageItem);
 
-	Assert(leftnitems + rightnitems == orignitems + 1);
-
-	PageRestoreTempPage(leftpage, origpage);
-
-	/* TODO: WAL-logging */
-	MarkBufferDirty(leftbuf);
-	MarkBufferDirty(rightbuf);
-
-	MarkBufferDirty(childbuf);
-	ZSBtreePageGetOpaque(BufferGetPage(childbuf))->zs_flags &= ~ZSBT_FOLLOW_RIGHT;
-	UnlockReleaseBuffer(childbuf);
-
-	UnlockReleaseBuffer(rightbuf);
-
-	/* recurse to insert downlink. (this releases 'leftbuf') */
-	zsbt_insert_downlink(rel, attno, leftbuf, splittid, rightblkno);
+	return stack_first;
 }
 
 static ZSSingleBtreeItem *
@@ -2164,8 +2187,10 @@ typedef struct
 	Page		currpage;
 	ZSCompressContext compressor;
 	int			compressed_items;
-	List	   *pages;		/* first page writes over the old buffer,
-							 * subsequent pages get newly-allocated buffers */
+
+	/* first page writes over the old buffer, subsequent pages get newly-allocated buffers */
+	zs_split_stack *stack_head;
+	zs_split_stack *stack_tail;
 
 	int			total_items;
 	int			total_compressed_items;
@@ -2180,6 +2205,7 @@ zsbt_recompress_newpage(zsbt_recompress_context *cxt, zstid nexttid, int flags)
 {
 	Page		newpage;
 	ZSBtreePageOpaque *newopaque;
+	zs_split_stack *stack;
 
 	if (cxt->currpage)
 	{
@@ -2191,7 +2217,17 @@ zsbt_recompress_newpage(zsbt_recompress_context *cxt, zstid nexttid, int flags)
 
 	newpage = (Page) palloc(BLCKSZ);
 	PageInit(newpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
-	cxt->pages = lappend(cxt->pages, newpage);
+
+	stack = palloc(sizeof(zs_split_stack));
+	stack->next = NULL;
+	stack->buf = InvalidBuffer; /* will be assigned later */
+	stack->page = newpage;
+	if (cxt->stack_tail)
+		cxt->stack_tail->next = stack;
+	else
+		cxt->stack_head = stack;
+	cxt->stack_tail = stack;
+
 	cxt->currpage = newpage;
 
 	newopaque = ZSBtreePageGetOpaque(newpage);
@@ -2294,18 +2330,19 @@ static void
 zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *items)
 {
 	ListCell   *lc;
-	ListCell   *lc2;
 	zsbt_recompress_context cxt;
 	ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(BufferGetPage(oldbuf));
 	ZSUndoRecPtr recent_oldest_undo = { 0 };
-	List	   *bufs;
-	int			i;
 	BlockNumber orignextblk;
+	zs_split_stack *stack;
+	List	   *downlinks = NIL;
+
+	orignextblk = oldopaque->zs_next;
 
 	cxt.currpage = NULL;
 	zs_compress_init(&cxt.compressor);
 	cxt.compressed_items = 0;
-	cxt.pages = NIL;
+	cxt.stack_head = cxt.stack_tail = NULL;
 	cxt.attno = attno;
 	cxt.hikey = oldopaque->zs_hikey;
 
@@ -2370,67 +2407,83 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 
 	/*
 	 * Ok, we now have a list of pages, to replace the original page, as private
-	 * in-memory copies. Allocate buffers for them, and write them out
+	 * in-memory copies. Allocate buffers for them, and write them out.
 	 *
 	 * allocate all the pages before entering critical section, so that
 	 * out-of-disk-space doesn't lead to PANIC
 	 */
-	bufs = list_make1_int(oldbuf);
-	for (i = 0; i < list_length(cxt.pages) - 1; i++)
+	stack = cxt.stack_head;
+	Assert(stack->buf == InvalidBuffer);
+	stack->buf = oldbuf;
+	while (stack->next)
 	{
-		Buffer		newbuf = zspage_getnewbuf(rel, InvalidBuffer);
+		Page	thispage = stack->page;
+		ZSBtreePageOpaque *thisopaque = ZSBtreePageGetOpaque(thispage);
+		ZSBtreeInternalPageItem *downlink;
+		Buffer	nextbuf;
 
-		bufs = lappend_int(bufs, newbuf);
+		Assert(stack->next->buf == InvalidBuffer);
+
+		nextbuf = zspage_getnewbuf(rel, InvalidBuffer);
+		stack->next->buf = nextbuf;
+
+		thisopaque->zs_next = BufferGetBlockNumber(nextbuf);
+
+		downlink = palloc(sizeof(ZSBtreeInternalPageItem));
+		downlink->tid = thisopaque->zs_hikey;
+		downlink->childblk = BufferGetBlockNumber(nextbuf);
+		downlinks = lappend(downlinks, downlink);
+
+		stack = stack->next;
 	}
+	/* last one in the chain */
+	ZSBtreePageGetOpaque(stack->page)->zs_next = orignextblk;
 
-	START_CRIT_SECTION();
-
-	orignextblk = oldopaque->zs_next;
-	forboth(lc, cxt.pages, lc2, bufs)
+	/* If we had to split, insert downlinks for the new pages. */
+	if (cxt.stack_head->next)
 	{
-		Page		page_copy = (Page) lfirst(lc);
-		Buffer		buf = (Buffer) lfirst_int(lc2);
-		Page		page = BufferGetPage(buf);
-		ZSBtreePageOpaque *opaque;
+		oldopaque = ZSBtreePageGetOpaque(cxt.stack_head->page);
 
-		PageRestoreTempPage(page_copy, page);
-		opaque = ZSBtreePageGetOpaque(page);
-
-		/* TODO: WAL-log */
-		if (lnext(lc2))
+		if ((oldopaque->zs_flags & ZSBT_ROOT) != 0)
 		{
-			Buffer		nextbuf = (Buffer) lfirst_int(lnext(lc2));
+			ZSBtreeInternalPageItem *downlink;
 
-			opaque->zs_next = BufferGetBlockNumber(nextbuf);
-			opaque->zs_flags |= ZSBT_FOLLOW_RIGHT;
+			downlink = palloc(sizeof(ZSBtreeInternalPageItem));
+			downlink->tid = MinZSTid;
+			downlink->childblk = BufferGetBlockNumber(cxt.stack_head->buf);
+			downlinks = lcons(downlink, downlinks);
+
+			cxt.stack_tail->next = zsbt_newroot(rel, attno, oldopaque->zs_level + 1, downlinks);
+
+			/* clear the ZSBT_ROOT flag on the old root page */
+			oldopaque->zs_flags &= ~ZSBT_ROOT;
 		}
 		else
 		{
-			/* last one in the chain. */
-			opaque->zs_next = orignextblk;
+			cxt.stack_tail->next = zsbt_insert_downlinks(rel, attno, 
+														 oldopaque->zs_lokey, BufferGetBlockNumber(oldbuf), oldopaque->zs_level + 1,
+														 downlinks);
 		}
-
-		MarkBufferDirty(buf);
+		/* note: stack_tail is not the real tail anymore */
 	}
-	list_free(cxt.pages);
 
-	END_CRIT_SECTION();
-
-	/* If we had to split, insert downlinks for the new pages. */
-	while (list_length(bufs) > 1)
+	/* Finally, overwrite all the pages we had to modify */
+	START_CRIT_SECTION();
+	stack = cxt.stack_head;
+	while (stack)
 	{
-		Buffer		leftbuf = (Buffer) linitial_int(bufs);
-		Buffer		rightbuf = (Buffer) lsecond_int(bufs);
+		zs_split_stack *next;
 
-		zsbt_insert_downlink(rel, attno, leftbuf,
-							 ZSBtreePageGetOpaque(BufferGetPage(leftbuf))->zs_hikey,
-							 BufferGetBlockNumber(rightbuf));
-		/* zsbt_insert_downlink() released leftbuf */
-		bufs = list_delete_first(bufs);
+		PageRestoreTempPage(stack->page, BufferGetPage(stack->buf));
+		MarkBufferDirty(stack->buf);
+		UnlockReleaseBuffer(stack->buf);
+
+		next = stack->next;
+		pfree(stack);
+		stack = next;
 	}
-	/* release the last page */
-	UnlockReleaseBuffer((Buffer) linitial_int(bufs));
-	list_free(bufs);
+	/* TODO: WAL-log all the changes  */
+	END_CRIT_SECTION();
 }
 
 static int

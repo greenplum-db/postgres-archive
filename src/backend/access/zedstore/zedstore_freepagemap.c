@@ -118,29 +118,15 @@ ZSFreePageMapPageGetNumItems(Page page)
 	return end - begin;
 }
 
-/*
- * zsfpm_split_stack is used during page split, or page merge, to keep track
- * of all the modified pages.
- */
-typedef struct zsfpm_split_stack zsfpm_split_stack;
-
-struct zsfpm_split_stack
-{
-	zsfpm_split_stack *next;
-
-	Buffer		buf;
-	Page		page;
-};
-
-static zsfpm_split_stack *zsfpm_unlink_page(Relation rel, Buffer buf, int level, Buffer metabuf);
-static zsfpm_split_stack *zsfpm_merge_pages(Relation rel, Buffer leftbuf, Buffer rightbuf, bool target_is_left, Buffer metabuf);
+static zs_split_stack *zsfpm_unlink_page(Relation rel, Buffer buf, int level, Buffer metabuf);
+static zs_split_stack *zsfpm_merge_pages(Relation rel, Buffer leftbuf, Buffer rightbuf, bool target_is_left, Buffer metabuf);
 static BlockNumber zsfpm_consume_page(Relation rel, Buffer metabuf);
 static void zsfpm_insert(Relation rel, BlockNumber startblk, BlockNumber endblk);
-static zsfpm_split_stack *zsfpm_split(Relation rel, Buffer leftbuf,
+static zs_split_stack *zsfpm_split(Relation rel, Buffer leftbuf,
 						int newpos, ZSFreePageMapItem *newitem);
-static zsfpm_split_stack *zsfpm_insert_downlink(Relation rel, Buffer leftbuf,
+static zs_split_stack *zsfpm_insert_downlink(Relation rel, Buffer leftbuf,
 								  BlockNumber rightlokey, BlockNumber rightblkno);
-static zsfpm_split_stack *zsfpm_newroot(Relation rel, Buffer metabuf, int level,
+static zs_split_stack *zsfpm_newroot(Relation rel, Buffer metabuf, int level,
 			  ZSFreePageMapItem *item1, ZSFreePageMapItem *item2);
 static Buffer zsfpm_descend(Relation rel, Buffer metabuf, BlockNumber key, int level);
 static int zsfpm_binsrch_blkno(BlockNumber key, ZSFreePageMapItem *arr, int arr_elems);
@@ -193,14 +179,14 @@ zsfpm_delete_leaf(Relation rel, Buffer buf, Buffer metabuf)
 	}
 	else
 	{
-		zsfpm_split_stack *stack;
+		zs_split_stack *stack;
 
 		stack = zsfpm_unlink_page(rel, buf, 0, metabuf);
 
 		START_CRIT_SECTION();
 		while (stack)
 		{
-			zsfpm_split_stack *next;
+			zs_split_stack *next;
 
 			PageRestoreTempPage(stack->page, BufferGetPage(stack->buf));
 			MarkBufferDirty(stack->buf);
@@ -222,7 +208,7 @@ zsfpm_delete_leaf(Relation rel, Buffer buf, Buffer metabuf)
  *
  * NOTE: you cannot remove the only leaf.
  */
-static zsfpm_split_stack *
+static zs_split_stack *
 zsfpm_unlink_page(Relation rel, Buffer buf, int level, Buffer metabuf)
 {
 	Page		page = BufferGetPage(buf);
@@ -262,7 +248,7 @@ zsfpm_unlink_page(Relation rel, Buffer buf, int level, Buffer metabuf)
  * Unlike in the nbtree index, we don't need to worry about concurrent scans. They
  * will simply retry if they land on an unexpected page.
  */
-static zsfpm_split_stack *
+static zs_split_stack *
 zsfpm_merge_pages(Relation rel, Buffer leftbuf, Buffer rightbuf, bool target_is_left, Buffer metabuf)
 {
 	Buffer		parentbuf;
@@ -280,9 +266,9 @@ zsfpm_merge_pages(Relation rel, Buffer leftbuf, Buffer rightbuf, bool target_is_
 	int			parentnitems;
 	Page		parentpage;
 	int			itemno;
-	zsfpm_split_stack *stack;
-	zsfpm_split_stack *stack_head;
-	zsfpm_split_stack *stack_tail;
+	zs_split_stack *stack;
+	zs_split_stack *stack_head;
+	zs_split_stack *stack_tail;
 
 	origleftpage = BufferGetPage(leftbuf);
 	leftpage = PageGetTempPageCopySpecial(origleftpage);
@@ -326,7 +312,7 @@ zsfpm_merge_pages(Relation rel, Buffer leftbuf, Buffer rightbuf, bool target_is_
 
 	Assert(ZSFreePageMapGetOpaque(leftpage)->zs_level == ZSFreePageMapGetOpaque(rightpage)->zs_level);
 
-	stack = palloc(sizeof(zsfpm_split_stack));
+	stack = palloc(sizeof(zs_split_stack));
 	stack->next = NULL;
 	stack->buf = leftbuf;
 	stack->page = leftpage;
@@ -335,7 +321,7 @@ zsfpm_merge_pages(Relation rel, Buffer leftbuf, Buffer rightbuf, bool target_is_
 	/* Mark right page as empty/unused */
 	rightpage = palloc0(BLCKSZ);
 
-	stack = palloc(sizeof(zsfpm_split_stack));
+	stack = palloc(sizeof(zs_split_stack));
 	stack->next = NULL;
 	stack->buf = rightbuf;
 	stack->page = rightpage;
@@ -363,7 +349,7 @@ zsfpm_merge_pages(Relation rel, Buffer leftbuf, Buffer rightbuf, bool target_is_
 
 		((PageHeader) newpage)->pd_lower += (parentnitems - 1) * sizeof(ZSFreePageMapItem);
 
-		stack = palloc(sizeof(zsfpm_split_stack));
+		stack = palloc(sizeof(zs_split_stack));
 		stack->next = NULL;
 		stack->buf = parentbuf;
 		stack->page = newpage;
@@ -734,7 +720,7 @@ zsfpm_insert(Relation rel, BlockNumber startblk, BlockNumber endblk)
 	else
 	{
 		/* last resort: split the page */
-		zsfpm_split_stack *split_stack;
+		zs_split_stack *split_stack;
 		ZSFreePageMapItem newitem;
 
 		newitem.zs_startblk = startblk;
@@ -748,7 +734,7 @@ zsfpm_insert(Relation rel, BlockNumber startblk, BlockNumber endblk)
 
 		while (split_stack)
 		{
-			zsfpm_split_stack *next;
+			zs_split_stack *next;
 
 			PageRestoreTempPage(split_stack->page, BufferGetPage(split_stack->buf));
 			MarkBufferDirty(split_stack->buf);
@@ -765,7 +751,7 @@ zsfpm_insert(Relation rel, BlockNumber startblk, BlockNumber endblk)
 /*
  * Insert a downlink for right page, after splitting 'leftbuf' FPM page.
  */
-static zsfpm_split_stack *
+static zs_split_stack *
 zsfpm_insert_downlink(Relation rel, Buffer leftbuf,
 					  BlockNumber rightlokey, BlockNumber rightblkno)
 {
@@ -783,7 +769,7 @@ zsfpm_insert_downlink(Relation rel, Buffer leftbuf,
 	ZSFreePageMapItem *items;
 	int			nitems;
 	int			pos;
-	zsfpm_split_stack *split_stack;
+	zs_split_stack *split_stack;
 
 	/*
 	 * First, find the parent of 'leftbuf'.
@@ -847,7 +833,7 @@ zsfpm_insert_downlink(Relation rel, Buffer leftbuf,
 
 		newpage = PageGetTempPageCopySpecial(parentpage);
 
-		split_stack = palloc(sizeof(zsfpm_split_stack));
+		split_stack = palloc(sizeof(zs_split_stack));
 		split_stack->next = NULL;
 		split_stack->buf = parentbuf;
 		split_stack->page = newpage;
@@ -877,10 +863,10 @@ zsfpm_insert_downlink(Relation rel, Buffer leftbuf,
  * be split as well, its parent also needs to be recursively updated, all the
  * way up to the root page, in the worst case. zsfpm_split() doesn't modify
  * any pages directly, but locks them exclusively, and returns a list of
- * zsfpm_split_stack structs to represent the modifications. The caller must
+ * zs_split_stack structs to represent the modifications. The caller must
  * WAL-log and apply all the changes represented by the list.
  */
-static zsfpm_split_stack *
+static zs_split_stack *
 zsfpm_split(Relation rel, Buffer leftbuf, int newpos, ZSFreePageMapItem *newitem)
 {
 	Buffer		rightbuf;
@@ -900,8 +886,8 @@ zsfpm_split(Relation rel, Buffer leftbuf, int newpos, ZSFreePageMapItem *newitem
 	BlockNumber splitkey;
 	bool		newitemonleft;
 	int			i;
-	zsfpm_split_stack *stack1;
-	zsfpm_split_stack *stack2;
+	zs_split_stack *stack1;
+	zs_split_stack *stack2;
 
 	leftpage = PageGetTempPageCopySpecial(origpage);
 	leftopaque = ZSFreePageMapGetOpaque(leftpage);
@@ -969,11 +955,11 @@ zsfpm_split(Relation rel, Buffer leftbuf, int newpos, ZSFreePageMapItem *newitem
 
 	Assert(leftnitems + rightnitems == orignitems + 1);
 
-	stack1 = palloc(sizeof(zsfpm_split_stack));
+	stack1 = palloc(sizeof(zs_split_stack));
 	stack1->buf = leftbuf;
 	stack1->page = leftpage;
 
-	stack2 = palloc(sizeof(zsfpm_split_stack));
+	stack2 = palloc(sizeof(zs_split_stack));
 	stack2->buf = rightbuf;
 	stack2->page = rightpage;
 
@@ -984,7 +970,7 @@ zsfpm_split(Relation rel, Buffer leftbuf, int newpos, ZSFreePageMapItem *newitem
 	return stack1;
 }
 
-static zsfpm_split_stack *
+static zs_split_stack *
 zsfpm_newroot(Relation rel, Buffer metabuf, int level,
 			  ZSFreePageMapItem *item1, ZSFreePageMapItem *item2)
 {
@@ -996,8 +982,8 @@ zsfpm_newroot(Relation rel, Buffer metabuf, int level,
 	Page		page;
 	BlockNumber rootblk;
 	ZSFreePageMapItem *items;
-	zsfpm_split_stack *stack1;
-	zsfpm_split_stack *stack2;
+	zs_split_stack *stack1;
+	zs_split_stack *stack2;
 
 	metapage = PageGetTempPageCopy(BufferGetPage(metabuf));
 	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
@@ -1023,12 +1009,12 @@ zsfpm_newroot(Relation rel, Buffer metabuf, int level,
 
 	metaopaque->zs_fpm_root = rootblk;
 
-	stack1 = palloc(sizeof(zsfpm_split_stack));
+	stack1 = palloc(sizeof(zs_split_stack));
 	stack1->next = NULL;
 	stack1->buf = metabuf;
 	stack1->page = metapage;
 
-	stack2 = palloc(sizeof(zsfpm_split_stack));
+	stack2 = palloc(sizeof(zs_split_stack));
 	stack2->next = stack1;
 	stack2->buf = buf;
 	stack2->page = page;
