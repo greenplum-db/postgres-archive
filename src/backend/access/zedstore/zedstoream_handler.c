@@ -766,12 +766,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				int			natt;
 
 				if (!zsbt_scan_next_fetch(btscan, &datum, &isnull, this_tid))
-				{
-					if (attr->atthasmissing)
-						zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
-					else
-						isnull = true;
-				}
+					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
 
 				/*
 				 * flatten any ZS-TOASTed values, because the rest of the system
@@ -997,15 +992,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 				}
 			}
 			else
-			{
-				if (attr->atthasmissing)
-					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
-				else
-				{
-					isnull = true;
-					datum = (Datum) 0;
-				}
-			}
+				zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
 
 			slot->tts_values[natt - 1] = datum;
 			slot->tts_isnull[natt - 1] = isnull;
@@ -1604,12 +1591,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 					Assert(ZSTidGetBlockNumber(tid) == blockno);
 				}
 				else
-				{
-					if (ZSBtreeScanGetAttInfo(&btree_scan)->atthasmissing)
-						zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
-					else
-						isnull = true;
-				}
+					zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
 
 				/*
 				 * have to make a copy because we close the scan immediately.
@@ -1867,12 +1849,8 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 			for (int n = 0; n < ntuples; n++)
 			{
 				if (!zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, scan->bmscan_tids[n]))
-				{
-					if (ZSBtreeScanGetAttInfo(&btree_scan)->atthasmissing)
-						zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
-					else
-						isnull = true;
-				}
+					zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
+
 				/* have to make a copy because we close the scan immediately. */
 				if (!isnull)
 					datum = zs_datumCopy(datum,
@@ -2077,10 +2055,7 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 		}
 		else
 		{
-			if (attr->atthasmissing)
-				zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
-			else
-				isnull = true;
+			zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
 		}
 
 		/*
@@ -2257,17 +2232,20 @@ static void
 zsbt_fill_missing_attribute_value(ZSBtreeScan *scan, Datum *datum, bool *isnull)
 {
 	int attno = scan->attno - 1;
-	AttrMissing *attrmiss = NULL;
 	TupleDesc tupleDesc = scan->tupledesc;
-	Form_pg_attribute attr;
-
-	Assert(tupleDesc != NULL);
-	attr = TupleDescAttr(tupleDesc, attno);
+	Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
 
 	*isnull = true;
+	*datum = (Datum) 0;
+
+	/* This means catalog doesn't have the default value for this attribute */
+	if (!attr->atthasmissing)
+		return;
+
 	if (tupleDesc->constr &&
 		tupleDesc->constr->missing)
 	{
+		AttrMissing *attrmiss = NULL;
 		/*
 		 * If there are missing values we want to put them into the
 		 * tuple.
