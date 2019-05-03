@@ -667,7 +667,14 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 						 * becomes visible to everyone when the UNDO record is trimmed
 						 * away
 						 */
-						zsbt_undo_item_deletion(rel, ZS_META_ATTRIBUTE_NUM, undorec->tid, undorec->undorecptr);
+						/*
+						 * Don't do this if we're called from zsundo_get_oldest_undo_ptr(),
+						 * because we might be holding a lock on the page, and deadlock
+						 */
+						if (trimstats->max_dead_tuples == 0)
+							trimstats->dead_tuples_overflowed = true;
+						else
+							zsbt_undo_item_deletion(rel, ZS_META_ATTRIBUTE_NUM, undorec->tid, undorec->undorecptr);
 					}
 					break;
 				case ZSUNDO_TYPE_UPDATE:

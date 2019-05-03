@@ -60,6 +60,8 @@ static ZSBtreeItem *zsbt_create_item(Form_pg_attribute att, zstid tid, ZSUndoRec
 				 int nelements, Datum *datums,
 				 char *dataptr, Size datasz, bool isnull);
 
+static bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf);
+
 static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems);
 
 static TM_Result zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
@@ -398,8 +400,49 @@ zsbt_scan_next(ZSBtreeScan *scan)
 		buf = scan->lastbuf;
 		if (!buf_is_locked)
 		{
-			LockBuffer(buf, BUFFER_LOCK_SHARE);
-			buf_is_locked = true;
+			if (BufferIsValid(buf))
+			{
+				LockBuffer(buf, BUFFER_LOCK_SHARE);
+				buf_is_locked = true;
+
+				/*
+				 * It's possible that the page was concurrently split or recycled by
+				 * another backend (or ourselves). Have to re-check that the page is
+				 * still valid.
+				 */
+				if (!zsbt_page_is_expected(scan->rel, scan->attno, scan->nexttid, 0, buf))
+				{
+					/*
+					 * It's not valid for the TID we're looking for, but maybe it was the
+					 * right page for the previous TID. In that case, we don't need to
+					 * restart from the root, we can follow the right-link instead.
+					 */
+					if (zsbt_page_is_expected(scan->rel, scan->attno, scan->nexttid - 1, 0, buf))
+					{
+						page = BufferGetPage(buf);
+						opaque = ZSBtreePageGetOpaque(page);
+						next = opaque->zs_next;
+						if (next != InvalidBlockNumber)
+						{
+							LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+							buf_is_locked = false;
+							buf = ReleaseAndReadBuffer(buf, scan->rel, next);
+							scan->lastbuf = buf;
+							continue;
+						}
+					}
+
+					UnlockReleaseBuffer(buf);
+					buf_is_locked = false;
+					buf = scan->lastbuf = InvalidBuffer;
+				}
+			}
+
+			if (!BufferIsValid(buf))
+			{
+				buf = scan->lastbuf = zsbt_descend(scan->rel, scan->attno, scan->nexttid, 0);
+				buf_is_locked = true;
+			}
 		}
 		page = BufferGetPage(buf);
 		opaque = ZSBtreePageGetOpaque(page);
@@ -1200,17 +1243,7 @@ restart:
 		buf = ReadBuffer(rel, next);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);		/* TODO: shared */
 		page = BufferGetPage(buf);
-		opaque = ZSBtreePageGetOpaque(page);
-
-		if (nextlevel == -1)
-			nextlevel = opaque->zs_level;
-		else if (opaque->zs_level != nextlevel)
-			elog(ERROR, "unexpected level encountered when descending tree");
-
-		/*
-		 * Do we need to walk right? This could happen if the page was concurrently split.
-		 */
-		if (key >= opaque->zs_hikey)
+		if (!zsbt_page_is_expected(rel, attno, key, nextlevel, buf))
 		{
 			/*
 			 * We arrived at an unexpected page. This can happen with concurrent
@@ -1225,25 +1258,70 @@ restart:
 			failblk = next;
 			goto restart;
 		}
-		else
-		{
-			if (opaque->zs_level == level)
-				return buf;
+		opaque = ZSBtreePageGetOpaque(page);
 
-			/* Find the downlink and follow it */
-			items = ZSBtreeInternalPageGetItems(page);
-			nitems = ZSBtreeInternalPageGetNumItems(page);
+		if (nextlevel == -1)
+			nextlevel = opaque->zs_level;
 
-			itemno = zsbt_binsrch_internal(key, items, nitems);
-			if (itemno < 0)
-				elog(ERROR, "could not descend tree for tid (%u, %u)",
-					 ZSTidGetBlockNumber(key), ZSTidGetOffsetNumber(key));
+		else if (opaque->zs_level != nextlevel)
+			elog(ERROR, "unexpected level encountered when descending tree");
 
-			next = items[itemno].childblk;
-			nextlevel--;
-		}
+		if (opaque->zs_level == level)
+			return buf;
+
+		/* Find the downlink and follow it */
+		items = ZSBtreeInternalPageGetItems(page);
+		nitems = ZSBtreeInternalPageGetNumItems(page);
+
+		itemno = zsbt_binsrch_internal(key, items, nitems);
+		if (itemno < 0)
+			elog(ERROR, "could not descend tree for tid (%u, %u)",
+				 ZSTidGetBlockNumber(key), ZSTidGetOffsetNumber(key));
+
+		next = items[itemno].childblk;
+		nextlevel--;
+
 		UnlockReleaseBuffer(buf);
 	}
+}
+
+/*
+ * Check that a page is a valid B-tree page, and covers the given key.
+ *
+ * This is used when traversing the tree, to check that e.g. a concurrent page
+ * split didn't move pages around, so that the page we were walking to isn't
+ * the correct one anymore.
+ */
+static bool
+zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf)
+{
+	Page		page = BufferGetPage(buf);
+	ZSBtreePageOpaque *opaque;
+
+	/*
+	 * The page might have been deleted and even reused as a completely different
+	 * kind of a page, so we must be prepared for anything.
+	 */
+	if (PageIsNew(page))
+		return false;
+
+	if (PageGetSpecialSize(page) != MAXALIGN(sizeof(ZSBtreePageOpaque)))
+		return false;
+
+	opaque = ZSBtreePageGetOpaque(page);
+	if (opaque->zs_page_id != ZS_BTREE_PAGE_ID)
+		return false;
+
+	if (opaque->zs_attno != attno)
+		return false;
+
+	if (level != -1 && opaque->zs_level != level)
+		return false;
+
+	if (opaque->zs_lokey > key || opaque->zs_hikey <= key)
+		return false;
+
+	return true;
 }
 
 /*
@@ -1431,7 +1509,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer origbuf,
 	stack_first = stack;
 
 	/* XXX: currently, we always do 90/10 splits */
-	splitthreshold = PageGetExactFreeSpace(page) * 0.90;
+	splitthreshold = PageGetExactFreeSpace(page) * 0.10;
 
 	lc = list_head(newitems);
 	origitemno = 0;
@@ -1507,7 +1585,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer origbuf,
 			stack->next = zsbt_newroot(rel, attno, origopaque->zs_level + 1, downlinks);
 
 			/* clear the ZSBT_ROOT flag on the old root page */
-			origopaque->zs_flags &= ~ZSBT_ROOT;
+			ZSBtreePageGetOpaque(stack_first->page)->zs_flags &= ~ZSBT_ROOT;
 		}
 		else
 		{
@@ -1526,8 +1604,8 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer origbuf,
 /*
  * Removes the last item from page, and unlinks the page from the tree.
  *
- *
- * NOTE: you cannot remove the only leaf.
+ * NOTE: you cannot remove the only leaf. Returns NULL if the page could not
+ * be deleted.
  */
 static zs_split_stack *
 zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level)
@@ -1536,14 +1614,12 @@ zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level)
 	ZSBtreePageOpaque *opaque = ZSBtreePageGetOpaque(page);
 	Buffer		leftbuf;
 	Buffer		rightbuf;
-	bool		target_is_left;
+	zs_split_stack *stack;
 
-	/* cannot currently remove the only page at its level. Just empty it. */
+	/* cannot currently remove the only page at its level. */
 	if (opaque->zs_lokey == MinZSTid && opaque->zs_hikey == MaxPlusOneZSTid)
 	{
-		Page		newpage = PageGetTempPageCopySpecial(page);
-
-		return zs_new_split_stack_entry(buf, newpage);
+		return NULL;
 	}
 
 	/*
@@ -1554,16 +1630,27 @@ zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level)
 	{
 		rightbuf = buf;
 		leftbuf = zsbt_descend(rel, attno, opaque->zs_lokey - 1, level);
-		target_is_left = false;
+
+		stack = zsbt_merge_pages(rel, attno, leftbuf, rightbuf, false);
+		if (!stack)
+		{
+			UnlockReleaseBuffer(leftbuf);
+			return NULL;
+		}
 	}
 	else
 	{
 		rightbuf = zsbt_descend(rel, attno, opaque->zs_hikey, level);
 		leftbuf = buf;
-		target_is_left = true;
+		stack = zsbt_merge_pages(rel, attno, leftbuf, rightbuf, true);
+		if (!stack)
+		{
+			UnlockReleaseBuffer(rightbuf);
+			return NULL;
+		}
 	}
 
-	return zsbt_merge_pages(rel, attno, leftbuf, rightbuf, target_is_left);
+	return stack;
 }
 
 /*
@@ -1597,6 +1684,29 @@ zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf
 	rightpage = BufferGetPage(rightbuf);
 	rightopaque = ZSBtreePageGetOpaque(rightpage);
 
+	/* find downlink for 'rightbuf' in the parent */
+	parentbuf = zsbt_descend(rel, attno, rightopaque->zs_lokey, origleftopaque->zs_level + 1);
+	parentpage = BufferGetPage(parentbuf);
+
+	parentitems = ZSBtreeInternalPageGetItems(parentpage);
+	parentnitems = ZSBtreeInternalPageGetNumItems(parentpage);
+	itemno = zsbt_binsrch_internal(rightopaque->zs_lokey, parentitems, parentnitems);
+	if (itemno < 0 || parentitems[itemno].childblk != BufferGetBlockNumber(rightbuf))
+		elog(ERROR, "could not find downlink to FPM page %u", BufferGetBlockNumber(rightbuf));
+
+	if (parentnitems > 1 && itemno == 0)
+	{
+		/*
+		 * Don't delete the leftmost child of a parent. That would move the
+		 * keyspace of the parent, so we'd need to adjust the lo/hikey of
+		 * the parent page, and the parent's downlink in the grandparent.
+		 * Maybe later...
+		 */
+		UnlockReleaseBuffer(parentbuf);
+		elog(NOTICE, "uh-oh!");
+		return NULL;
+	}
+
 	if (target_is_left)
 	{
 		/* move all items from right to left before unlinking the right page */
@@ -1628,16 +1738,6 @@ zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf
 	stack_tail->next = stack;
 	stack_tail = stack;
 
-	/* find downlink for 'rightbuf' in the parent */
-	parentbuf = zsbt_descend(rel, attno, rightopaque->zs_lokey, leftopaque->zs_level + 1);
-	parentpage = BufferGetPage(parentbuf);
-
-	parentitems = ZSBtreeInternalPageGetItems(parentpage);
-	parentnitems = ZSBtreeInternalPageGetNumItems(parentpage);
-	itemno = zsbt_binsrch_internal(rightopaque->zs_lokey, parentitems, parentnitems);
-	if (itemno < 0 || parentitems[itemno].childblk != BufferGetBlockNumber(rightbuf))
-		elog(ERROR, "could not find downlink to FPM page %u", BufferGetBlockNumber(rightbuf));
-
 	/* remove downlink from parent */
 	if (parentnitems > 1)
 	{
@@ -1657,6 +1757,19 @@ zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf
 	{
 		/* the parent becomes empty as well. Recursively remove it. */
 		stack_tail->next = zsbt_unlink_page(rel, attno, parentbuf, leftopaque->zs_level + 1);
+		if (stack_tail->next == NULL)
+		{
+			/* oops, couldn't remove the parent. Back out */
+			stack = stack_head;
+			while (stack)
+			{
+				zs_split_stack *next = stack->next;
+
+				pfree(stack->page);
+				pfree(stack);
+				stack = next;
+			}
+		}
 	}
 
 	return stack_head;
@@ -2305,6 +2418,14 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 
 		stack = zsbt_unlink_page(rel, attno, buf, 0);
 
+		if (!stack)
+		{
+			/* failed. */
+			Page		newpage = PageGetTempPageCopySpecial(BufferGetPage(buf));
+
+			stack = zs_new_split_stack_entry(buf, newpage);
+		}
+
 		/* apply the changes */
 		zs_apply_split_changes(rel, stack);
 	}
@@ -2598,7 +2719,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 		}
 		else
 		{
-			cxt.stack_tail->next = zsbt_insert_downlinks(rel, attno, 
+			cxt.stack_tail->next = zsbt_insert_downlinks(rel, attno,
 														 oldopaque->zs_lokey, BufferGetBlockNumber(oldbuf), oldopaque->zs_level + 1,
 														 downlinks);
 		}

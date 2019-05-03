@@ -43,14 +43,25 @@ zs_new_split_stack_entry(Buffer buf, Page page)
 void
 zs_apply_split_changes(Relation rel, zs_split_stack *stack)
 {
+	zs_split_stack *head = stack;
+
 	START_CRIT_SECTION();
 
 	while (stack)
 	{
-		zs_split_stack *next;
-
 		PageRestoreTempPage(stack->page, BufferGetPage(stack->buf));
 		MarkBufferDirty(stack->buf);
+		stack = stack->next;
+	}
+
+	/* TODO: WAL-log all the changes  */
+
+	END_CRIT_SECTION();
+
+	stack = head;
+	while (stack)
+	{
+		zs_split_stack *next;
 
 		/* add this page to the Free Page Map for recycling */
 		if (stack->recycle)
@@ -62,8 +73,4 @@ zs_apply_split_changes(Relation rel, zs_split_stack *stack)
 		pfree(stack);
 		stack = next;
 	}
-
-	/* TODO: WAL-log all the changes  */
-
-	END_CRIT_SECTION();
 }

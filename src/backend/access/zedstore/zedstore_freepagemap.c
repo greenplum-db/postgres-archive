@@ -805,6 +805,7 @@ zsfpm_insert_downlink(Relation rel, Buffer leftbuf,
 		memcpy(&newitems[pos + 1], &items[pos], (nitems - pos) * sizeof(ZSFreePageMapItem));
 
 		((PageHeader) newpage)->pd_lower += (nitems + 1) * sizeof(ZSFreePageMapItem);
+
 	}
 	else
 	{
