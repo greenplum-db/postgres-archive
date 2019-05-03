@@ -85,6 +85,7 @@ typedef struct ZedStoreDescData *ZedStoreDesc;
 typedef struct ZedStoreIndexFetchData
 {
 	IndexFetchTableData idx_fetch_data;
+	bool        *project_columns;
 	int		   *proj_atts;
 	int			num_proj_atts;
 	MemoryContext context;
@@ -98,11 +99,9 @@ typedef struct ParallelZSScanDescData *ParallelZSScanDesc;
 static IndexFetchTableData *zedstoream_begin_index_fetch(Relation rel);
 static void zedstoream_end_index_fetch(IndexFetchTableData *scan);
 static bool zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
-							 ItemPointer tid_p,
-							 Snapshot snapshot,
-							 TupleTableSlot *slot,
-							 int num_proj_atts,
-							 int *proj_atts);
+								 ItemPointer tid_p,
+								 Snapshot snapshot,
+								 TupleTableSlot *slot);
 
 static Size zs_parallelscan_estimate(Relation rel);
 static Size zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan);
@@ -128,7 +127,7 @@ zedstoream_fetch_row_version(Relation rel,
 	fetcher = zedstoream_begin_index_fetch(rel);
 
 	result = zedstoream_fetch_row((ZedStoreIndexFetchData *) fetcher,
-								  tid_p, snapshot, slot, 0, NULL);
+								  tid_p, snapshot, slot);
 	ExecMaterializeSlot(slot);
 
 	zedstoream_end_index_fetch(fetcher);
@@ -691,7 +690,6 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	bool	   *slot_isnull = slot->tts_isnull;
 
 	zs_initialize_proj_attributes_extended(scan, slot->tts_tupleDescriptor);
-
 	Assert((scan->num_proj_atts - 1) <= slot_natts);
 
 	/*
@@ -701,8 +699,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	 * will be set to the actual values below, but it's important that non-projected
 	 * columns are NULL.
 	 */
-	slot->tts_nvalid = 0;
-	slot->tts_flags |= TTS_FLAG_EMPTY;
+	ExecClearTuple(slot);
 	for (i = 0; i < slot_natts; i++)
 		slot_isnull[i] = true;
 
@@ -868,6 +865,7 @@ zedstoream_begin_index_fetch(Relation rel)
 
 	zscan->idx_fetch_data.rel = rel;
 
+	zscan->project_columns = NULL;
 	zscan->proj_atts = NULL;
 	zscan->btree_scans = NULL;
 	zscan->num_proj_atts = 0;
@@ -876,19 +874,23 @@ zedstoream_begin_index_fetch(Relation rel)
 	return (IndexFetchTableData *) zscan;
 }
 
+static inline void
+z_initialize_for_fetch(ZedStoreIndexFetch zscan, TupleDesc tupledesc)
+{
+	MemoryContext oldcontext;
+	oldcontext = MemoryContextSwitchTo(zscan->context);
+	zs_initialize_proj_attributes(zscan->idx_fetch_data.rel, tupledesc, zscan->project_columns,
+								  &zscan->num_proj_atts, &zscan->proj_atts,
+								  &zscan->btree_scans);
+	MemoryContextSwitchTo(oldcontext);
+}
+
 static void
 zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
 									   bool *project_columns)
 {
-	MemoryContext oldcontext;
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
-	oldcontext = MemoryContextSwitchTo(zscan->context);
-	zs_initialize_proj_attributes(scan->rel,
-								  RelationGetDescr(scan->rel),
-								  project_columns, &zscan->num_proj_atts,
-								  &zscan->proj_atts,
-								  &zscan->btree_scans);
-	MemoryContextSwitchTo(oldcontext);
+	zscan->project_columns = project_columns;
 }
 
 static void
@@ -920,8 +922,6 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 							 TupleTableSlot *slot,
 							 bool *call_again, bool *all_dead)
 {
-	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
-
 	/*
 	 * we don't do in-place updates, so this is essentially the same as
 	 * fetch_row_version.
@@ -931,8 +931,7 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 	if (all_dead)
 		*all_dead = false;
 
-	return zedstoream_fetch_row((ZedStoreIndexFetchData *) scan, tid_p, snapshot, slot,
-								zscan->num_proj_atts, zscan->proj_atts);
+	return zedstoream_fetch_row((ZedStoreIndexFetchData *) scan, tid_p, snapshot, slot);
 }
 
 /*
@@ -942,24 +941,21 @@ static bool
 zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 					 ItemPointer tid_p,
 					 Snapshot snapshot,
-					 TupleTableSlot *slot,
-					 int num_proj_atts,
-					 int *proj_atts)
+					 TupleTableSlot *slot)
 {
 	Relation	rel = fetch->idx_fetch_data.rel;
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	bool		found = true;
 
-	/*
-	 * if caller didn't set any column projections, then lets scan all the
-	 * columns. Passing NULL as second argument sets to scan all the columns.
-	 */
+	/* first time here, initialize */
 	if (fetch->num_proj_atts == 0)
-		zedstoream_fetch_set_column_projection((struct IndexFetchTableData *)fetch, NULL);
-
-	/* If we had a previous fetches still open, close them first */
-	for (int i = 0; i < fetch->num_proj_atts; i++)
-		zsbt_end_scan(&fetch->btree_scans[i]);
+		z_initialize_for_fetch(fetch, slot->tts_tupleDescriptor);
+	else
+	{
+		/* If we had a previous fetches still open, close them first */
+		for (int i = 0; i < fetch->num_proj_atts; i++)
+			zsbt_end_scan(&fetch->btree_scans[i]);
+	}
 
 	/*
 	 * Initialize the slot.
@@ -969,23 +965,16 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 	 * code below will overwrite them for the columns that are projected)
 	 */
 	ExecClearTuple(slot);
-	if (proj_atts)
-	{
-		for (int i = 0; i < slot->tts_tupleDescriptor->natts; i++)
-			slot->tts_isnull[i] = true;
-	}
-	else
-		num_proj_atts = slot->tts_tupleDescriptor->natts + 1;
-
-	fetch->num_proj_atts = num_proj_atts;
+	for (int i = 0; i < slot->tts_tupleDescriptor->natts; i++)
+		slot->tts_isnull[i] = true;
 
 	zsbt_begin_scan(rel, slot->tts_tupleDescriptor, 0, tid, tid + 1, snapshot, &fetch->btree_scans[0]);
 	found = zsbt_scan_next_tid(&fetch->btree_scans[0]) != InvalidZSTid;
 	if (found)
 	{
-		for (int i = 1; i < num_proj_atts; i++)
+		for (int i = 1; i < fetch->num_proj_atts; i++)
 		{
-			int         natt = proj_atts ? proj_atts[i] : i;
+			int         natt = fetch->proj_atts[i];
 			ZSBtreeScan *btscan = &fetch->btree_scans[i];
 			Form_pg_attribute attr;
 			Datum		datum;
