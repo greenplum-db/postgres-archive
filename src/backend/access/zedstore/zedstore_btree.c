@@ -48,6 +48,8 @@ static zs_split_stack *zsbt_split_internal_page(Relation rel, AttrNumber attno,
 												Buffer leftbuf, OffsetNumber newoff, List *downlinks);
 static zs_split_stack *zsbt_newroot(Relation rel, AttrNumber attno, int level,
 									List *downlinks);
+static zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level);
+static zs_split_stack *zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf, bool target_is_left);
 static ZSSingleBtreeItem *zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot,
 		   ZSUndoRecPtr *recent_oldest_undo, zstid tid, Buffer *buf_p);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
@@ -1055,7 +1057,7 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 	item = zsbt_fetch(rel, attno, NULL, NULL, tid, &buf);
 	if (item == NULL)
 	{
-		elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
+		elog(WARNING, "could not find tuple to mark dead with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 		return;
 	}
@@ -1123,7 +1125,7 @@ zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr 
 	item = zsbt_fetch(rel, attno, NULL, NULL, tid, &buf);
 	if (item == NULL)
 	{
-		elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
+		elog(WARNING, "could not find aborted tuple to remove with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 		return;
 	}
@@ -1308,15 +1310,9 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level, List *downlinks)
 
 	metapg->tree_root_dir[attno].root = BufferGetBlockNumber(newrootbuf);
 
-	stack1 = palloc(sizeof(zs_split_stack));
-	stack1->next = NULL;
-	stack1->buf = metabuf;
-	stack1->page = metapage;
-
-	stack2 = palloc(sizeof(zs_split_stack));
+	stack1 = zs_new_split_stack_entry(metabuf, metapage);
+	stack2 = zs_new_split_stack_entry(newrootbuf, newrootpage);
 	stack2->next = stack1;
-	stack2->buf = newrootbuf;
-	stack2->page = newrootpage;
 
 	return stack2;
 }
@@ -1381,10 +1377,7 @@ zsbt_insert_downlinks(Relation rel, AttrNumber attno,
 
 		newpage = PageGetTempPageCopySpecial(parentpage);
 
-		split_stack = palloc(sizeof(zs_split_stack));
-		split_stack->next = NULL;
-		split_stack->buf = parentbuf;
-		split_stack->page = newpage;
+		split_stack = zs_new_split_stack_entry(parentbuf, newpage);
 
 		/* insert the new downlink for the right page. */
 		newitems = ZSBtreeInternalPageGetItems(newpage);
@@ -1434,10 +1427,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer origbuf,
 	page = PageGetTempPageCopySpecial(origpage);
 	buf = origbuf;
 
-	stack = palloc(sizeof(zs_split_stack));
-	stack->next = NULL;
-	stack->buf = buf;
-	stack->page = page;
+	stack = zs_new_split_stack_entry(buf, page);
 	stack_first = stack;
 
 	/* XXX: currently, we always do 90/10 splits */
@@ -1488,10 +1478,8 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer origbuf,
 			prevopaque->zs_next = blkno;
 			prevopaque->zs_hikey = item->tid;
 
-			stack->next = palloc(sizeof(zs_split_stack));
+			stack->next = zs_new_split_stack_entry(buf, page);
 			stack = stack->next;
-			stack->buf = buf;
-			stack->page = page;
 
 			downlink = palloc(sizeof(ZSBtreeInternalPageItem));
 			downlink->tid = item->tid;
@@ -1532,6 +1520,146 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer origbuf,
 	}
 
 	return stack_first;
+}
+
+
+/*
+ * Removes the last item from page, and unlinks the page from the tree.
+ *
+ *
+ * NOTE: you cannot remove the only leaf.
+ */
+static zs_split_stack *
+zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level)
+{
+	Page		page = BufferGetPage(buf);
+	ZSBtreePageOpaque *opaque = ZSBtreePageGetOpaque(page);
+	Buffer		leftbuf;
+	Buffer		rightbuf;
+	bool		target_is_left;
+
+	/* cannot currently remove the only page at its level. Just empty it. */
+	if (opaque->zs_lokey == MinZSTid && opaque->zs_hikey == MaxPlusOneZSTid)
+	{
+		Page		newpage = PageGetTempPageCopySpecial(page);
+
+		return zs_new_split_stack_entry(buf, newpage);
+	}
+
+	/*
+	 * Find left sibling.
+	 * or if this is leftmost page, find right sibling.
+	 */
+	if (opaque->zs_lokey != MinZSTid)
+	{
+		rightbuf = buf;
+		leftbuf = zsbt_descend(rel, attno, opaque->zs_lokey - 1, level);
+		target_is_left = false;
+	}
+	else
+	{
+		rightbuf = zsbt_descend(rel, attno, opaque->zs_hikey, level);
+		leftbuf = buf;
+		target_is_left = true;
+	}
+
+	return zsbt_merge_pages(rel, attno, leftbuf, rightbuf, target_is_left);
+}
+
+/*
+ * Page deletion:
+ *
+ * Mark page empty, remove downlink. If parent becomes empty, recursively delete it.
+ *
+ * Unlike in the nbtree index, we don't need to worry about concurrent scans. They
+ * will simply retry if they land on an unexpected page.
+ */
+static zs_split_stack *
+zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf, bool target_is_left)
+{
+	Buffer		parentbuf;
+	Page		origleftpage;
+	Page		leftpage;
+	Page		rightpage;
+	ZSBtreePageOpaque *leftopaque;
+	ZSBtreePageOpaque *origleftopaque;
+	ZSBtreePageOpaque *rightopaque;
+	ZSBtreeInternalPageItem *parentitems;
+	int			parentnitems;
+	Page		parentpage;
+	int			itemno;
+	zs_split_stack *stack;
+	zs_split_stack *stack_head;
+	zs_split_stack *stack_tail;
+
+	origleftpage = BufferGetPage(leftbuf);
+	origleftopaque = ZSBtreePageGetOpaque(origleftpage);
+	rightpage = BufferGetPage(rightbuf);
+	rightopaque = ZSBtreePageGetOpaque(rightpage);
+
+	if (target_is_left)
+	{
+		/* move all items from right to left before unlinking the right page */
+		leftpage = PageGetTempPageCopy(rightpage);
+		leftopaque = ZSBtreePageGetOpaque(leftpage);
+
+		memcpy(leftopaque, origleftopaque, sizeof(ZSBtreePageOpaque));
+	}
+	else
+	{
+		/* right page is empty. */
+		leftpage = PageGetTempPageCopy(origleftpage);
+		leftopaque = ZSBtreePageGetOpaque(leftpage);
+	}
+
+	/* update left hikey */
+	leftopaque->zs_hikey = ZSBtreePageGetOpaque(rightpage)->zs_hikey;
+
+	Assert(ZSBtreePageGetOpaque(leftpage)->zs_level == ZSBtreePageGetOpaque(rightpage)->zs_level);
+
+	stack = zs_new_split_stack_entry(leftbuf, leftpage);
+	stack_head = stack_tail = stack;
+
+	/* Mark right page as empty/unused */
+	rightpage = palloc0(BLCKSZ);
+
+	stack = zs_new_split_stack_entry(rightbuf, rightpage);
+	stack->recycle = true;
+	stack_tail->next = stack;
+	stack_tail = stack;
+
+	/* find downlink for 'rightbuf' in the parent */
+	parentbuf = zsbt_descend(rel, attno, rightopaque->zs_lokey, leftopaque->zs_level + 1);
+	parentpage = BufferGetPage(parentbuf);
+
+	parentitems = ZSBtreeInternalPageGetItems(parentpage);
+	parentnitems = ZSBtreeInternalPageGetNumItems(parentpage);
+	itemno = zsbt_binsrch_internal(rightopaque->zs_lokey, parentitems, parentnitems);
+	if (itemno < 0 || parentitems[itemno].childblk != BufferGetBlockNumber(rightbuf))
+		elog(ERROR, "could not find downlink to FPM page %u", BufferGetBlockNumber(rightbuf));
+
+	/* remove downlink from parent */
+	if (parentnitems > 1)
+	{
+		Page		newpage = PageGetTempPageCopySpecial(parentpage);
+		ZSBtreeInternalPageItem *newitems = ZSBtreeInternalPageGetItems(newpage);
+
+		memcpy(newitems, parentitems, itemno * sizeof(ZSBtreeInternalPageItem));
+		memcpy(&newitems[itemno], &parentitems[itemno + 1], (parentnitems - itemno -1) * sizeof(ZSBtreeInternalPageItem));
+
+		((PageHeader) newpage)->pd_lower += (parentnitems - 1) * sizeof(ZSBtreeInternalPageItem);
+
+		stack = zs_new_split_stack_entry(parentbuf, newpage);
+		stack_tail->next = stack;
+		stack_tail = stack;
+	}
+	else
+	{
+		/* the parent becomes empty as well. Recursively remove it. */
+		stack_tail->next = zsbt_unlink_page(rel, attno, parentbuf, leftopaque->zs_level + 1);
+	}
+
+	return stack_head;
 }
 
 static ZSSingleBtreeItem *
@@ -2167,7 +2295,19 @@ zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 
 	/* Now pass the list to the recompressor. */
 	IncrBufferRefCount(buf);
-	zsbt_recompress_replace(rel, attno, buf, items);
+	if (items)
+	{
+		zsbt_recompress_replace(rel, attno, buf, items);
+	}
+	else
+	{
+		zs_split_stack *stack;
+
+		stack = zsbt_unlink_page(rel, attno, buf, 0);
+
+		/* apply the changes */
+		zs_apply_split_changes(rel, stack);
+	}
 
 	/*
 	 * We can now free the decompression contexts. The pointers in the 'items' list
@@ -2218,10 +2358,8 @@ zsbt_recompress_newpage(zsbt_recompress_context *cxt, zstid nexttid, int flags)
 	newpage = (Page) palloc(BLCKSZ);
 	PageInit(newpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
 
-	stack = palloc(sizeof(zs_split_stack));
-	stack->next = NULL;
-	stack->buf = InvalidBuffer; /* will be assigned later */
-	stack->page = newpage;
+	stack = zs_new_split_stack_entry(InvalidBuffer, /* will be assigned later */
+									 newpage);
 	if (cxt->stack_tail)
 		cxt->stack_tail->next = stack;
 	else
@@ -2468,22 +2606,7 @@ zsbt_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *ite
 	}
 
 	/* Finally, overwrite all the pages we had to modify */
-	START_CRIT_SECTION();
-	stack = cxt.stack_head;
-	while (stack)
-	{
-		zs_split_stack *next;
-
-		PageRestoreTempPage(stack->page, BufferGetPage(stack->buf));
-		MarkBufferDirty(stack->buf);
-		UnlockReleaseBuffer(stack->buf);
-
-		next = stack->next;
-		pfree(stack);
-		stack = next;
-	}
-	/* TODO: WAL-log all the changes  */
-	END_CRIT_SECTION();
+	zs_apply_split_changes(rel, cxt.stack_head);
 }
 
 static int

@@ -625,13 +625,12 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 
 			Assert(undorec->undorecptr.blkno == lastblk);
 
-			oldest_undorecptr = undorec->undorecptr;
-
 			if (undorec->undorecptr.counter < oldest_undorecptr.counter)
 			{
 				ptr += undorec->size;
 				continue;
 			}
+			oldest_undorecptr = undorec->undorecptr;
 
 			if (!TransactionIdPrecedes(undorec->xid, OldestXmin))
 			{
@@ -658,7 +657,9 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 					break;
 				case ZSUNDO_TYPE_DELETE:
 					if (did_commit)
+					{
 						zsundo_record_dead_tuple(trimstats, undorec->tid);
+					}
 					else
 					{
 						/*

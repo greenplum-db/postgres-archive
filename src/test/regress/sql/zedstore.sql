@@ -49,6 +49,12 @@ update t_zedstore set c2 = 100 where c1 = 8;
 select * from t_zedstore;
 
 --
+-- Test page deletion, by deleting a bigger range of values
+--
+insert into t_zedstore select i,i+1,i+2 from generate_series(10000, 15000)i;
+delete from t_zedstore where c1 >= 10000;
+
+--
 -- Test VACUUM
 --
 vacuum t_zedstore;

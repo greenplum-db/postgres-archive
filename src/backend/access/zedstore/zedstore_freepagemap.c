@@ -183,22 +183,8 @@ zsfpm_delete_leaf(Relation rel, Buffer buf, Buffer metabuf)
 
 		stack = zsfpm_unlink_page(rel, buf, 0, metabuf);
 
-		START_CRIT_SECTION();
-		while (stack)
-		{
-			zs_split_stack *next;
-
-			PageRestoreTempPage(stack->page, BufferGetPage(stack->buf));
-			MarkBufferDirty(stack->buf);
-			UnlockReleaseBuffer(stack->buf);
-
-			next = stack->next;
-			pfree(stack);
-			stack = next;
-		}
-
-		/* TODO: WAL-log */
-		END_CRIT_SECTION();
+		/* apply the changes */
+		zs_apply_split_changes(rel, stack);
 	}
 }
 
@@ -227,7 +213,7 @@ zsfpm_unlink_page(Relation rel, Buffer buf, int level, Buffer metabuf)
 	if (opaque->zs_lokey != 0)
 	{
 		rightbuf = buf;
-		leftbuf = zsfpm_descend(rel, metabuf, opaque->zs_lokey, level);
+		leftbuf = zsfpm_descend(rel, metabuf, opaque->zs_lokey - 1, level);
 		target_is_left = false;
 	}
 	else
@@ -312,19 +298,14 @@ zsfpm_merge_pages(Relation rel, Buffer leftbuf, Buffer rightbuf, bool target_is_
 
 	Assert(ZSFreePageMapGetOpaque(leftpage)->zs_level == ZSFreePageMapGetOpaque(rightpage)->zs_level);
 
-	stack = palloc(sizeof(zs_split_stack));
-	stack->next = NULL;
-	stack->buf = leftbuf;
-	stack->page = leftpage;
+	stack = zs_new_split_stack_entry(leftbuf, leftpage);
 	stack_head = stack_tail = stack;
 
 	/* Mark right page as empty/unused */
 	rightpage = palloc0(BLCKSZ);
 
-	stack = palloc(sizeof(zs_split_stack));
-	stack->next = NULL;
-	stack->buf = rightbuf;
-	stack->page = rightpage;
+	stack = zs_new_split_stack_entry(rightbuf, rightpage);
+	stack->recycle = true;
 	stack_tail->next = stack;
 	stack_tail = stack;
 
@@ -349,10 +330,7 @@ zsfpm_merge_pages(Relation rel, Buffer leftbuf, Buffer rightbuf, bool target_is_
 
 		((PageHeader) newpage)->pd_lower += (parentnitems - 1) * sizeof(ZSFreePageMapItem);
 
-		stack = palloc(sizeof(zs_split_stack));
-		stack->next = NULL;
-		stack->buf = parentbuf;
-		stack->page = newpage;
+		stack = zs_new_split_stack_entry(parentbuf, newpage);
 		stack_tail->next = stack;
 		stack_tail = stack;
 	}
@@ -728,23 +706,7 @@ zsfpm_insert(Relation rel, BlockNumber startblk, BlockNumber endblk)
 		split_stack = zsfpm_split(rel, buf, pos, &newitem);
 
 		/* write out the temporary page copies */
-		START_CRIT_SECTION();
-
-		/* TODO: WAL-log */
-
-		while (split_stack)
-		{
-			zs_split_stack *next;
-
-			PageRestoreTempPage(split_stack->page, BufferGetPage(split_stack->buf));
-			MarkBufferDirty(split_stack->buf);
-			UnlockReleaseBuffer(split_stack->buf);
-
-			next = split_stack->next;
-			pfree(split_stack);
-			split_stack = next;
-		}
-		END_CRIT_SECTION();
+		zs_apply_split_changes(rel, split_stack);
 	}
 }
 
@@ -833,10 +795,7 @@ zsfpm_insert_downlink(Relation rel, Buffer leftbuf,
 
 		newpage = PageGetTempPageCopySpecial(parentpage);
 
-		split_stack = palloc(sizeof(zs_split_stack));
-		split_stack->next = NULL;
-		split_stack->buf = parentbuf;
-		split_stack->page = newpage;
+		split_stack = zs_new_split_stack_entry(parentbuf, newpage);
 
 		newitems = ZSFreePageMapPageGetItems(newpage);
 		memcpy(newitems, items, pos * sizeof(ZSFreePageMapItem));
@@ -955,16 +914,11 @@ zsfpm_split(Relation rel, Buffer leftbuf, int newpos, ZSFreePageMapItem *newitem
 
 	Assert(leftnitems + rightnitems == orignitems + 1);
 
-	stack1 = palloc(sizeof(zs_split_stack));
-	stack1->buf = leftbuf;
-	stack1->page = leftpage;
-
-	stack2 = palloc(sizeof(zs_split_stack));
-	stack2->buf = rightbuf;
-	stack2->page = rightpage;
+	stack1 = zs_new_split_stack_entry(leftbuf, leftpage);
+	stack2 = zs_new_split_stack_entry(rightbuf, rightpage);
+	stack1->next = stack2;
 
 	/* recurse to insert downlink. */
-	stack1->next = stack2;
 	stack2->next = zsfpm_insert_downlink(rel, leftbuf, splitkey, rightblkno);
 
 	return stack1;
@@ -1009,15 +963,10 @@ zsfpm_newroot(Relation rel, Buffer metabuf, int level,
 
 	metaopaque->zs_fpm_root = rootblk;
 
-	stack1 = palloc(sizeof(zs_split_stack));
-	stack1->next = NULL;
-	stack1->buf = metabuf;
-	stack1->page = metapage;
+	stack1 = zs_new_split_stack_entry(metabuf, metapage);
 
-	stack2 = palloc(sizeof(zs_split_stack));
+	stack2 = zs_new_split_stack_entry(buf, page);
 	stack2->next = stack1;
-	stack2->buf = buf;
-	stack2->page = page;
 
 	return stack2;
 }

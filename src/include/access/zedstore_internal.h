@@ -460,7 +460,11 @@ typedef struct ZSBtreeScan
 
 /*
  * zs_split_stack is used during page split, or page merge, to keep track
- * of all the modified pages.
+ * of all the modified pages. The page split (or merge) routines don't
+ * modify pages directly, but they construct a list of 'zs_split_stack'
+ * entries. Each entry holds a buffer, and a temporary in-memory copy of
+ * a page that should be written to the buffer, once everything is completed.
+ * All the buffers are exclusively-locked.
  */
 typedef struct zs_split_stack zs_split_stack;
 
@@ -469,7 +473,8 @@ struct zs_split_stack
 	zs_split_stack *next;
 
 	Buffer		buf;
-	Page		page;
+	Page		page;		/* temp in-memory copy of page */
+	bool		recycle;	/* should the page be added to the FPM? */
 };
 
 /* prototypes for functions in zedstore_btree.c */
@@ -609,5 +614,8 @@ extern Buffer zspage_getnewbuf(Relation rel, Buffer metabuf);
 extern Buffer zspage_extendrel_newbuf(Relation rel);
 extern void zspage_delete_page(Relation rel, Buffer buf);
 
+/* prototypes for functions in zedstore_utils.c */
+extern zs_split_stack *zs_new_split_stack_entry(Buffer buf, Page page);
+extern void zs_apply_split_changes(Relation rel, zs_split_stack *stack);
 
 #endif							/* ZEDSTORE_INTERNAL_H */
