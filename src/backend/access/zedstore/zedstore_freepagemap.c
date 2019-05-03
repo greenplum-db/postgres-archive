@@ -657,7 +657,7 @@ zsfpm_insert(Relation rel, BlockNumber startblk, BlockNumber endblk)
 						&items[replacepos_last + 1],
 						move_items * sizeof(ZSFreePageMapItem));
 
-			((PageHeader) page)->pd_lower = remain_items * sizeof(ZSFreePageMapItem);
+			((PageHeader) page)->pd_lower = SizeOfPageHeaderData + remain_items * sizeof(ZSFreePageMapItem);
 
 		}
 
@@ -677,8 +677,8 @@ zsfpm_insert(Relation rel, BlockNumber startblk, BlockNumber endblk)
 	{
 		START_CRIT_SECTION();
 
-		memmove(&items[pos],
-				&items[pos + 1],
+		memmove(&items[pos + 1],
+				&items[pos],
 				(nitems - pos) * sizeof(ZSFreePageMapItem));
 
 		items[pos].zs_startblk = startblk;
