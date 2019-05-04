@@ -50,21 +50,25 @@ typedef enum
 	ZSSCAN_STATE_FINISHED
 } zs_scan_state;
 
+typedef struct ZedStoreProjectData
+{
+	int			num_proj_atts;
+	bool       *project_columns;
+	int		   *proj_atts;
+	ZSBtreeScan *btree_scans;
+	MemoryContext context;
+}  ZedStoreProjectData;
+
 typedef struct ZedStoreDescData
 {
 	/* scan parameters */
 	TableScanDescData rs_scan;  /* */
-	int		   *proj_atts;
-	ZSBtreeScan *btree_scans;
-	int			num_proj_atts;
-	bool        *project_columns;
+	ZedStoreProjectData proj_data;
 
 	zs_scan_state state;
 	zstid		cur_range_start;
 	zstid		cur_range_end;
 	bool		finished;
-
-	MemoryContext context;
 
 	/* These fields are used for bitmap scans, to hold a "block's" worth of data */
 #define	MAX_ITEMS_PER_LOGICAL_BLOCK		MaxHeapTuplesPerPage
@@ -85,11 +89,7 @@ typedef struct ZedStoreDescData *ZedStoreDesc;
 typedef struct ZedStoreIndexFetchData
 {
 	IndexFetchTableData idx_fetch_data;
-	bool        *project_columns;
-	int		   *proj_atts;
-	int			num_proj_atts;
-	MemoryContext context;
-	ZSBtreeScan *btree_scans;
+	ZedStoreProjectData proj_data;
 } ZedStoreIndexFetchData;
 
 typedef struct ZedStoreIndexFetchData *ZedStoreIndexFetch;
@@ -482,19 +482,18 @@ zedstoream_slot_callbacks(Relation relation)
 }
 
 static inline void
-zs_initialize_proj_attributes(Relation rel, TupleDesc tupledesc,
-							  bool *in_project_columns, int *out_num_proj_atts,
-							  int **out_proj_atts, ZSBtreeScan **btree_scans)
+zs_initialize_proj_attributes(TupleDesc tupledesc, ZedStoreProjectData *proj_data)
 {
-	int *proj_atts;
-	if (*out_num_proj_atts != 0)
+	MemoryContext oldcontext;
+	if (proj_data->num_proj_atts != 0)
 		return;
 
+	oldcontext = MemoryContextSwitchTo(proj_data->context);
 	/* add one for meta-attribute */
-	*out_proj_atts = proj_atts = palloc((tupledesc->natts + 1) * sizeof(int));
-	*btree_scans = palloc0((tupledesc->natts + 1) * sizeof(ZSBtreeScan));
+	proj_data->proj_atts = palloc((tupledesc->natts + 1) * sizeof(int));
+	proj_data->btree_scans = palloc0((tupledesc->natts + 1) * sizeof(ZSBtreeScan));
 
-	proj_atts[(*out_num_proj_atts)++] = ZS_META_ATTRIBUTE_NUM;
+	proj_data->proj_atts[proj_data->num_proj_atts++] = ZS_META_ATTRIBUTE_NUM;
 
 	/*
 	 * convert booleans array into an array of the attribute numbers of the
@@ -512,41 +511,41 @@ zs_initialize_proj_attributes(Relation rel, TupleDesc tupledesc,
 			continue;
 
 		/* project_columns empty also conveys need all the columns */
-		if (in_project_columns == NULL || in_project_columns[idx])
-			proj_atts[(*out_num_proj_atts)++] = att_no;
+		if (proj_data->project_columns == NULL || proj_data->project_columns[idx])
+			proj_data->proj_atts[proj_data->num_proj_atts++] = att_no;
 	}
+
+	MemoryContextSwitchTo(oldcontext);
 }
 
 static inline void
 zs_initialize_proj_attributes_extended(ZedStoreDesc scan, TupleDesc tupledesc)
 {
 	MemoryContext oldcontext;
+	ZedStoreProjectData *proj_data = &scan->proj_data;
 
 	/* if already initialized return */
-	if (scan->num_proj_atts != 0)
+	if (proj_data->num_proj_atts != 0)
 		return;
 
-	oldcontext = MemoryContextSwitchTo(scan->context);
-	zs_initialize_proj_attributes(scan->rs_scan.rs_rd, tupledesc,
-								  scan->project_columns,
-								  &scan->num_proj_atts, &scan->proj_atts,
-								  &scan->btree_scans);
-	MemoryContextSwitchTo(oldcontext);
+	zs_initialize_proj_attributes(tupledesc, proj_data);
 
+	oldcontext = MemoryContextSwitchTo(proj_data->context);
 	/* Extra setup for bitmap and sample scans */
 	if (scan->rs_scan.rs_bitmapscan || scan->rs_scan.rs_samplescan)
 	{
 		scan->bmscan_ntuples = 0;
 		scan->bmscan_tids = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(zstid));
 
-		scan->bmscan_datums = palloc(scan->num_proj_atts * sizeof(Datum *));
-		scan->bmscan_isnulls = palloc(scan->num_proj_atts * sizeof(bool *));
-		for (int i = 0; i < scan->num_proj_atts; i++)
+		scan->bmscan_datums = palloc(proj_data->num_proj_atts * sizeof(Datum *));
+		scan->bmscan_isnulls = palloc(proj_data->num_proj_atts * sizeof(bool *));
+		for (int i = 0; i < proj_data->num_proj_atts; i++)
 		{
 			scan->bmscan_datums[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(Datum));
 			scan->bmscan_isnulls[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(bool));
 		}
 	}
+	MemoryContextSwitchTo(oldcontext);
 }
 
 static TableScanDesc
@@ -573,7 +572,7 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	/*
 	 * allocate and initialize scan descriptor
 	 */
-	scan = (ZedStoreDesc) palloc(sizeof(ZedStoreDescData));
+	scan = (ZedStoreDesc) palloc0(sizeof(ZedStoreDescData));
 
 	scan->rs_scan.rs_rd = relation;
 	scan->rs_scan.rs_snapshot = snapshot;
@@ -585,13 +584,10 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	scan->rs_scan.rs_temp_snap = temp_snap;
 	scan->rs_scan.rs_parallel = parallel_scan;
 
-	scan->context = CurrentMemoryContext;
-
 	/*
 	 * we can use page-at-a-time mode if it's an MVCC-safe snapshot
 	 */
 	scan->rs_scan.rs_pageatatime = allow_pagemode && snapshot && IsMVCCSnapshot(snapshot);
-
 	scan->state = ZSSCAN_STATE_UNSTARTED;
 
 	/*
@@ -603,14 +599,8 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	else
 		scan->rs_scan.rs_key = NULL;
 
-	scan->project_columns = project_columns;
-
-	scan->proj_atts = NULL;
-	scan->btree_scans = NULL;
-	scan->num_proj_atts = 0;
-
-	scan->max_tid_to_scan = InvalidZSTid;
-	scan->next_tid_to_scan = InvalidZSTid;
+	scan->proj_data.context = CurrentMemoryContext;
+	scan->proj_data.project_columns = project_columns;
 
 	/*
 	 * Currently, we don't have a stats counter for bitmap heap scans (but the
@@ -643,18 +633,19 @@ static void
 zedstoream_endscan(TableScanDesc sscan)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	ZedStoreProjectData *proj_data = &scan->proj_data;
 
-	if (scan->proj_atts)
-		pfree(scan->proj_atts);
+	if (proj_data->proj_atts)
+		pfree(proj_data->proj_atts);
 
-	for (int i = 0; i < scan->num_proj_atts; i++)
-		zsbt_end_scan(&scan->btree_scans[i]);
+	for (int i = 0; i < proj_data->num_proj_atts; i++)
+		zsbt_end_scan(&proj_data->btree_scans[i]);
 
 	if (scan->rs_scan.rs_temp_snap)
 		UnregisterSnapshot(scan->rs_scan.rs_snapshot);
 
-	if (scan->btree_scans)
-		pfree(scan->btree_scans);
+	if (proj_data->btree_scans)
+		pfree(proj_data->btree_scans);
 	pfree(scan);
 }
 
@@ -674,8 +665,8 @@ zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
 			allow_pagemode && IsMVCCSnapshot(scan->rs_scan.rs_snapshot);
 	}
 
-	for (int i = 0; i < scan->num_proj_atts; i++)
-		zsbt_end_scan(&scan->btree_scans[i]);
+	for (int i = 0; i < scan->proj_data.num_proj_atts; i++)
+		zsbt_end_scan(&scan->proj_data.btree_scans[i]);
 
 	scan->state = ZSSCAN_STATE_UNSTARTED;
 }
@@ -684,13 +675,14 @@ static bool
 zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	ZedStoreProjectData *scan_proj = &scan->proj_data;
 	int			i;
 	int			slot_natts = slot->tts_tupleDescriptor->natts;
 	Datum	   *slot_values = slot->tts_values;
 	bool	   *slot_isnull = slot->tts_isnull;
 
-	zs_initialize_proj_attributes_extended(scan, slot->tts_tupleDescriptor);
-	Assert((scan->num_proj_atts - 1) <= slot_natts);
+	zs_initialize_proj_attributes(slot->tts_tupleDescriptor, scan_proj);
+	Assert((scan_proj->num_proj_atts - 1) <= slot_natts);
 
 	/*
 	 * Initialize the slot.
@@ -736,10 +728,10 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				scan->cur_range_end = MaxPlusOneZSTid;
 			}
 
-			oldcontext = MemoryContextSwitchTo(scan->context);
-			for (int i = 0; i < scan->num_proj_atts; i++)
+			oldcontext = MemoryContextSwitchTo(scan_proj->context);
+			for (int i = 0; i < scan_proj->num_proj_atts; i++)
 			{
-				int			natt = scan->proj_atts[i];
+				int			natt = scan_proj->proj_atts[i];
 
 				zsbt_begin_scan(scan->rs_scan.rs_rd,
 								slot->tts_tupleDescriptor,
@@ -747,7 +739,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 								scan->cur_range_start,
 								scan->cur_range_end,
 								scan->rs_scan.rs_snapshot,
-								&scan->btree_scans[i]);
+								&scan_proj->btree_scans[i]);
 			}
 			MemoryContextSwitchTo(oldcontext);
 			scan->state = ZSSCAN_STATE_SCANNING;
@@ -756,7 +748,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		/* We now have a range to scan. Find the next visible TID. */
 		Assert(scan->state == ZSSCAN_STATE_SCANNING);
 
-		this_tid = zsbt_scan_next_tid(&scan->btree_scans[0]);
+		this_tid = zsbt_scan_next_tid(&scan_proj->btree_scans[0]);
 		if (this_tid == InvalidZSTid)
 		{
 			scan->state = ZSSCAN_STATE_FINISHED_RANGE;
@@ -766,9 +758,9 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			Assert (this_tid < scan->cur_range_end);
 
 			/* Fetch the datums of each attribute for this row */
-			for (int i = 1; i < scan->num_proj_atts; i++)
+			for (int i = 1; i < scan_proj->num_proj_atts; i++)
 			{
-				ZSBtreeScan	*btscan = &scan->btree_scans[i];
+				ZSBtreeScan	*btscan = &scan_proj->btree_scans[i];
 				Form_pg_attribute attr = ZSBtreeScanGetAttInfo(btscan);
 				int			natt;
 
@@ -779,7 +771,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				 * flatten any ZS-TOASTed values, because the rest of the system
 				 * doesn't know how to deal with them.
 				 */
-				natt = scan->proj_atts[i];
+				natt = scan_proj->proj_atts[i];
 
 				if (!isnull && attr->attlen == -1 &&
 					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
@@ -804,8 +796,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 		if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
 		{
-			for (int i = 0; i < scan->num_proj_atts; i++)
-				zsbt_end_scan(&scan->btree_scans[i]);
+			for (int i = 0; i < scan_proj->num_proj_atts; i++)
+				zsbt_end_scan(&scan_proj->btree_scans[i]);
 		}
 		else
 		{
@@ -864,25 +856,9 @@ zedstoream_begin_index_fetch(Relation rel)
 	ZedStoreIndexFetch zscan = palloc0(sizeof(ZedStoreIndexFetchData));
 
 	zscan->idx_fetch_data.rel = rel;
-
-	zscan->project_columns = NULL;
-	zscan->proj_atts = NULL;
-	zscan->btree_scans = NULL;
-	zscan->num_proj_atts = 0;
-	zscan->context = CurrentMemoryContext;
+	zscan->proj_data.context = CurrentMemoryContext;
 
 	return (IndexFetchTableData *) zscan;
-}
-
-static inline void
-z_initialize_for_fetch(ZedStoreIndexFetch zscan, TupleDesc tupledesc)
-{
-	MemoryContext oldcontext;
-	oldcontext = MemoryContextSwitchTo(zscan->context);
-	zs_initialize_proj_attributes(zscan->idx_fetch_data.rel, tupledesc, zscan->project_columns,
-								  &zscan->num_proj_atts, &zscan->proj_atts,
-								  &zscan->btree_scans);
-	MemoryContextSwitchTo(oldcontext);
 }
 
 static void
@@ -890,7 +866,7 @@ zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
 									   bool *project_columns)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
-	zscan->project_columns = project_columns;
+	zscan->proj_data.project_columns = project_columns;
 }
 
 static void
@@ -903,15 +879,16 @@ static void
 zedstoream_end_index_fetch(IndexFetchTableData *scan)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
+	ZedStoreProjectData *zscan_proj = &zscan->proj_data;
 
-	for (int i = 0; i < zscan->num_proj_atts; i++)
-		zsbt_end_scan(&zscan->btree_scans[i]);
+	for (int i = 0; i < zscan_proj->num_proj_atts; i++)
+		zsbt_end_scan(&zscan_proj->btree_scans[i]);
 
-	if (zscan->proj_atts)
-		pfree(zscan->proj_atts);
+	if (zscan_proj->proj_atts)
+		pfree(zscan_proj->proj_atts);
 
-	if (zscan->btree_scans)
-		pfree(zscan->btree_scans);
+	if (zscan_proj->btree_scans)
+		pfree(zscan_proj->btree_scans);
 	pfree(zscan);
 }
 
@@ -946,15 +923,16 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 	Relation	rel = fetch->idx_fetch_data.rel;
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	bool		found = true;
+	ZedStoreProjectData *fetch_proj = &fetch->proj_data;
 
 	/* first time here, initialize */
-	if (fetch->num_proj_atts == 0)
-		z_initialize_for_fetch(fetch, slot->tts_tupleDescriptor);
+	if (fetch_proj->num_proj_atts == 0)
+		zs_initialize_proj_attributes(slot->tts_tupleDescriptor, fetch_proj);
 	else
 	{
 		/* If we had a previous fetches still open, close them first */
-		for (int i = 0; i < fetch->num_proj_atts; i++)
-			zsbt_end_scan(&fetch->btree_scans[i]);
+		for (int i = 0; i < fetch_proj->num_proj_atts; i++)
+			zsbt_end_scan(&fetch_proj->btree_scans[i]);
 	}
 
 	/*
@@ -968,14 +946,15 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 	for (int i = 0; i < slot->tts_tupleDescriptor->natts; i++)
 		slot->tts_isnull[i] = true;
 
-	zsbt_begin_scan(rel, slot->tts_tupleDescriptor, 0, tid, tid + 1, snapshot, &fetch->btree_scans[0]);
-	found = zsbt_scan_next_tid(&fetch->btree_scans[0]) != InvalidZSTid;
+	zsbt_begin_scan(rel, slot->tts_tupleDescriptor, 0, tid, tid + 1,
+					snapshot, &fetch_proj->btree_scans[0]);
+	found = zsbt_scan_next_tid(&fetch_proj->btree_scans[0]) != InvalidZSTid;
 	if (found)
 	{
-		for (int i = 1; i < fetch->num_proj_atts; i++)
+		for (int i = 1; i < fetch_proj->num_proj_atts; i++)
 		{
-			int         natt = fetch->proj_atts[i];
-			ZSBtreeScan *btscan = &fetch->btree_scans[i];
+			int         natt = fetch_proj->proj_atts[i];
+			ZSBtreeScan *btscan = &fetch_proj->btree_scans[i];
 			Form_pg_attribute attr;
 			Datum		datum;
 			bool        isnull;
@@ -1293,13 +1272,14 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 		if (start_blockno != 0 || numblocks != InvalidBlockNumber)
 		{
 			ZedStoreDesc zscan = (ZedStoreDesc) scan;
+			ZedStoreProjectData *zscan_proj = &zscan->proj_data;
 
 			zscan->cur_range_start = ZSTidFromBlkOff(start_blockno, 1);
 			zscan->cur_range_end = ZSTidFromBlkOff(numblocks, 1);
 
-			for (int i = 0; i < zscan->num_proj_atts; i++)
+			for (int i = 0; i < zscan_proj->num_proj_atts; i++)
 			{
-				int			natt = zscan->proj_atts[i];
+				int			natt = zscan_proj->proj_atts[i];
 
 				zsbt_begin_scan(zscan->rs_scan.rs_rd,
 								RelationGetDescr(zscan->rs_scan.rs_rd),
@@ -1307,7 +1287,7 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 								zscan->cur_range_start,
 								zscan->cur_range_end,
 								zscan->rs_scan.rs_snapshot,
-								&zscan->btree_scans[i]);
+								&zscan_proj->btree_scans[i]);
 			}
 			zscan->state = ZSSCAN_STATE_SCANNING;
 		}
@@ -1572,9 +1552,9 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 
 	if (ntuples)
 	{
-		for (int i = 1; i < scan->num_proj_atts; i++)
+		for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
 		{
-			int			natt = scan->proj_atts[i];
+			int			natt = scan->proj_data.proj_atts[i];
 			ZSBtreeScan	btree_scan;
 			Datum		datum;
 			bool        isnull;
@@ -1629,11 +1609,15 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin
 
 	if (scan->bmscan_nexttuple >= scan->bmscan_ntuples)
 		return false;
-
+	/*
+	 * projection attributes were created based on Relation tuple descriptor
+	 * it better match TupleTableSlot.
+	 */
+	Assert((scan->proj_data.num_proj_atts - 1) <= slot->tts_tupleDescriptor->natts);
 	tid = scan->bmscan_tids[scan->bmscan_nexttuple];
-	for (int i = 1; i < scan->num_proj_atts; i++)
+	for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
 	{
-		int			natt = scan->proj_atts[i];
+		int			natt = scan->proj_data.proj_atts[i];
 		Form_pg_attribute att = TupleDescAttr(slot->tts_tupleDescriptor, natt - 1);
 
 		Datum		datum;
@@ -1835,9 +1819,9 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 
 	if (ntuples)
 	{
-		for (int i = 1; i < scan->num_proj_atts; i++)
+		for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
 		{
-			int			natt = scan->proj_atts[i];
+			int			natt = scan->proj_data.proj_atts[i];
 			ZSBtreeScan	btree_scan;
 			Datum		datum;
 			bool        isnull;
@@ -1883,11 +1867,15 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 
 	if (scan->bmscan_nexttuple >= scan->bmscan_ntuples)
 		return false;
-
+	/*
+	 * projection attributes were created based on Relation tuple descriptor
+	 * it better match TupleTableSlot.
+	 */
+	Assert((scan->proj_data.num_proj_atts - 1) <= slot->tts_tupleDescriptor->natts);
 	tid = scan->bmscan_tids[scan->bmscan_nexttuple];
-	for (int i = 1; i < scan->num_proj_atts; i++)
+	for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
 	{
-		int			natt = scan->proj_atts[i];
+		int			natt = scan->proj_data.proj_atts[i];
 		Form_pg_attribute att = TupleDescAttr(slot->tts_tupleDescriptor, natt - 1);
 		Datum		datum;
 		bool        isnull;
@@ -2037,10 +2025,15 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 			continue;
 	}
 
+	/*
+	 * projection attributes were created based on Relation tuple descriptor
+	 * it better match TupleTableSlot.
+	 */
+	Assert((scan->proj_data.num_proj_atts - 1) <= slot->tts_tupleDescriptor->natts);
 	/* fetch values for tuple pointed by tid to sample */
-	for (int i = 1; i < scan->num_proj_atts; i++)
+	for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
 	{
-		int			natt = scan->proj_atts[i];
+		int			natt = scan->proj_data.proj_atts[i];
 		ZSBtreeScan btree_scan;
 		Form_pg_attribute attr;
 		Datum		datum;
