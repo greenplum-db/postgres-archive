@@ -639,7 +639,7 @@ DefineIndex(Oid relationId,
 		if (partitioned && tablespaceId == MyDatabaseTableSpace)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("cannot specify default tablespace for partitioned relation")));
+					 errmsg("cannot specify default tablespace for partitioned relations")));
 	}
 	else
 	{
@@ -1151,6 +1151,18 @@ DefineIndex(Oid relationId,
 					ListCell   *lc;
 
 					/*
+					 * We can't use the same index name for the child index,
+					 * so clear idxname to let the recursive invocation choose
+					 * a new name.  Likewise, the existing target relation
+					 * field is wrong, and if indexOid or oldNode are set,
+					 * they mustn't be applied to the child either.
+					 */
+					childStmt->idxname = NULL;
+					childStmt->relation = NULL;
+					childStmt->indexOid = InvalidOid;
+					childStmt->oldNode = InvalidOid;
+
+					/*
 					 * Adjust any Vars (both in expressions and in the index's
 					 * WHERE clause) to match the partition's column numbering
 					 * in case it's different from the parent's.
@@ -1181,8 +1193,6 @@ DefineIndex(Oid relationId,
 					if (found_whole_row)
 						elog(ERROR, "cannot convert whole-row table reference");
 
-					childStmt->idxname = NULL;
-					childStmt->relation = NULL;
 					DefineIndex(childRelid, childStmt,
 								InvalidOid, /* no predefined OID */
 								indexRelationId,	/* this is our child */
@@ -1209,7 +1219,7 @@ DefineIndex(Oid relationId,
 
 				tup = SearchSysCache1(INDEXRELID,
 									  ObjectIdGetDatum(indexRelationId));
-				if (!tup)
+				if (!HeapTupleIsValid(tup))
 					elog(ERROR, "cache lookup failed for index %u",
 						 indexRelationId);
 				newtup = heap_copytuple(tup);
@@ -3441,10 +3451,11 @@ update_relispartition(Oid relationId, bool newval)
 
 	classRel = table_open(RelationRelationId, RowExclusiveLock);
 	tup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relationId));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for relation %u", relationId);
 	Assert(((Form_pg_class) GETSTRUCT(tup))->relispartition != newval);
 	((Form_pg_class) GETSTRUCT(tup))->relispartition = newval;
 	CatalogTupleUpdate(classRel, &tup->t_self, tup);
 	heap_freetuple(tup);
-
 	table_close(classRel, RowExclusiveLock);
 }

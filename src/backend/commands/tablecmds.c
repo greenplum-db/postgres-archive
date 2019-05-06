@@ -7689,12 +7689,14 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 				fkconstraint->fk_upd_action == FKCONSTR_ACTION_CASCADE)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("invalid ON UPDATE action for foreign key constraint containing generated column")));
+						 errmsg("invalid %s action for foreign key constraint containing generated column",
+								"ON UPDATE")));
 			if (fkconstraint->fk_del_action == FKCONSTR_ACTION_SETNULL ||
 				fkconstraint->fk_del_action == FKCONSTR_ACTION_SETDEFAULT)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("invalid ON DELETE action for foreign key constraint containing generated column")));
+						 errmsg("invalid %s action for foreign key constraint containing generated column",
+								"ON DELETE")));
 		}
 	}
 
@@ -8604,7 +8606,7 @@ CloneFkReferencing(List **wqueue, Relation parentRel, Relation partRel)
 		ListCell   *cell;
 
 		tuple = SearchSysCache1(CONSTROID, parentConstrOid);
-		if (!tuple)
+		if (!HeapTupleIsValid(tuple))
 			elog(ERROR, "cache lookup failed for constraint %u",
 				 parentConstrOid);
 		constrForm = (Form_pg_constraint) GETSTRUCT(tuple);
@@ -8783,7 +8785,7 @@ tryAttachPartitionForeignKey(ForeignKeyCacheInfo *fk,
 
 	parentConstrTup = SearchSysCache1(CONSTROID,
 									  ObjectIdGetDatum(parentConstrOid));
-	if (!parentConstrTup)
+	if (!HeapTupleIsValid(parentConstrTup))
 		elog(ERROR, "cache lookup failed for constraint %u", parentConstrOid);
 	parentConstr = (Form_pg_constraint) GETSTRUCT(parentConstrTup);
 
@@ -8814,9 +8816,8 @@ tryAttachPartitionForeignKey(ForeignKeyCacheInfo *fk,
 	 */
 	partcontup = SearchSysCache1(CONSTROID,
 								 ObjectIdGetDatum(fk->conoid));
-	if (!partcontup)
-		elog(ERROR, "cache lookup failed for constraint %u",
-			 fk->conoid);
+	if (!HeapTupleIsValid(partcontup))
+		elog(ERROR, "cache lookup failed for constraint %u", fk->conoid);
 	partConstr = (Form_pg_constraint) GETSTRUCT(partcontup);
 	if (OidIsValid(partConstr->conparentid) ||
 		!partConstr->convalidated ||
@@ -11452,7 +11453,9 @@ TryReuseIndex(Oid oldId, IndexStmt *stmt)
 	{
 		Relation	irel = index_open(oldId, NoLock);
 
-		stmt->oldNode = irel->rd_node.relNode;
+		/* If it's a partitioned index, there is no storage to share. */
+		if (irel->rd_rel->relkind != RELKIND_PARTITIONED_INDEX)
+			stmt->oldNode = irel->rd_node.relNode;
 		index_close(irel, NoLock);
 	}
 }
@@ -12235,14 +12238,6 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 	rd_rel = (Form_pg_class) GETSTRUCT(tuple);
 
 	/*
-	 * Since we copy the file directly without looking at the shared buffers,
-	 * we'd better first flush out any pages of the source relation that are
-	 * in shared buffers.  We assume no new changes will be made while we are
-	 * holding exclusive lock on the rel.
-	 */
-	FlushRelationBuffers(rel);
-
-	/*
 	 * Relfilenodes are not unique in databases across tablespaces, so we need
 	 * to allocate a new one in the new tablespace.
 	 */
@@ -12264,10 +12259,16 @@ ATExecSetTableSpace(Oid tableOid, Oid newTableSpace, LOCKMODE lockmode)
 		Assert(rel->rd_rel->relkind == RELKIND_RELATION ||
 			   rel->rd_rel->relkind == RELKIND_MATVIEW ||
 			   rel->rd_rel->relkind == RELKIND_TOASTVALUE);
-		table_relation_copy_data(rel, newrnode);
+		table_relation_copy_data(rel, &newrnode);
 	}
 
-	/* update the pg_class row */
+	/*
+	 * Update the pg_class row.
+	 *
+	 * NB: This wouldn't work if ATExecSetTableSpace() were allowed to be
+	 * executed on pg_class or its indexes (the above copy wouldn't contain
+	 * the updated pg_class entry), but that's forbidden above.
+	 */
 	rd_rel->reltablespace = (newTableSpace == MyDatabaseTableSpace) ? InvalidOid : newTableSpace;
 	rd_rel->relfilenode = newrelfilenode;
 	CatalogTupleUpdate(pg_class, &tuple->t_self, tuple);
@@ -12534,6 +12535,14 @@ index_copy_data(Relation rel, RelFileNode newrnode)
 
 	dstrel = smgropen(newrnode, rel->rd_backend);
 	RelationOpenSmgr(rel);
+
+	/*
+	 * Since we copy the file directly without looking at the shared buffers,
+	 * we'd better first flush out any pages of the source relation that are
+	 * in shared buffers.  We assume no new changes will be made while we are
+	 * holding exclusive lock on the rel.
+	 */
+	FlushRelationBuffers(rel);
 
 	/*
 	 * Create and copy all forks of the relation, and schedule unlinking of
@@ -15991,7 +16000,7 @@ ATExecDetachPartition(Relation rel, RangeVar *name)
 		Constraint *fkconstraint;
 
 		contup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(fk->conoid));
-		if (!contup)
+		if (!HeapTupleIsValid(contup))
 			elog(ERROR, "cache lookup failed for constraint %u", fk->conoid);
 		conform = (Form_pg_constraint) GETSTRUCT(contup);
 
@@ -16336,9 +16345,8 @@ validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 
 		indTup = SearchSysCache1(INDEXRELID,
 								 ObjectIdGetDatum(inhForm->inhrelid));
-		if (!indTup)
-			elog(ERROR, "cache lookup failed for index %u",
-				 inhForm->inhrelid);
+		if (!HeapTupleIsValid(indTup))
+			elog(ERROR, "cache lookup failed for index %u", inhForm->inhrelid);
 		indexForm = (Form_pg_index) GETSTRUCT(indTup);
 		if (indexForm->indisvalid)
 			tuples += 1;
