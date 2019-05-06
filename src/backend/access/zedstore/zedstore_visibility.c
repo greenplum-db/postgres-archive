@@ -589,6 +589,7 @@ fetch_undo_record:
 bool
 zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
+	ZSUndoRecPtr undo_ptr;
 	/*
 	 * This works on a single or array item. Compressed items don't have
 	 * visibility information (the items inside the compressed container
@@ -602,6 +603,21 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
 	/* dead items are never considered visible. */
 	if ((item->t_flags & ZSBT_DEAD) != 0)
 		return false;
+
+	/*
+	 * Items with invalid undo record are considered visible. Mostly META
+	 * column stores the valid undo record, all other columns stores invalid
+	 * undo pointer. Visibility check is performed based on META column and
+	 * only if visible rest of columns are fetched. For in-place updates,
+	 * columns other than META column may have valid undo record, in which
+	 * case the visibility check needs to be performed for the same.
+	 */
+	undo_ptr = zsbt_item_undoptr(item);
+	if (!IsZSUndoRecPtrValid(&undo_ptr))
+	{
+		Assert(scan->attno != ZS_META_ATTRIBUTE_NUM);
+		return true;
+	}
 
 	switch (scan->snapshot->snapshot_type)
 	{
