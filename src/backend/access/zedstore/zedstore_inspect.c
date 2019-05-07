@@ -107,7 +107,10 @@ pg_zs_page_type(PG_FUNCTION_ARGS)
 			result = "UNDO";
 			break;
 		case ZS_TOAST_PAGE_ID:
-			result = "UNDO";
+			result = "TOAST";
+			break;
+		case ZS_FPM_PAGE_ID:
+			result = "FPM";
 			break;
 		default:
 			result = psprintf("UNKNOWN 0x%04x", zs_page_id);
