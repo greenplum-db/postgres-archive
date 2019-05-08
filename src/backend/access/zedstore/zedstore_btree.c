@@ -1689,7 +1689,7 @@ zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf
 		 * Maybe later...
 		 */
 		UnlockReleaseBuffer(parentbuf);
-		elog(NOTICE, "uh-oh!");
+		elog(DEBUG1, "deleting leftmost child of a parent not implemented");
 		return NULL;
 	}
 
