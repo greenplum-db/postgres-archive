@@ -649,7 +649,7 @@ zsfpm_insert(Relation rel, BlockNumber startblk, BlockNumber endblk)
 		/* we already adjusted the item at 'replacepos_first'. Remove the rest. */
 		if (replacepos_last > replacepos_first)
 		{
-			int			move_items = (replacepos_last + 1 - nitems);
+			int			move_items = nitems - replacepos_last;
 			int			remain_items = nitems - (replacepos_last - replacepos_first);
 
 			if (move_items > 0)
