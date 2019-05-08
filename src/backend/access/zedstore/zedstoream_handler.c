@@ -1172,7 +1172,6 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 								  void *callback_state,
 								  TableScanDesc scan)
 {
-	bool		checking_uniqueness;
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
 	double		reltuples;
@@ -1185,11 +1184,8 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	bool		need_unregister_snapshot = false;
 	TransactionId OldestXmin;
 
-	/*
-	 * sanity checks
-	 */
-	Assert(OidIsValid(indexRelation->rd_rel->relam));
-
+#ifdef USE_ASSERT_CHECKING
+	bool		checking_uniqueness;
 	/* See whether we're verifying uniqueness/exclusion properties */
 	checking_uniqueness = (indexInfo->ii_Unique ||
 						   indexInfo->ii_ExclusionOps != NULL);
@@ -1199,6 +1195,12 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	 * only one of those is requested.
 	 */
 	Assert(!(anyvisible && checking_uniqueness));
+#endif
+
+	/*
+	 * sanity checks
+	 */
+	Assert(OidIsValid(indexRelation->rd_rel->relam));
 
 	/*
 	 * Need an EState for evaluation of index expressions and partial-index

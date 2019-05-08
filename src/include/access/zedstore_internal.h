@@ -522,7 +522,6 @@ zsbt_scan_next_tid(ZSBtreeScan *scan)
 	} while(zsbt_scan_next(scan));
 
 	return InvalidZSTid;
-
 }
 
 /*

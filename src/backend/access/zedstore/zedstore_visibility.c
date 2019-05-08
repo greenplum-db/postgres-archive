@@ -313,14 +313,13 @@ static bool
 zs_SatisfiesSelf(ZSBtreeScan *scan, ZSBtreeItem *item)
 {
 	Relation	rel = scan->rel;
-	Snapshot	snapshot = scan->snapshot;
 	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
 	ZSUndoRec  *undorec;
 	bool		is_deleted;
 	ZSUndoRecPtr undoptr = zsbt_item_undoptr(item);
 
 	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
-	Assert (snapshot->snapshot_type == SNAPSHOT_SELF);
+	Assert (scan->snapshot->snapshot_type == SNAPSHOT_SELF);
 
 	is_deleted = (item->t_flags & (ZSBT_UPDATED | ZSBT_DELETED)) != 0;
 

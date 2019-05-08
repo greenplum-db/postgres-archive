@@ -294,10 +294,8 @@ zsbt_scan_next(ZSBtreeScan *scan)
 	OffsetNumber off;
 	OffsetNumber maxoff;
 	BlockNumber	next;
-	Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
 
-	if (!scan->active)
-		return false;
+	Assert(scan->active);
 
 	/*
 	 * Process items, until we find something that is visible to the snapshot.
@@ -361,6 +359,7 @@ zsbt_scan_next(ZSBtreeScan *scan)
 			{
 				/* single item */
 				ZSSingleBtreeItem *sitem = (ZSSingleBtreeItem *) uitem;
+				Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
 
 				scan->nexttid = sitem->t_tid;
 				scan->array_elements_left = 1;
@@ -496,6 +495,7 @@ zsbt_scan_next(ZSBtreeScan *scan)
 				{
 					/* single item */
 					ZSSingleBtreeItem *sitem = (ZSSingleBtreeItem *) item;
+					Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
 
 					scan->nexttid = sitem->t_tid;
 					scan->array_elements_left = 1;
