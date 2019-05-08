@@ -1050,6 +1050,8 @@ zedstoream_index_validate_scan(Relation baseRelation,
 		if (indexInfo->ii_IndexAttrNumbers[attno] > 0)
 			proj[indexInfo->ii_IndexAttrNumbers[attno] - 1] = true;
 	}
+	GetNeededColumnsForNode((Node *)indexInfo->ii_Predicate, proj,
+							baseRelation->rd_att->natts);
 	GetNeededColumnsForNode((Node *)indexInfo->ii_Expressions, proj,
 							baseRelation->rd_att->natts);
 
@@ -1260,6 +1262,8 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 				proj[indexInfo->ii_IndexAttrNumbers[attno] - 1] = true;
 		}
 
+		GetNeededColumnsForNode((Node *)indexInfo->ii_Predicate, proj,
+								baseRelation->rd_att->natts);
 		GetNeededColumnsForNode((Node *)indexInfo->ii_Expressions, proj,
 								baseRelation->rd_att->natts);
 
