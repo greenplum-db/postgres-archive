@@ -642,10 +642,6 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 			 * No one thinks this transaction is in-progress anymore. If it
 			 * committed, we can just trim away its UNDO record. If it aborted,
 			 * we need to apply the UNDO record first.
-			 *
-			 * TODO: applying UNDO actions has not been implemented, so if we
-			 * encounter an aborted record, we just stop dead right there, and
-			 * never trim past that point.
 			 */
 			did_commit = TransactionIdDidCommit(undorec->xid);
 
@@ -753,7 +749,6 @@ zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumb
 	MarkBufferDirty(metabuf);
 	UnlockReleaseBuffer(metabuf);
 
-	/* TODO: we leak all the removed undo pages */
 	foreach(lc, unused_pages)
 	{
 		BlockNumber blk = (BlockNumber) lfirst_int(lc);
