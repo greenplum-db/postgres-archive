@@ -609,14 +609,13 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
 	 * undo pointer. Visibility check is performed based on META column and
 	 * only if visible rest of columns are fetched. For in-place updates,
 	 * columns other than META column may have valid undo record, in which
-	 * case the visibility check needs to be performed for the same.
+	 * case the visibility check needs to be performed for the same. META
+	 * column can sometime also have items with invalid undo, see
+	 * zsbt_undo_item_deletion().
 	 */
 	undo_ptr = zsbt_item_undoptr(item);
 	if (!IsZSUndoRecPtrValid(&undo_ptr))
-	{
-		Assert(scan->attno != ZS_META_ATTRIBUTE_NUM);
 		return true;
-	}
 
 	switch (scan->snapshot->snapshot_type)
 	{
