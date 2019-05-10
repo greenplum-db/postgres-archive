@@ -471,9 +471,8 @@ struct zs_split_stack
 
 /* prototypes for functions in zedstore_btree.c */
 extern void zsbt_multi_insert(Relation rel, AttrNumber attno,
-						Datum *datums, bool *isnulls, zstid *tids, int ndatums,
-						TransactionId xid, CommandId cid,
-						ZSUndoRecPtr *undorecptr);
+							  Datum *datums, bool *isnulls, zstid *tids, int ndatums,
+							  TransactionId xid, CommandId cid);
 extern TM_Result zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 							 TransactionId xid, CommandId cid,
 							 Snapshot snapshot, Snapshot crosscheck, bool wait,

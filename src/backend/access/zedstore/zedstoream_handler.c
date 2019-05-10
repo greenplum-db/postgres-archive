@@ -153,7 +153,6 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	Datum	   *d;
 	bool	   *isnulls;
 	zstid		tid;
-	ZSUndoRecPtr undorecptr;
 	TransactionId xid = GetCurrentTransactionId();
 	bool        isnull;
 	Datum       datum;
@@ -166,12 +165,11 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	isnulls = slot->tts_isnull;
 
 	tid = InvalidZSTid;
-	ZSUndoRecPtrInitialize(&undorecptr);
 
 	isnull = true;
 	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
 					  &datum, &isnull, &tid, 1,
-					  xid, cid, &undorecptr);
+					  xid, cid);
 
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
@@ -192,7 +190,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 		zsbt_multi_insert(relation, attno,
 						  &datum, &isnull, &tid, 1,
-						  xid, cid, NULL);
+						  xid, cid);
 
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, tid);
@@ -228,7 +226,6 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 						CommandId cid, int options, BulkInsertState bistate)
 {
 	AttrNumber	attno;
-	ZSUndoRecPtr undorecptr;
 	int			i;
 	bool		slotgetandset = true;
 	TransactionId xid = GetCurrentTransactionId();
@@ -242,14 +239,12 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	isnulls = palloc(ntuples * sizeof(bool));
 	tids = palloc0(ntuples * sizeof(zstid));
 
-	ZSUndoRecPtrInitialize(&undorecptr);
-
 	for (i = 0; i < ntuples; i++)
 		isnulls[i] = true;
 
 	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
 					  datums, isnulls, tids, ntuples,
-					  xid, cid, &undorecptr);
+					  xid, cid);
 
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
@@ -279,7 +274,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		zsbt_multi_insert(relation, attno,
 						  datums, isnulls, tids, ntuples,
-						  xid, cid, NULL);
+						  xid, cid);
 
 		for (i = 0; i < ntupletoasted; i++)
 		{
@@ -443,7 +438,7 @@ retry:
 
 			zsbt_multi_insert(relation, attno,
 							  &newdatum, &newisnull, &newtid, 1,
-							  xid, cid, NULL);
+							  xid, cid);
 
 			if (toastptr != (Datum) 0)
 				zedstore_toast_finish(relation, attno, toastptr, newtid);

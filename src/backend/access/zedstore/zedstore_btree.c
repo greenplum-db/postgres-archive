@@ -596,7 +596,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 void
 zsbt_multi_insert(Relation rel, AttrNumber attno,
 				  Datum *datums, bool *isnulls, zstid *tids, int nitems,
-				  TransactionId xid, CommandId cid, ZSUndoRecPtr *undorecptr_p)
+				  TransactionId xid, CommandId cid)
 {
 	Form_pg_attribute attr;
 	bool		assign_tids;
@@ -665,10 +665,8 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 	}
 
 	/* Form an undo record */
-	if (undorecptr_p)
+	if (attno == ZS_META_ATTRIBUTE_NUM)
 	{
-		Assert(attno == ZS_META_ATTRIBUTE_NUM);
-
 		undorec.rec.size = sizeof(ZSUndoRec_Insert);
 		undorec.rec.type = ZSUNDO_TYPE_INSERT;
 		undorec.rec.xid = xid;
@@ -677,7 +675,6 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 		undorec.endtid = tids[nitems - 1];
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
-		*undorecptr_p = undorecptr;
 	}
 	else
 	{
@@ -905,11 +902,7 @@ zsbt_update_insert_new(Relation rel, AttrNumber attno,
 					   Datum newdatum, bool newisnull, zstid *newtid,
 					   TransactionId xid, CommandId cid)
 {
-	ZSUndoRecPtr undorecptr;
-
-	ZSUndoRecPtrInitialize(&undorecptr);
-	zsbt_multi_insert(rel, attno, &newdatum, &newisnull, newtid, 1,
-					  xid, cid, attno == ZS_META_ATTRIBUTE_NUM ? &undorecptr : NULL);
+	zsbt_multi_insert(rel, attno, &newdatum, &newisnull, newtid, 1, xid, cid);
 }
 
 /*
