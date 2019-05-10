@@ -1274,6 +1274,7 @@ check_default_partition_contents(Relation parent, Relation default_rel,
 		TableScanDesc scan;
 		MemoryContext oldCxt;
 		TupleTableSlot *tupslot;
+		bool *proj = NULL;
 
 		/* Lock already taken above. */
 		if (part_relid != RelationGetRelid(default_rel))
@@ -1330,7 +1331,16 @@ check_default_partition_contents(Relation parent, Relation default_rel,
 		econtext = GetPerTupleExprContext(estate);
 		snapshot = RegisterSnapshot(GetLatestSnapshot());
 		tupslot = table_slot_create(part_rel, &estate->es_tupleTable);
-		scan = table_beginscan(part_rel, snapshot, 0, NULL);
+		if (table_scans_leverage_column_projection(part_rel))
+		{
+			proj = palloc0(tupslot->tts_tupleDescriptor->natts * sizeof(bool));
+			GetNeededColumnsForNode((Node*)partqualstate->expr, proj, tupslot->tts_tupleDescriptor->natts);
+			scan = table_beginscan_with_column_projection(part_rel, snapshot, 0, NULL, proj);
+		}
+		else
+		{
+			scan = table_beginscan(part_rel, snapshot, 0, NULL);
+		}
 
 		/*
 		 * Switch to per-tuple memory context and reset it for each tuple
@@ -1360,6 +1370,9 @@ check_default_partition_contents(Relation parent, Relation default_rel,
 
 		if (RelationGetRelid(default_rel) != RelationGetRelid(part_rel))
 			table_close(part_rel, NoLock);	/* keep the lock until commit */
+
+		if (proj)
+			pfree(proj);
 	}
 }
 
