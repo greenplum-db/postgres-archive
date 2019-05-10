@@ -2116,9 +2116,27 @@ CopyTo(CopyState cstate)
 	{
 		TupleTableSlot *slot;
 		TableScanDesc scandesc;
+		bool *proj = NULL;
 
-		scandesc = table_beginscan(cstate->rel, GetActiveSnapshot(), 0, NULL);
 		slot = table_slot_create(cstate->rel, NULL);
+		if (table_scans_leverage_column_projection(cstate->rel))
+		{
+			proj = palloc0(slot->tts_tupleDescriptor->natts * sizeof(bool));
+			foreach(cur, cstate->attnumlist)
+			{
+				int attnum = lfirst_int(cur);
+				Assert(attnum <= slot->tts_tupleDescriptor->natts);
+				proj[attnum-1] = true;
+			}
+
+			scandesc = table_beginscan_with_column_projection(cstate->rel,
+															  GetActiveSnapshot(),
+															  0, NULL, proj);
+		}
+		else
+		{
+			scandesc = table_beginscan(cstate->rel, GetActiveSnapshot(), 0, NULL);
+		}
 
 		processed = 0;
 		while (table_scan_getnextslot(scandesc, ForwardScanDirection, slot))
@@ -2135,6 +2153,8 @@ CopyTo(CopyState cstate)
 
 		ExecDropSingleTupleTableSlot(slot);
 		table_endscan(scandesc);
+		if (proj)
+			pfree(proj);
 	}
 	else
 	{

@@ -262,6 +262,19 @@ select * from t_zedcopy;
  10005 | 26 | 36    | 46     | 56
 (12 rows)
 
+COPY t_zedcopy (a, d, e) to stdout;
+9999	NN	\N
+10000	41	51
+1	test_1	\N
+2	test_2	\N
+3	test_3	\N
+4	test_4	\N
+5	test_5	\N
+10001	42	52
+10002	43	53
+10003	44	54
+10004	45	55
+10005	46	56
 --
 -- Also test delete and update on the table that was populated with COPY.
 -- This exercises splitting the array item. (A table not populated with

@@ -108,6 +108,7 @@ COPY t_zedcopy (a, b, c, d, e) from stdin;
 \.
 
 select * from t_zedcopy;
+COPY t_zedcopy (a, d, e) to stdout;
 
 --
 -- Also test delete and update on the table that was populated with COPY.
