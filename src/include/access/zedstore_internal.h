@@ -426,6 +426,10 @@ typedef struct ZSBtreeScan
 	/* in the "real" UNDO-log, this would probably be a global variable */
 	ZSUndoRecPtr recent_oldest_undo;
 
+	/* should this scan do predicate locking? Or check for conflicts? */
+	bool		serializable;
+	bool		acquire_predicate_tuple_locks;
+
 	/*
 	 * if we have remaining items from a compressed container tuple, they
 	 * are kept in the decompressor context, and 'has_decompressed' is true.
@@ -594,7 +598,7 @@ extern TM_Result zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 									LockTupleMode mode,
 									bool *undo_record_needed,
 									TM_FailureData *tmfd, zstid *next_tid);
-extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item);
+extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item, TransactionId *obsoleting_xid);
 
 /* prototypes for functions in zedstore_toast.c */
 extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);

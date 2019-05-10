@@ -2547,8 +2547,6 @@ PredicateLockPage(Relation relation, BlockNumber blkno, Snapshot snapshot)
 void
 PredicateLockTuple(Relation relation, HeapTuple tuple, Snapshot snapshot)
 {
-	PREDICATELOCKTARGETTAG tag;
-	ItemPointer tid;
 	TransactionId targetxmin;
 
 	if (!SerializationNeededForRead(relation, snapshot))
@@ -2579,6 +2577,17 @@ PredicateLockTuple(Relation relation, HeapTuple tuple, Snapshot snapshot)
 		}
 	}
 
+	PredicateLockTID(relation, &(tuple->t_self), snapshot);
+}
+
+void
+PredicateLockTID(Relation relation, ItemPointer tid, Snapshot snapshot)
+{
+	PREDICATELOCKTARGETTAG tag;
+
+	if (!SerializationNeededForRead(relation, snapshot))
+		return;
+
 	/*
 	 * Do quick-but-not-definitive test for a relation lock first.  This will
 	 * never cause a return when the relation is *not* locked, but will
@@ -2591,7 +2600,6 @@ PredicateLockTuple(Relation relation, HeapTuple tuple, Snapshot snapshot)
 	if (PredicateLockExists(&tag))
 		return;
 
-	tid = &(tuple->t_self);
 	SET_PREDICATELOCKTARGETTAG_TUPLE(tag,
 									 relation->rd_node.dbNode,
 									 relation->rd_id,
@@ -4056,14 +4064,11 @@ XidIsConcurrent(TransactionId xid)
  * currently no known reason to call this function from an index AM.
  */
 void
-CheckForSerializableConflictOut(bool visible, Relation relation,
+heap_CheckForSerializableConflictOut(bool visible, Relation relation,
 								HeapTuple tuple, Buffer buffer,
 								Snapshot snapshot)
 {
 	TransactionId xid;
-	SERIALIZABLEXIDTAG sxidtag;
-	SERIALIZABLEXID *sxid;
-	SERIALIZABLEXACT *sxact;
 	HTSV_Result htsvResult;
 
 	if (!SerializationNeededForRead(relation, snapshot))
@@ -4126,6 +4131,19 @@ CheckForSerializableConflictOut(bool visible, Relation relation,
 	}
 	Assert(TransactionIdIsValid(xid));
 	Assert(TransactionIdFollowsOrEquals(xid, TransactionXmin));
+
+	return CheckForSerializableConflictOut(relation, xid, snapshot);
+}
+
+void
+CheckForSerializableConflictOut(Relation relation, TransactionId xid, Snapshot snapshot)
+{
+	SERIALIZABLEXIDTAG sxidtag;
+	SERIALIZABLEXID *sxid;
+	SERIALIZABLEXACT *sxact;
+
+	if (!SerializationNeededForRead(relation, snapshot))
+		return;
 
 	/*
 	 * Find top level xid.  Bail out if xid is too early to be a conflict, or
@@ -4441,8 +4459,7 @@ CheckTargetForConflictsIn(PREDICATELOCKTARGETTAG *targettag)
  * tuple itself.
  */
 void
-CheckForSerializableConflictIn(Relation relation, HeapTuple tuple,
-							   Buffer buffer)
+CheckForSerializableConflictIn(Relation relation, ItemPointer tid, BlockNumber blkno)
 {
 	PREDICATELOCKTARGETTAG targettag;
 
@@ -4472,22 +4489,22 @@ CheckForSerializableConflictIn(Relation relation, HeapTuple tuple,
 	 * It is not possible to take and hold a lock across the checks for all
 	 * granularities because each target could be in a separate partition.
 	 */
-	if (tuple != NULL)
+	if (tid != NULL)
 	{
 		SET_PREDICATELOCKTARGETTAG_TUPLE(targettag,
 										 relation->rd_node.dbNode,
 										 relation->rd_id,
-										 ItemPointerGetBlockNumber(&(tuple->t_self)),
-										 ItemPointerGetOffsetNumber(&(tuple->t_self)));
+										 ItemPointerGetBlockNumber(tid),
+										 ItemPointerGetOffsetNumber(tid));
 		CheckTargetForConflictsIn(&targettag);
 	}
 
-	if (BufferIsValid(buffer))
+	if (blkno != InvalidBlockNumber)
 	{
 		SET_PREDICATELOCKTARGETTAG_PAGE(targettag,
 										relation->rd_node.dbNode,
 										relation->rd_id,
-										BufferGetBlockNumber(buffer));
+										blkno);
 		CheckTargetForConflictsIn(&targettag);
 	}
 

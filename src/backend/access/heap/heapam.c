@@ -439,7 +439,7 @@ heapgetpage(TableScanDesc sscan, BlockNumber page)
 			else
 				valid = HeapTupleSatisfiesVisibility(&loctup, snapshot, buffer);
 
-			CheckForSerializableConflictOut(valid, scan->rs_base.rs_rd,
+			heap_CheckForSerializableConflictOut(valid, scan->rs_base.rs_rd,
 											&loctup, buffer, snapshot);
 
 			if (valid)
@@ -661,7 +661,7 @@ heapgettup(HeapScanDesc scan,
 													 snapshot,
 													 scan->rs_cbuf);
 
-				CheckForSerializableConflictOut(valid, scan->rs_base.rs_rd,
+				heap_CheckForSerializableConflictOut(valid, scan->rs_base.rs_rd,
 												tuple, scan->rs_cbuf,
 												snapshot);
 
@@ -1470,7 +1470,7 @@ heap_fetch(Relation relation,
 	if (valid)
 		PredicateLockTuple(relation, tuple, snapshot);
 
-	CheckForSerializableConflictOut(valid, relation, tuple, buffer, snapshot);
+	heap_CheckForSerializableConflictOut(valid, relation, tuple, buffer, snapshot);
 
 	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
 
@@ -1604,7 +1604,7 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 
 			/* If it's visible per the snapshot, we must return it */
 			valid = HeapTupleSatisfiesVisibility(heapTuple, snapshot, buffer);
-			CheckForSerializableConflictOut(valid, relation, heapTuple,
+			heap_CheckForSerializableConflictOut(valid, relation, heapTuple,
 											buffer, snapshot);
 			/* reset to original, non-redirected, tid */
 			heapTuple->t_self = *tid;
@@ -1754,7 +1754,7 @@ heap_get_latest_tid(Relation relation,
 		 * candidate.
 		 */
 		valid = HeapTupleSatisfiesVisibility(&tp, snapshot, buffer);
-		CheckForSerializableConflictOut(valid, relation, &tp, buffer, snapshot);
+		heap_CheckForSerializableConflictOut(valid, relation, &tp, buffer, snapshot);
 		if (valid)
 			*tid = ctid;
 
@@ -1909,7 +1909,7 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	 * lock "gaps" as index page locks do.  So we don't need to specify a
 	 * buffer when making the call, which makes for a faster check.
 	 */
-	CheckForSerializableConflictIn(relation, NULL, InvalidBuffer);
+	CheckForSerializableConflictIn(relation, NULL, InvalidBlockNumber);
 
 	/* NO EREPORT(ERROR) from here till changes are logged */
 	START_CRIT_SECTION();
@@ -2163,7 +2163,7 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	 * lock "gaps" as index page locks do.  So we don't need to specify a
 	 * buffer when making the call, which makes for a faster check.
 	 */
-	CheckForSerializableConflictIn(relation, NULL, InvalidBuffer);
+	CheckForSerializableConflictIn(relation, NULL, InvalidBlockNumber);
 
 	ndone = 0;
 	while (ndone < ntuples)
@@ -2354,7 +2354,7 @@ heap_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	 * lock "gaps" as index page locks do.  So we don't need to specify a
 	 * buffer when making the call.
 	 */
-	CheckForSerializableConflictIn(relation, NULL, InvalidBuffer);
+	CheckForSerializableConflictIn(relation, NULL, InvalidBlockNumber);
 
 	/*
 	 * If tuples are cachable, mark them for invalidation from the caches in
@@ -2663,7 +2663,7 @@ l1:
 	 * being visible to the scan (i.e., an exclusive buffer content lock is
 	 * continuously held from this point until the tuple delete is visible).
 	 */
-	CheckForSerializableConflictIn(relation, &tp, buffer);
+	CheckForSerializableConflictIn(relation, tid, BufferGetBlockNumber(buffer));
 
 	/* replace cid with a combo cid if necessary */
 	HeapTupleHeaderAdjustCmax(tp.t_data, &cid, &iscombo);
@@ -3573,7 +3573,7 @@ l2:
 	 * will include checking the relation level, there is no benefit to a
 	 * separate check for the new tuple.
 	 */
-	CheckForSerializableConflictIn(relation, &oldtup, buffer);
+	CheckForSerializableConflictIn(relation, otid, BufferGetBlockNumber(buffer));
 
 	/*
 	 * At this point newbuf and buffer are both pinned and locked, and newbuf

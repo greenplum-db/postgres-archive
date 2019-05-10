@@ -251,3 +251,33 @@ Salient points for the design
   to physical mapping maintenance, plus restrictions on concurrency of
   writes and reads to files. Hence adopt compression to fit fixed size
   blocks instead of other way round.
+
+
+Predicate locking
+-----------------
+
+Predicate locks, to support SERIALIZABLE transactinons, are taken like
+with the heap. From README-SSI:
+
+    * For a table scan, the entire relation will be locked.
+
+    * Each tuple read which is visible to the reading transaction
+will be locked, whether or not it meets selection criteria; except
+that there is no need to acquire an SIREAD lock on a tuple when the
+transaction already holds a write lock on any tuple representing the
+row, since a rw-conflict would also create a ww-dependency which
+has more aggressive enforcement and thus will prevent any anomaly.
+
+    * Modifying a heap tuple creates a rw-conflict with any transaction
+that holds a SIREAD lock on that tuple, or on the page or relation
+that contains it.
+
+    * Inserting a new tuple creates a rw-conflict with any transaction
+holding a SIREAD lock on the entire relation. It doesn't conflict with
+page-level locks, because page-level locks are only used to aggregate
+tuple locks. Unlike index page locks, they don't lock "gaps" on the page.
+
+
+ZedStore isn't block-based, so page-level locks really just mean a range
+of TIDs. They're only used to aggregate tuple locks.
+

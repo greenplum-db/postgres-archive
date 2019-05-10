@@ -37,6 +37,7 @@
 #include "optimizer/plancat.h"
 #include "pgstat.h"
 #include "storage/lmgr.h"
+#include "storage/predicate.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
@@ -128,6 +129,16 @@ zedstoream_fetch_row_version(Relation rel,
 
 	result = zedstoream_fetch_row((ZedStoreIndexFetchData *) fetcher,
 								  tid_p, snapshot, slot);
+	if (result)
+	{
+		/* FIXME: heapam acquires the predicate lock first, and then
+		 * calls CheckForSerializableConflictOut(). We do it in the
+		 * opposite order, because CheckForSerializableConflictOut()
+		 * call as done in zsbt_get_last_tid() already. Does it matter?
+		 * I'm not sure.
+		 */
+		PredicateLockTID(rel, tid_p, snapshot);
+	}
 	ExecMaterializeSlot(slot);
 
 	zedstoream_end_index_fetch(fetcher);
@@ -170,6 +181,14 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
 					  &datum, &isnull, &tid, 1,
 					  xid, cid);
+
+	/*
+	 * We only need to check for table-level SSI locks. Our
+	 * new tuple can't possibly conflict with existing tuple locks, and
+	 * page locks are only consolidated versions of tuple locks; they do not
+	 * lock "gaps" as index page locks do.
+	 */
+	CheckForSerializableConflictIn(relation, NULL, InvalidBlockNumber);
 
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
@@ -245,6 +264,14 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
 					  datums, isnulls, tids, ntuples,
 					  xid, cid);
+
+	/*
+	 * We only need to check for table-level SSI locks. Our
+	 * new tuple can't possibly conflict with existing tuple locks, and
+	 * page locks are only consolidated versions of tuple locks; they do not
+	 * lock "gaps" as index page locks do.
+	 */
+	CheckForSerializableConflictIn(relation, NULL, InvalidBlockNumber);
 
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
@@ -331,6 +358,11 @@ retry:
 			}
 		}
 	}
+
+	/*
+	 * Check for SSI conflicts.
+	 */
+	CheckForSerializableConflictIn(relation, tid_p, ItemPointerGetBlockNumber(tid_p));
 
 	if (result == TM_Ok)
 		pgstat_count_heap_delete(relation);
@@ -629,6 +661,11 @@ retry:
 
 	if (result == TM_Ok)
 	{
+		/*
+		 * Check for SSI conflicts.
+		 */
+		CheckForSerializableConflictIn(relation, otid_p, ItemPointerGetBlockNumber(otid_p));
+
 		for (attno = 1; attno <= relation->rd_att->natts; attno++)
 		{
 			Form_pg_attribute attr = TupleDescAttr(relation->rd_att, attno - 1);
@@ -808,6 +845,20 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	scan->proj_data.project_columns = project_columns;
 
 	/*
+	 * For a seqscan in a serializable transaction, acquire a predicate lock
+	 * on the entire relation. This is required not only to lock all the
+	 * matching tuples, but also to conflict with new insertions into the
+	 * table. In an indexscan, we take page locks on the index pages covering
+	 * the range specified in the scan qual, but in a heap scan there is
+	 * nothing more fine-grained to lock. A bitmap scan is a different story,
+	 * there we have already scanned the index and locked the index pages
+	 * covering the predicate. But in that case we still have to lock any
+	 * matching heap tuples.
+	 */
+	if (!is_bitmapscan)
+		PredicateLockRelation(relation, snapshot);
+
+	/*
 	 * Currently, we don't have a stats counter for bitmap heap scans (but the
 	 * underlying bitmap index scans will be counted) or sample scans (we only
 	 * update stats for tuple fetches there)
@@ -936,16 +987,17 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			oldcontext = MemoryContextSwitchTo(scan_proj->context);
 			for (int i = 0; i < scan_proj->num_proj_atts; i++)
 			{
-				int			natt = scan_proj->proj_atts[i];
+				int			attno = scan_proj->proj_atts[i];
 
 				zsbt_begin_scan(scan->rs_scan.rs_rd,
 								slot->tts_tupleDescriptor,
-								natt,
+								attno,
 								scan->cur_range_start,
 								scan->cur_range_end,
 								scan->rs_scan.rs_snapshot,
 								&scan_proj->btree_scans[i]);
 			}
+			scan_proj->btree_scans[0].serializable = true;
 			MemoryContextSwitchTo(oldcontext);
 			scan->state = ZSSCAN_STATE_SCANNING;
 		}
@@ -961,6 +1013,10 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		else
 		{
 			Assert (this_tid < scan->cur_range_end);
+
+			/* Note: We don't need to predicate-lock tuples in Serializable mode,
+			 * because in a sequential scan, we predicate-locked the whole table.
+			 */
 
 			/* Fetch the datums of each attribute for this row */
 			for (int i = 1; i < scan_proj->num_proj_atts; i++)
@@ -1104,6 +1160,8 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 							 TupleTableSlot *slot,
 							 bool *call_again, bool *all_dead)
 {
+	bool		result;
+
 	/*
 	 * we don't do in-place updates, so this is essentially the same as
 	 * fetch_row_version.
@@ -1113,7 +1171,18 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 	if (all_dead)
 		*all_dead = false;
 
-	return zedstoream_fetch_row((ZedStoreIndexFetchData *) scan, tid_p, snapshot, slot);
+	result = zedstoream_fetch_row((ZedStoreIndexFetchData *) scan, tid_p, snapshot, slot);
+	if (result)
+	{
+		/* FIXME: heapam acquires the predicate lock first, and then
+		 * calls CheckForSerializableConflictOut(). We do it in the
+		 * opposite order, because CheckForSerializableConflictOut()
+		 * call as done in zsbt_get_last_tid() already. Does it matter?
+		 * I'm not sure.
+		 */
+		PredicateLockTID(scan->rel, tid_p, snapshot);
+	}
+	return result;
 }
 
 /*
@@ -1153,6 +1222,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 
 	zsbt_begin_scan(rel, slot->tts_tupleDescriptor, 0, tid, tid + 1,
 					snapshot, &fetch_proj->btree_scans[0]);
+	fetch_proj->btree_scans[0].serializable = true;
 	found = zsbt_scan_next_tid(&fetch_proj->btree_scans[0]) != InvalidZSTid;
 	if (found)
 	{
@@ -2016,6 +2086,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 					ZSTidFromBlkOff(tid_blkno + 1, 1),
 					scan->rs_scan.rs_snapshot,
 					&btree_scan);
+	btree_scan.serializable = true;
 	while ((tid = zsbt_scan_next_tid(&btree_scan)) != InvalidZSTid)
 	{
 		Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
@@ -2023,7 +2094,21 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 		if (tbmres->ntuples != -1)
 		{
 			while (ZSTidGetOffsetNumber(tid) > tbmres->offsets[noff] && noff < tbmres->ntuples)
+			{
+				ItemPointerData itemptr;
+
+				ItemPointerSet(&itemptr, tid_blkno, ZSTidGetOffsetNumber(tid));
+
+				/* FIXME: heapam acquires the predicate lock first, and then
+				 * calls CheckForSerializableConflictOut(). We do it in the
+				 * opposite order, because CheckForSerializableConflictOut()
+				 * call as done in zsbt_get_last_tid() already. Does it matter?
+				 * I'm not sure.
+				 */
+				PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot);
+
 				noff++;
+			}
 
 			if (noff == tbmres->ntuples)
 				break;

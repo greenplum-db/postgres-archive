@@ -1257,7 +1257,7 @@ gistinserttuples(GISTInsertState *state, GISTInsertStack *stack,
 	 * Check for any rw conflicts (in serializable isolation level) just
 	 * before we intend to modify the page
 	 */
-	CheckForSerializableConflictIn(state->r, NULL, stack->buffer);
+	CheckForSerializableConflictIn(state->r, NULL, BufferGetBlockNumber(stack->buffer));
 
 	/* Insert the tuple(s) to the page, splitting the page if necessary */
 	is_split = gistplacetopage(state->r, state->freespace, giststate,

@@ -18,13 +18,15 @@ teardown
 }
 
 session "s1"
-setup 		{ BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE; }
+setup 		{ BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+		  SET enable_seqscan=off; }
 step "s1ry"	{ SELECT balance FROM bank_account WHERE id = 'Y'; }
 step "s1wy"	{ UPDATE bank_account SET balance = 20 WHERE id = 'Y'; }
 step "s1c" 	{ COMMIT; }
 
 session "s2"
-setup		{ BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE; }
+setup 		{ BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+		  SET enable_seqscan=off; }
 step "s2rx"	{ SELECT balance FROM bank_account WHERE id = 'X'; }
 step "s2ry"	{ SELECT balance FROM bank_account WHERE id = 'Y'; }
 step "s2wx"	{ UPDATE bank_account SET balance = -11 WHERE id = 'X'; }

@@ -33,6 +33,7 @@
 #include "access/zedstore_undo.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
+#include "storage/predicate.h"
 #include "storage/procarray.h"
 #include "utils/datum.h"
 #include "utils/rel.h"
@@ -294,6 +295,8 @@ zsbt_scan_next(ZSBtreeScan *scan)
 	OffsetNumber off;
 	OffsetNumber maxoff;
 	BlockNumber	next;
+	bool		visible;
+	TransactionId obsoleting_xid;
 
 	Assert(scan->active);
 
@@ -322,6 +325,7 @@ zsbt_scan_next(ZSBtreeScan *scan)
 		{
 			zstid		lasttid;
 			ZSBtreeItem *uitem;
+			TransactionId obsoleting_xid;
 
 			uitem = zs_decompress_read_item(&scan->decompressor);
 
@@ -341,7 +345,12 @@ zsbt_scan_next(ZSBtreeScan *scan)
 			if (uitem->t_tid >= scan->endtid)
 				break;
 
-			if (!zs_SatisfiesVisibility(scan, uitem))
+			visible = zs_SatisfiesVisibility(scan, uitem, &obsoleting_xid);
+
+			if (scan->serializable && TransactionIdIsValid(obsoleting_xid))
+				CheckForSerializableConflictOut(scan->rel, obsoleting_xid, scan->snapshot);
+
+			if (!visible)
 			{
 				scan->nexttid = lasttid + 1;
 				continue;
@@ -468,8 +477,12 @@ zsbt_scan_next(ZSBtreeScan *scan)
 			}
 			else
 			{
-				if (!zs_SatisfiesVisibility(scan, item))
+				visible = zs_SatisfiesVisibility(scan, item, &obsoleting_xid);
+
+				if (!visible)
 				{
+					if (scan->serializable && TransactionIdIsValid(obsoleting_xid))
+						CheckForSerializableConflictOut(scan->rel, obsoleting_xid, scan->snapshot);
 					scan->nexttid = lasttid + 1;
 					continue;
 				}
@@ -1843,12 +1856,14 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, ZSUndoRecPtr *rece
 		 */
 		/* FIXME: dummmy scan */
 		ZSBtreeScan scan;
+		TransactionId obsoleting_xid;
+
 		memset(&scan, 0, sizeof(scan));
 		scan.rel = rel;
 		scan.snapshot = snapshot;
 		scan.recent_oldest_undo = *recent_oldest_undo;
 
-		if (!zs_SatisfiesVisibility(&scan, item))
+		if (!zs_SatisfiesVisibility(&scan, item, &obsoleting_xid))
 			found = false;
 	}
 

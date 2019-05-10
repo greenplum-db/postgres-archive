@@ -240,8 +240,9 @@ zs_SatisfiesAny(ZSBtreeScan *scan, ZSBtreeItem *item)
  * is visible to the snapshot.
  */
 static bool
-xid_is_visible(Snapshot snapshot, TransactionId xid, CommandId cid)
+xid_is_visible(Snapshot snapshot, TransactionId xid, CommandId cid, bool *aborted)
 {
+	*aborted = false;
 	if (TransactionIdIsCurrentTransactionId(xid))
 	{
 		if (cid >= snapshot->curcid)
@@ -258,6 +259,7 @@ xid_is_visible(Snapshot snapshot, TransactionId xid, CommandId cid)
 	else
 	{
 		/* it must have aborted or crashed */
+		*aborted = true;
 		return false;
 	}
 }
@@ -266,7 +268,7 @@ xid_is_visible(Snapshot snapshot, TransactionId xid, CommandId cid)
  * Like HeapTupleSatisfiesMVCC
  */
 static bool
-zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item)
+zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item, TransactionId *obsoleting_xid)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -274,6 +276,7 @@ zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item)
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
 	bool		is_deleted;
+	bool		aborted;
 
 	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
 	Assert (snapshot->snapshot_type == SNAPSHOT_MVCC);
@@ -298,7 +301,12 @@ fetch_undo_record:
 		/* Inserted tuple */
 		if (undorec->type == ZSUNDO_TYPE_INSERT)
 		{
-			return xid_is_visible(snapshot, undorec->xid, undorec->cid);
+			bool		result;
+
+			result = xid_is_visible(snapshot, undorec->xid, undorec->cid, &aborted);
+			if (!result && !aborted)
+				*obsoleting_xid = undorec->xid;
+			return result;
 		}
 		else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
 		{
@@ -316,7 +324,7 @@ fetch_undo_record:
 		Assert(undorec->type == ZSUNDO_TYPE_DELETE ||
 			   undorec->type == ZSUNDO_TYPE_UPDATE);
 
-		if (xid_is_visible(snapshot, undorec->xid, undorec->cid))
+		if (xid_is_visible(snapshot, undorec->xid, undorec->cid, &aborted))
 		{
 			/* we can see the deletion */
 			return false;
@@ -329,6 +337,9 @@ fetch_undo_record:
 			 * XID is visible to us.
 			 */
 			ZSUndoRecPtr	prevptr;
+
+			if (!aborted)
+				*obsoleting_xid = undorec->xid;
 
 			do {
 				if (undorec->type == ZSUNDO_TYPE_DELETE)
@@ -347,10 +358,14 @@ fetch_undo_record:
 			} while(undorec->type == ZSUNDO_TYPE_TUPLE_LOCK);
 
 			Assert(undorec->type == ZSUNDO_TYPE_INSERT);
-			if (xid_is_visible(snapshot, undorec->xid, undorec->cid))
+			if (xid_is_visible(snapshot, undorec->xid, undorec->cid, &aborted))
 				return true;	/* we can see the insert, but not the delete */
 			else
+			{
+				if (!aborted)
+					*obsoleting_xid = undorec->xid;
 				return false;	/* we cannot see the insert */
+			}
 		}
 	}
 }
@@ -635,9 +650,10 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesVisibility
  */
 bool
-zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
+zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item, TransactionId *obsoleting_xid)
 {
 	ZSUndoRecPtr undo_ptr;
+
 	/*
 	 * This works on a single or array item. Compressed items don't have
 	 * visibility information (the items inside the compressed container
@@ -647,6 +663,8 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
 
 	/* The caller should've filled in the recent_oldest_undo pointer */
 	Assert(scan->recent_oldest_undo.counter != 0);
+
+	*obsoleting_xid = InvalidTransactionId;
 
 	/* dead items are never considered visible. */
 	if ((item->t_flags & ZSBT_DEAD) != 0)
@@ -669,7 +687,7 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item)
 	switch (scan->snapshot->snapshot_type)
 	{
 		case SNAPSHOT_MVCC:
-			return zs_SatisfiesMVCC(scan, item);
+			return zs_SatisfiesMVCC(scan, item, obsoleting_xid);
 
 		case SNAPSHOT_SELF:
 			return zs_SatisfiesSelf(scan, item);
