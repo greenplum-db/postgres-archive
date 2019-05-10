@@ -16,17 +16,50 @@
 #include "access/zedstore_undo.h"
 #include "storage/procarray.h"
 
+static bool
+zs_tuplelock_compatible(LockTupleMode mode, LockTupleMode newmode)
+{
+	switch (newmode)
+	{
+		case LockTupleKeyShare:
+			return mode == LockTupleKeyShare ||
+				mode == LockTupleShare ||
+				mode == LockTupleNoKeyExclusive;
+
+		case LockTupleShare:
+			return mode == LockTupleKeyShare ||
+				mode == LockTupleShare;
+
+		case LockTupleNoKeyExclusive:
+			return mode == LockTupleKeyShare;
+		case LockTupleExclusive:
+			return false;
+
+		default:
+			elog(ERROR, "unknown tuple lock mode %d", newmode);
+	}
+}
+
 /*
  * Like HeapTupleSatisfiesUpdate.
  *
  * When returns TM_Ok, this also returns a flag in *undo_record_needed, to indicate
  * whether the old UNDO record is still of interest to anyone. If the old record
  * belonged to an aborted deleting transaction, for example, it can be ignored.
+ *
+ * This does more than HeapTupleSatisfiesUpdate. If HeapTupleSatisfiesUpdate sees
+ * an updated or locked tuple, it returns TM_BeingUpdated, and the caller has to
+ * check if the tuple lock is compatible with the update. zs_SatisfiesUpdate
+ * checks if the new lock mode is compatible with the old one, and returns TM_Ok
+ * if so. Waiting for conflicting locks is left to the caller.
+ *
+ * If the tuple was UPDATEd, *next_tid is set to the TID of the new row version.
  */
 TM_Result
 zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 				   ZSUndoRecPtr recent_oldest_undo, ZSBtreeItem *item,
-				   bool *undo_record_needed, TM_FailureData *tmfd)
+				   LockTupleMode mode,
+				   bool *undo_record_needed, TM_FailureData *tmfd, zstid *next_tid)
 {
 	ZSUndoRecPtr undo_ptr;
 	bool		is_deleted;
@@ -47,7 +80,7 @@ fetch_undo_record:
 		if (is_deleted)
 		{
 			/* this probably shouldn't happen.. */
-			return  TM_Invisible;
+			return TM_Invisible;
 		}
 		else
 		{
@@ -56,7 +89,7 @@ fetch_undo_record:
 			 * need to keep it.
 			 */
 			*undo_record_needed = false;
-			return  TM_Ok;
+			return TM_Ok;
 		}
 	}
 
@@ -90,27 +123,22 @@ fetch_undo_record:
 		}
 		else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
 		{
+			ZSUndoRec_TupleLock *lock_undorec = (ZSUndoRec_TupleLock *) undorec;
+
+			/*
+			 * If any subtransaction of the current top transaction already holds
+			 * a lock as strong as or stronger than what we're requesting, we
+			 * effectively hold the desired lock already.  We *must* succeed
+			 * without trying to take the tuple lock, else we will deadlock
+			 * against anyone wanting to acquire a stronger lock.
+			 */
 			if (TransactionIdIsCurrentTransactionId(undorec->xid))
 			{
-				/*
-				 * HeapTupleSatisfiesUpdate() returns TM_BeingModified for
-				 * this case, but then caller heap_update() checks again for
-				 * TransactionIdIsCurrentTransactionId() and converts this to
-				 * TM_Ok and avoids populating tmfd. For zedstore caller
-				 * doesn't have access to xid, hence can't perform the check
-				 * later. Currently update is only user of this function and
-				 * seems for zedstore need to have all the logic here inside
-				 * as have access to xid. For future need to return
-				 * TM_BeingModified for this case then also pass back as
-				 * boolean maybe that its current transaction, so caller can
-				 * take appropriate action on it. Can't return
-				 * TM_BeingModified to ExecUpdate() if wait=true, hence need
-				 * to return TM_Ok for this case.
-				 */
-				return TM_Ok;
+				if (lock_undorec->lockmode >= mode)
+					return TM_Ok;
 			}
-
-			if (TransactionIdIsInProgress(undorec->xid))
+			else if (!zs_tuplelock_compatible(lock_undorec->lockmode, mode) &&
+					 TransactionIdIsInProgress(undorec->xid))
 			{
 				tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
 				tmfd->xmax = undorec->xid;
@@ -118,8 +146,13 @@ fetch_undo_record:
 				return TM_BeingModified;
 			}
 
-			/* locking transaction committed, so lock is not held anymore. */
-			/* look at the previous UNDO record */
+			/*
+			 * No conflict with this lock. Look at the previous UNDO record, there
+			 * might be more locks.
+			 *
+			 * FIXME: Shouldn't we drill down to the INSERT record and check if
+			 * that's visible to us first, before looking at the lockers?
+			 */
 			undo_ptr = ((ZSUndoRec_TupleLock *) undorec)->prevundorec;
 			goto fetch_undo_record;
 		}
@@ -131,6 +164,14 @@ fetch_undo_record:
 		/* deleted or updated-away tuple */
 		Assert(undorec->type == ZSUNDO_TYPE_DELETE ||
 			   undorec->type == ZSUNDO_TYPE_UPDATE);
+
+		if (undorec->type == ZSUNDO_TYPE_DELETE)
+		{
+		}
+		else if (undorec->type == ZSUNDO_TYPE_UPDATE)
+			*next_tid = ((ZSUndoRec_Update *) undorec)->newtid;
+		else
+			elog(ERROR, "unexpected UNDO record type for updated/deleted item: %d", undorec->type);
 
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
@@ -150,6 +191,7 @@ fetch_undo_record:
 			tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
 			tmfd->xmax = undorec->xid;
 			tmfd->cmax = InvalidCommandId;
+
 			return TM_BeingModified;
 		}
 
@@ -176,6 +218,7 @@ fetch_undo_record:
 		}
 	}
 }
+
 
 /*
  * Like HeapTupleSatisfiesAny

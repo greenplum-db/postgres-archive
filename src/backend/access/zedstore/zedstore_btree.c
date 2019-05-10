@@ -739,6 +739,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	ZSUndoRecPtr undorecptr;
 	ZSSingleBtreeItem *deleteditem;
 	Buffer		buf;
+	zstid		next_tid;
 
 	/*
 	 * This is currently only used on the meta-attribute. Other attributes don't
@@ -758,7 +759,8 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
-								(ZSBtreeItem *) item, &keep_old_undo_ptr, hufd);
+								(ZSBtreeItem *) item, LockTupleExclusive,
+								&keep_old_undo_ptr, hufd, &next_tid);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -857,11 +859,12 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 	ZSSingleBtreeItem *olditem;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
+	zstid		next_tid;
 
 	/*
 	 * Find the item to delete.
 	 */
-	olditem = zsbt_fetch(rel, attno, snapshot, &recent_oldest_undo, otid, &buf);
+	olditem = zsbt_fetch(rel, attno, NULL, &recent_oldest_undo, otid, &buf);
 	if (olditem == NULL)
 	{
 		/*
@@ -876,7 +879,9 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 	 * Is it visible to us?
 	 */
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
-								(ZSBtreeItem *) olditem, &keep_old_undo_ptr, hufd);
+								(ZSBtreeItem *) olditem,
+								LockTupleExclusive, /* TODO: use LockTupleNoKeyExclusive, if key columns were not updated */
+								&keep_old_undo_ptr, hufd, &next_tid);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -920,12 +925,13 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	TM_FailureData tmfd;
 	ZSUndoRecPtr undorecptr;
 	ZSSingleBtreeItem *deleteditem;
+	zstid		next_tid;
 
 	/*
 	 * Find the item to delete.  It could be part of a compressed item,
 	 * we let zsbt_fetch() handle that.
 	 */
-	olditem = zsbt_fetch(rel, attno, snapshot, &recent_oldest_undo, otid, &buf);
+	olditem = zsbt_fetch(rel, attno, NULL, &recent_oldest_undo, otid, &buf);
 	if (olditem == NULL)
 	{
 		/*
@@ -940,7 +946,9 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	 * Is it visible to us?
 	 */
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
-								(ZSBtreeItem *) olditem, &keep_old_undo_ptr, &tmfd);
+								(ZSBtreeItem *) olditem,
+								LockTupleExclusive, /* TODO: use LockTupleNoKeyExclusive, if key columns were not updated */
+								&keep_old_undo_ptr, &tmfd, &next_tid);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -981,9 +989,9 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 
 TM_Result
 zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
-			   TransactionId xid, CommandId cid, Snapshot snapshot,
-			   LockTupleMode lockmode, LockWaitPolicy wait_policy,
-			   TM_FailureData *hufd)
+			   TransactionId xid, CommandId cid,
+			   LockTupleMode mode, Snapshot snapshot,
+			   TM_FailureData *hufd, zstid *next_tid)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 	Buffer		buf;
@@ -993,6 +1001,8 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 	ZSUndoRecPtr undorecptr;
 	ZSSingleBtreeItem *newitem;
 
+	*next_tid = tid;
+
 	/*
 	 * This is currently only used on the meta-attribute. The other attributes
 	 * currently don't carry visibility information. This might need to change,
@@ -1001,7 +1011,7 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 	Assert(attno == ZS_META_ATTRIBUTE_NUM);
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, snapshot, &recent_oldest_undo, tid, &buf);
+	item = zsbt_fetch(rel, attno, SnapshotAny, &recent_oldest_undo, tid, &buf);
 	if (item == NULL)
 	{
 		/*
@@ -1012,11 +1022,11 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
-								(ZSBtreeItem *) item, &keep_old_undo_ptr, hufd);
+								   (ZSBtreeItem *) item, mode,
+								&keep_old_undo_ptr, hufd, next_tid);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
-		/* FIXME: We should fill TM_FailureData *hufd correctly */
 		return result;
 	}
 
@@ -1035,7 +1045,7 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = tid;
-		undorec.lockmode = lockmode;
+		undorec.lockmode = mode;
 		if (keep_old_undo_ptr)
 			undorec.prevundorec = item->t_undo_ptr;
 		else

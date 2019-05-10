@@ -339,45 +339,252 @@ retry:
 }
 
 
+/*
+ * Each tuple lock mode has a corresponding heavyweight lock, and one or two
+ * corresponding MultiXactStatuses (one to merely lock tuples, another one to
+ * update them).  This table (and the macros below) helps us determine the
+ * heavyweight lock mode and MultiXactStatus values to use for any particular
+ * tuple lock strength.
+ *
+ * Don't look at lockstatus/updstatus directly!  Use get_mxact_status_for_lock
+ * instead.
+ */
+static const struct
+{
+	LOCKMODE	hwlock;
+	int			lockstatus;
+	int			updstatus;
+}
+
+			tupleLockExtraInfo[MaxLockTupleMode + 1] =
+{
+	{							/* LockTupleKeyShare */
+		AccessShareLock,
+		MultiXactStatusForKeyShare,
+		-1						/* KeyShare does not allow updating tuples */
+	},
+	{							/* LockTupleShare */
+		RowShareLock,
+		MultiXactStatusForShare,
+		-1						/* Share does not allow updating tuples */
+	},
+	{							/* LockTupleNoKeyExclusive */
+		ExclusiveLock,
+		MultiXactStatusForNoKeyUpdate,
+		MultiXactStatusNoKeyUpdate
+	},
+	{							/* LockTupleExclusive */
+		AccessExclusiveLock,
+		MultiXactStatusForUpdate,
+		MultiXactStatusUpdate
+	}
+};
+
+
+/*
+ * Acquire heavyweight locks on tuples, using a LockTupleMode strength value.
+ * This is more readable than having every caller translate it to lock.h's
+ * LOCKMODE.
+ */
+#define LockTupleTuplock(rel, tup, mode) \
+	LockTuple((rel), (tup), tupleLockExtraInfo[mode].hwlock)
+#define UnlockTupleTuplock(rel, tup, mode) \
+	UnlockTuple((rel), (tup), tupleLockExtraInfo[mode].hwlock)
+#define ConditionalLockTupleTuplock(rel, tup, mode) \
+	ConditionalLockTuple((rel), (tup), tupleLockExtraInfo[mode].hwlock)
+
+/*
+ * Acquire heavyweight lock on the given tuple, in preparation for acquiring
+ * its normal, Xmax-based tuple lock.
+ *
+ * have_tuple_lock is an input and output parameter: on input, it indicates
+ * whether the lock has previously been acquired (and this function does
+ * nothing in that case).  If this function returns success, have_tuple_lock
+ * has been flipped to true.
+ *
+ * Returns false if it was unable to obtain the lock; this can only happen if
+ * wait_policy is Skip.
+ *
+ * XXX: This is identical to heap_acquire_tuplock
+ */
+
+static bool
+zs_acquire_tuplock(Relation relation, ItemPointer tid, LockTupleMode mode,
+				   LockWaitPolicy wait_policy, bool *have_tuple_lock)
+{
+	if (*have_tuple_lock)
+		return true;
+
+	switch (wait_policy)
+	{
+		case LockWaitBlock:
+			LockTupleTuplock(relation, tid, mode);
+			break;
+
+		case LockWaitSkip:
+			if (!ConditionalLockTupleTuplock(relation, tid, mode))
+				return false;
+			break;
+
+		case LockWaitError:
+			if (!ConditionalLockTupleTuplock(relation, tid, mode))
+				ereport(ERROR,
+						(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+						 errmsg("could not obtain lock on row in relation \"%s\"",
+								RelationGetRelationName(relation))));
+			break;
+	}
+	*have_tuple_lock = true;
+
+	return true;
+}
+
+
 static TM_Result
 zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 					  TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
 					  LockWaitPolicy wait_policy, uint8 flags,
-					  TM_FailureData *hufd)
+					  TM_FailureData *tmfd)
 {
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	TransactionId xid = GetCurrentTransactionId();
 	TM_Result result;
+	bool		have_tuple_lock = false;
+	bool		follow_updates;
+	zstid		next_tid = tid;
+	SnapshotData SnapshotDirty;
 
-	hufd->traversed = false;
+	follow_updates = (flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS) != 0;
+
+	tmfd->traversed = false;
 	/*
 	 * For now, we lock just the first attribute. As long as everyone
 	 * does that, that's enough.
 	 */
+retry:
 	result = zsbt_lock_item(relation, ZS_META_ATTRIBUTE_NUM /* attno */, tid, xid, cid,
-							snapshot, mode, wait_policy, hufd);
+							mode, snapshot, tmfd, &next_tid);
 
-	if (result != TM_Ok)
+	if (result == TM_Invisible)
 	{
-		if (result == TM_Invisible)
+		/*
+		 * This is possible, but only when locking a tuple for ON CONFLICT
+		 * UPDATE.  We return this value here rather than throwing an error in
+		 * order to give that case the opportunity to throw a more specific
+		 * error.
+		 */
+		return TM_Invisible;
+	}
+	else if (result == TM_Updated)
+	{
+		/*
+		 * The other transaction is an update and it already committed.
+		 *
+		 * If the caller asked for the latest version, find it.
+		 */
+		if ((flags & TUPLE_LOCK_FLAG_FIND_LAST_VERSION) != 0 && next_tid != tid)
 		{
-			/*
-			 * This is possible, but only when locking a tuple for ON CONFLICT
-			 * UPDATE.  We return this value here rather than throwing an error in
-			 * order to give that case the opportunity to throw a more specific
-			 * error.
+			if (have_tuple_lock)
+			{
+				UnlockTupleTuplock(relation, tid_p, mode);
+				have_tuple_lock = false;
+			}
+
+			/* it was updated, so look at the updated version */
+			*tid_p = ItemPointerFromZSTid(next_tid);
+
+			/* signal that a tuple later in the chain is getting locked */
+			tmfd->traversed = true;
+
+			/* TODO: We don't indicate an update across partitions like this in zedstore, do we? */
+			if (ItemPointerIndicatesMovedPartitions(tid_p))
+				ereport(ERROR,
+						(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+						 errmsg("tuple to be locked was already moved to another partition due to concurrent update")));
+
+			/* loop back to fetch next in chain */
+
+			/* FIXME: In the corresponding code in heapam, we cross-check the xmin/xmax
+			 * of the old and new tuple. Should we do the same here?
 			 */
-		}
-		else if (result == TM_BeingModified ||
-				 result == TM_Updated ||
-				 result == TM_Deleted)
-		{
-			elog(ERROR, "tuple-lock conflict handling not implemented yet");
+
+			InitDirtySnapshot(SnapshotDirty);
+			snapshot = &SnapshotDirty;
+			tid = next_tid;
+			goto retry;
 		}
 
-		/* TODO: do we need to fill in the slot if we fail to lock? */
 		return result;
 	}
+	else if (result == TM_Deleted)
+	{
+		/*
+		 * The other transaction is a delete and it already committed.
+		 */
+		return result;
+	}
+	else if (result == TM_BeingModified)
+	{
+		TransactionId xwait = tmfd->xmax;
+
+		/*
+		 * Acquire tuple lock to establish our priority for the tuple, or
+		 * die trying.  LockTuple will release us when we are next-in-line
+		 * for the tuple.  We must do this even if we are share-locking.
+		 *
+		 * If we are forced to "start over" below, we keep the tuple lock;
+		 * this arranges that we stay at the head of the line while
+		 * rechecking tuple state.
+		 */
+		if (!zs_acquire_tuplock(relation, tid_p, mode, wait_policy,
+								  &have_tuple_lock))
+		{
+			/*
+			 * This can only happen if wait_policy is Skip and the lock
+			 * couldn't be obtained.
+			 */
+			return TM_WouldBlock;
+		}
+
+		/* wait for regular transaction to end, or die trying */
+		switch (wait_policy)
+		{
+			case LockWaitBlock:
+				XactLockTableWait(xwait, relation, tid_p, XLTW_Lock);
+				break;
+			case LockWaitSkip:
+				if (!ConditionalXactLockTableWait(xwait))
+				{
+					return TM_WouldBlock;
+				}
+				break;
+			case LockWaitError:
+				if (!ConditionalXactLockTableWait(xwait))
+					ereport(ERROR,
+							(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+							 errmsg("could not obtain lock on row in relation \"%s\"",
+									RelationGetRelationName(relation))));
+				break;
+		}
+
+		/* if there are updates, follow the update chain */
+		if (follow_updates && next_tid != tid)
+		{
+			elog(ERROR, "following updates not implemented");
+		}
+
+		/*
+		 * xwait is done. Retry.
+		 */
+		goto retry;
+	}
+
+	/*
+	 * Now that we have successfully marked the tuple as locked, we can
+	 * release the lmgr tuple lock, if we had it.
+	 */
+	if (have_tuple_lock)
+		UnlockTupleTuplock(relation, tid_p, mode);
 
 	/* Fetch the tuple, too. */
 	if (!zedstoream_fetch_row_version(relation, tid_p, snapshot, slot))
@@ -401,6 +608,9 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	TM_Result	result;
 	zstid		newtid;
 	Datum       newdatum = 0;
+
+	/* TODO: Use LockTupleNoKeyExclusive if key columns were not updated */
+	*lockmode = LockTupleExclusive;
 
 	slot_getallattrs(slot);
 	d = slot->tts_values;

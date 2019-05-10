@@ -484,9 +484,8 @@ extern TM_Result zsbt_update(Relation rel, AttrNumber attno, zstid otid,
 extern void zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr);
 extern void zsbt_remove_item(Relation rel, AttrNumber attno, zstid tid);
 extern TM_Result zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
-			   TransactionId xid, CommandId cid, Snapshot snapshot,
-			   LockTupleMode lockmode, LockWaitPolicy wait_policy,
-			   TM_FailureData *hufd);
+			   TransactionId xid, CommandId cid,
+								LockTupleMode lockmode, Snapshot snapshot, TM_FailureData *hufd, zstid *next_tid);
 extern void zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undoptr);
 extern void zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
 							zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan);
@@ -591,8 +590,10 @@ extern void zsmeta_add_root_for_new_attributes(Relation rel, Page page);
 
 /* prototypes for functions in zedstore_visibility.c */
 extern TM_Result zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
-				   ZSUndoRecPtr recent_oldest_undo, ZSBtreeItem *item,
-				   bool *undo_record_needed, TM_FailureData *tmfd);
+									ZSUndoRecPtr recent_oldest_undo, ZSBtreeItem *item,
+									LockTupleMode mode,
+									bool *undo_record_needed,
+									TM_FailureData *tmfd, zstid *next_tid);
 extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item);
 
 /* prototypes for functions in zedstore_toast.c */
