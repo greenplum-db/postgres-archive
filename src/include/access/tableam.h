@@ -142,6 +142,8 @@ typedef struct TableAmRoutine
 {
 	/* this must be set to T_TableAmRoutine */
 	NodeTag		type;
+	/* does AM need separate TOAST table */
+	bool uses_toast_table;
 	bool scans_leverage_column_projection;
 
 
@@ -677,6 +679,11 @@ typedef struct TableAmRoutine
 
 } TableAmRoutine;
 
+static inline bool
+table_uses_toast_table(Relation relation)
+{
+	return relation->rd_tableam->uses_toast_table;
+}
 
 /* ----------------------------------------------------------------------------
  * Slot functions.

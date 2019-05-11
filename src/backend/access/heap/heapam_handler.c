@@ -2515,6 +2515,7 @@ SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 
 static const TableAmRoutine heapam_methods = {
 	.type = T_TableAmRoutine,
+	.uses_toast_table = true,
 	.scans_leverage_column_projection = false,
 
 	.slot_callbacks = heapam_slot_callbacks,

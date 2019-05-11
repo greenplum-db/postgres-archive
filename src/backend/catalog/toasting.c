@@ -407,6 +407,11 @@ needs_toast_table(Relation rel)
 	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 		return false;
 
+	Assert(rel->rd_tableam != NULL);
+	/* No need to create TOAST table if AM doesn't need one */
+	if (!table_uses_toast_table(rel))
+		return false;
+
 	/*
 	 * We cannot allow toasting a shared relation after initdb (because
 	 * there's no way to mark it toasted in other databases' pg_class).

@@ -2097,6 +2097,7 @@ zedstoream_vacuum_rel(Relation onerel, VacuumParams *params,
 
 static const TableAmRoutine zedstoream_methods = {
 	.type = T_TableAmRoutine,
+	.uses_toast_table = false,
 	.scans_leverage_column_projection = true,
 
 	.slot_callbacks = zedstoream_slot_callbacks,
