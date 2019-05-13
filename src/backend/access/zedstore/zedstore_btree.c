@@ -762,7 +762,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	Assert(attno == ZS_META_ATTRIBUTE_NUM);
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, snapshot, &recent_oldest_undo, tid, &buf);
+	item = zsbt_fetch(rel, attno, NULL, &recent_oldest_undo, tid, &buf);
 	if (item == NULL)
 	{
 		/*
@@ -1026,14 +1026,14 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 	Assert(attno == ZS_META_ATTRIBUTE_NUM);
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, SnapshotAny, &recent_oldest_undo, tid, &buf);
+	item = zsbt_fetch(rel, attno, NULL, &recent_oldest_undo, tid, &buf);
 	if (item == NULL)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
 		 * an error, I think..
 		 */
-		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
+		elog(ERROR, "could not find tuple to lock with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,

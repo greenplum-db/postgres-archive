@@ -616,7 +616,7 @@ retry:
 		UnlockTupleTuplock(relation, tid_p, mode);
 
 	/* Fetch the tuple, too. */
-	if (!zedstoream_fetch_row_version(relation, tid_p, snapshot, slot))
+	if (!zedstoream_fetch_row_version(relation, tid_p, SnapshotAny, slot))
 		elog(ERROR, "could not fetch locked tuple");
 
 	return TM_Ok;
