@@ -103,21 +103,26 @@ fetch_undo_record:
 		{
 			if (undorec->cid >= snapshot->curcid)
 				return TM_Invisible;	/* inserted after scan started */
-			*undo_record_needed = true;
-			return TM_Ok;
 		}
-
-		if (TransactionIdIsInProgress(undorec->xid))
+		else if (TransactionIdIsInProgress(undorec->xid))
 			return TM_Invisible;		/* inserter has not committed yet */
-
-		if (TransactionIdDidCommit(undorec->xid))
+		else if (!TransactionIdDidCommit(undorec->xid))
 		{
-			*undo_record_needed = true;
-			return TM_Ok;
+			/* it must have aborted or crashed */
+			return TM_Invisible;
 		}
 
-		/* it must have aborted or crashed */
-		return TM_Invisible;
+		/* The tuple is visible to use. But can we lock it? */
+
+		/*
+		 * No conflict with this lock. Look at the previous UNDO record, there
+		 * might be more locks.
+		 *
+		 * FIXME: Shouldn't we drill down to the INSERT record and check if
+		 * that's visible to us first, before looking at the lockers?
+		 */
+		undo_ptr = undorec->prevundorec;
+		goto fetch_undo_record;
 	}
 	else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
 	{
@@ -154,7 +159,7 @@ fetch_undo_record:
 		 * FIXME: Shouldn't we drill down to the INSERT record and check if
 		 * that's visible to us first, before looking at the lockers?
 		 */
-		undo_ptr = ((ZSUndoRec_TupleLock *) undorec)->prevundorec;
+		undo_ptr = undorec->prevundorec;
 		goto fetch_undo_record;
 	}
 	else if (undorec->type == ZSUNDO_TYPE_DELETE)
@@ -186,7 +191,7 @@ fetch_undo_record:
 			/* deleter must have aborted or crashed. We have to keep following the
 			 * undo chain, in case there are LOCK records that are still visible
 			 */
-			undo_ptr = ((ZSUndoRec_Delete *) undorec)->prevundorec;
+			undo_ptr = undorec->prevundorec;
 			goto fetch_undo_record;
 		}
 
@@ -234,9 +239,11 @@ fetch_undo_record:
 
 		if (!TransactionIdDidCommit(undorec->xid))
 		{
-			/* deleter must have aborted or crashed */
-			*undo_record_needed = false;
-			return TM_Ok;
+			/* deleter must have aborted or crashed. We have to keep following the
+			 * undo chain, in case there are LOCK records that are still visible
+			 */
+			undo_ptr = undorec->prevundorec;
+			goto fetch_undo_record;
 		}
 
 		if (zs_tuplelock_compatible(old_lockmode, mode))
@@ -330,7 +337,7 @@ fetch_undo_record:
 	{
 		/* we don't care about tuple locks here. Follow the link to the
 		 * previous UNDO record for this tuple. */
-		undo_ptr = ((ZSUndoRec_TupleLock *) undorec)->prevundorec;
+		undo_ptr = undorec->prevundorec;
 		goto fetch_undo_record;
 	}
 	else if (undorec->type == ZSUNDO_TYPE_DELETE ||
@@ -350,7 +357,7 @@ fetch_undo_record:
 		{
 			if (!aborted)
 				*obsoleting_xid = undorec->xid;
-			undo_ptr = ((ZSUndoRec_Delete *) undorec)->prevundorec;
+			undo_ptr = undorec->prevundorec;
 			goto fetch_undo_record;
 		}
 	}
@@ -400,7 +407,7 @@ fetch_undo_record:
 	{
 		/* we don't care about tuple locks here. Follow the link to the
 		 * previous UNDO record for this tuple. */
-		undo_ptr = ((ZSUndoRec_TupleLock *) undorec)->prevundorec;
+		undo_ptr = undorec->prevundorec;
 		goto fetch_undo_record;
 	}
 	else if (undorec->type == ZSUNDO_TYPE_DELETE ||
@@ -478,7 +485,7 @@ fetch_undo_record:
 	{
 		/* locked tuple. */
 		/* look at the previous UNDO record to find the insert record */
-		undo_ptr = ((ZSUndoRec_TupleLock *) undorec)->prevundorec;
+		undo_ptr = undorec->prevundorec;
 		goto fetch_undo_record;
 	}
 	else if (undorec->type == ZSUNDO_TYPE_DELETE ||
@@ -574,14 +581,7 @@ fetch_undo_record:
 		 * XID is live.
 		 */
 		do {
-			if (undorec->type == ZSUNDO_TYPE_DELETE)
-				prevptr = ((ZSUndoRec_Delete *) undorec)->prevundorec;
-			else if (undorec->type == ZSUNDO_TYPE_UPDATE)
-				prevptr = ((ZSUndoRec_Update *) undorec)->prevundorec;
-			else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
-				prevptr = ((ZSUndoRec_TupleLock *) undorec)->prevundorec;
-			else
-				elog(ERROR, "unexpected UNDO record type: %d", undorec->type);
+			prevptr = undorec->prevundorec;
 
 			if (prevptr.counter < recent_oldest_undo.counter)
 				return true;
@@ -601,7 +601,7 @@ fetch_undo_record:
 	else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
 	{
 		/* look at the previous UNDO record, to find the Insert record */
-		undo_ptr = ((ZSUndoRec_TupleLock *) undorec)->prevundorec;
+		undo_ptr = undorec->prevundorec;
 		goto fetch_undo_record;
 	}
 	else

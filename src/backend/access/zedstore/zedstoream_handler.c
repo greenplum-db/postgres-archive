@@ -167,6 +167,9 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	TransactionId xid = GetCurrentTransactionId();
 	bool        isnull;
 	Datum       datum;
+	ZSUndoRecPtr prevundoptr;
+
+	ZSUndoRecPtrInitialize(&prevundoptr);
 
 	if (slot->tts_tupleDescriptor->natts != relation->rd_att->natts)
 		elog(ERROR, "slot's attribute count doesn't match relcache entry");
@@ -178,9 +181,10 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	tid = InvalidZSTid;
 
 	isnull = true;
+	ZSUndoRecPtrInitialize(&prevundoptr);
 	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
 					  &datum, &isnull, &tid, 1,
-					  xid, cid);
+					  xid, cid, prevundoptr);
 
 	/*
 	 * We only need to check for table-level SSI locks. Our
@@ -209,7 +213,7 @@ zedstoream_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 		zsbt_multi_insert(relation, attno,
 						  &datum, &isnull, &tid, 1,
-						  xid, cid);
+						  xid, cid, prevundoptr);
 
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, tid);
@@ -252,6 +256,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	Datum	   *datums;
 	bool	   *isnulls;
 	zstid	   *tids;
+	ZSUndoRecPtr prevundoptr;
 
 	tupletoasted = palloc(ntuples * sizeof(int));
 	datums = palloc0(ntuples * sizeof(Datum));
@@ -261,9 +266,10 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	for (i = 0; i < ntuples; i++)
 		isnulls[i] = true;
 
+	ZSUndoRecPtrInitialize(&prevundoptr);
 	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
 					  datums, isnulls, tids, ntuples,
-					  xid, cid);
+					  xid, cid, prevundoptr);
 
 	/*
 	 * We only need to check for table-level SSI locks. Our
@@ -301,7 +307,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		zsbt_multi_insert(relation, attno,
 						  datums, isnulls, tids, ntuples,
-						  xid, cid);
+						  xid, cid, prevundoptr);
 
 		for (i = 0; i < ntupletoasted; i++)
 		{
@@ -482,11 +488,8 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	TransactionId xid = GetCurrentTransactionId();
 	TM_Result result;
 	bool		have_tuple_lock = false;
-	bool		follow_updates;
 	zstid		next_tid = tid;
 	SnapshotData SnapshotDirty;
-
-	follow_updates = (flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS) != 0;
 
 	tmfd->traversed = false;
 	/*
@@ -753,6 +756,9 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	Datum       newdatum = 0;
 	TupleTableSlot *oldslot;
 	IndexFetchTableData *fetcher;
+	ZSUndoRecPtr prevundoptr;
+
+	ZSUndoRecPtrInitialize(&prevundoptr);
 
 	slot_getallattrs(slot);
 	d = slot->tts_values;
@@ -776,7 +782,7 @@ retry:
 	 * currently latest tuple version, rather than the one visible to our snapshot.
 	 */
 	if (!zedstoream_fetch_row((ZedStoreIndexFetchData *) fetcher,
-							 otid_p, snapshot, oldslot))
+							 otid_p, SnapshotAny, oldslot))
 	{
 		return TM_Invisible;
 	}
@@ -814,7 +820,7 @@ retry:
 
 			zsbt_multi_insert(relation, attno,
 							  &newdatum, &newisnull, &newtid, 1,
-							  xid, cid);
+							  xid, cid, prevundoptr);
 
 			if (toastptr != (Datum) 0)
 				zedstore_toast_finish(relation, attno, toastptr, newtid);

@@ -67,10 +67,10 @@ static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int ar
 
 static TM_Result zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 									  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot,
-					 Snapshot crosscheck, bool wait, TM_FailureData *hufd);
+									  Snapshot crosscheck, bool wait, TM_FailureData *hufd, ZSUndoRecPtr *prevundoptr_p);
 static void zsbt_update_insert_new(Relation rel, AttrNumber attno,
 					   Datum newdatum, bool newisnull, zstid *newtid,
-					   TransactionId xid, CommandId cid);
+					   TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr);
 static void zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 					  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot);
 
@@ -609,7 +609,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 void
 zsbt_multi_insert(Relation rel, AttrNumber attno,
 				  Datum *datums, bool *isnulls, zstid *tids, int nitems,
-				  TransactionId xid, CommandId cid)
+				  TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr)
 {
 	Form_pg_attribute attr;
 	bool		assign_tids;
@@ -685,6 +685,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = tids[0];
+		undorec.rec.prevundorec = prevundoptr;
 		undorec.endtid = tids[nitems - 1];
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
@@ -792,9 +793,9 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		undorec.rec.tid = tid;
 
 		if (keep_old_undo_ptr)
-			undorec.prevundorec = item->t_undo_ptr;
+			undorec.rec.prevundorec = item->t_undo_ptr;
 		else
-			ZSUndoRecPtrInitialize(&undorec.prevundorec);
+			ZSUndoRecPtrInitialize(&undorec.rec.prevundorec);
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
@@ -826,6 +827,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 			zstid *newtid_p)
 {
 	TM_Result	result;
+	ZSUndoRecPtr prevundoptr;
 
 	/*
 	 * This is currently only used on the meta-attribute. The other attributes
@@ -844,13 +846,13 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	 */
 	result = zsbt_update_lock_old(rel, attno, otid,
 								  xid, cid, key_update, snapshot,
-								  crosscheck, wait, hufd);
+								  crosscheck, wait, hufd, &prevundoptr);
 
 	if (result != TM_Ok)
 		return result;
 
 	/* insert new version */
-	zsbt_update_insert_new(rel, attno, newdatum, newisnull, newtid_p, xid, cid);
+	zsbt_update_insert_new(rel, attno, newdatum, newisnull, newtid_p, xid, cid, prevundoptr);
 
 	/* update the old item with the "t_ctid pointer" for the new item */
 	zsbt_mark_old_updated(rel, attno, otid, *newtid_p, xid, cid, key_update, snapshot);
@@ -864,7 +866,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 static TM_Result
 zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 					 TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot,
-					 Snapshot crosscheck, bool wait, TM_FailureData *hufd)
+					 Snapshot crosscheck, bool wait, TM_FailureData *hufd, ZSUndoRecPtr *prevundoptr_p)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 	Buffer		buf;
@@ -886,6 +888,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 		elog(ERROR, "could not find old tuple to update with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(otid), ZSTidGetOffsetNumber(otid), attno);
 	}
+	*prevundoptr_p = olditem->t_undo_ptr;
 
 	/*
 	 * Is it visible to us?
@@ -917,9 +920,9 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 static void
 zsbt_update_insert_new(Relation rel, AttrNumber attno,
 					   Datum newdatum, bool newisnull, zstid *newtid,
-					   TransactionId xid, CommandId cid)
+					   TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr)
 {
-	zsbt_multi_insert(rel, attno, &newdatum, &newisnull, newtid, 1, xid, cid);
+	zsbt_multi_insert(rel, attno, &newdatum, &newisnull, newtid, 1, xid, cid, prevundoptr);
 }
 
 /*
@@ -977,9 +980,9 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 		undorec.rec.cid = cid;
 		undorec.rec.tid = otid;
 		if (keep_old_undo_ptr)
-			undorec.prevundorec = olditem->t_undo_ptr;
+			undorec.rec.prevundorec = olditem->t_undo_ptr;
 		else
-			ZSUndoRecPtrInitialize(&undorec.prevundorec);
+			ZSUndoRecPtrInitialize(&undorec.rec.prevundorec);
 		undorec.newtid = newtid;
 		undorec.key_update = key_update;
 
@@ -1053,9 +1056,9 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 		undorec.rec.tid = tid;
 		undorec.lockmode = mode;
 		if (keep_old_undo_ptr)
-			undorec.prevundorec = item->t_undo_ptr;
+			undorec.rec.prevundorec = item->t_undo_ptr;
 		else
-			ZSUndoRecPtrInitialize(&undorec.prevundorec);
+			ZSUndoRecPtrInitialize(&undorec.rec.prevundorec);
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}

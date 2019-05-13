@@ -47,6 +47,18 @@ typedef struct
 	TransactionId xid;
 	CommandId	cid;
 	zstid		tid;
+
+	/*
+	 * UNDO-record of the inserter. This is needed if a row is inserted, and
+	 * deleted, and there are some snapshots active don't don't consider even
+	 * the insertion as visible.
+	 *
+	 * This is also used in Insert records, if the record represents the
+	 * new tuple version of an UPDATE, rather than an INSERT. It's needed to
+	 * dig into possible KEY SHARE locks held on the row, which didn't prevent
+	 * the tuple from being updated.
+	 */
+	ZSUndoRecPtr prevundorec;
 } ZSUndoRec;
 
 #define ZSUNDO_TYPE_INSERT		1
@@ -63,18 +75,12 @@ typedef struct
 {
 	ZSUndoRec	rec;
 	zstid       endtid; /* inclusive */
+
 } ZSUndoRec_Insert;
 
 typedef struct
 {
 	ZSUndoRec	rec;
-
-	/*
-	 * UNDO-record of the inserter. This is needed if a row is inserted, and
-	 * deleted, and there are some snapshots active don't don't consider even
-	 * the insertion as visible.
-	 */
-	ZSUndoRecPtr prevundorec;
 
 	/*
 	 * TODO: It might be good to move the deleted tuple to the undo-log, so
@@ -96,9 +102,6 @@ typedef struct
 typedef struct
 {
 	ZSUndoRec	rec;
-
-	/* Like in ZSUndoRec_Delete. */
-	ZSUndoRecPtr prevundorec;
 
 	bool		key_update;		/* were key columns updated?
 								 * (for conflicting with FOR KEY SHARE) */
@@ -128,9 +131,6 @@ typedef struct
 	 * last restart. Except with two-phase commit prepared transactions.
 	 */
 	LockTupleMode	lockmode;
-
-	/* Like in ZSUndoRec_Delete. */
-	ZSUndoRecPtr prevundorec;
 } ZSUndoRec_TupleLock;
 
 typedef struct
