@@ -100,6 +100,9 @@ typedef struct
 	/* Like in ZSUndoRec_Delete. */
 	ZSUndoRecPtr prevundorec;
 
+	bool		key_update;		/* were key columns updated?
+								 * (for conflicting with FOR KEY SHARE) */
+
 	zstid		newtid;
 
 } ZSUndoRec_Update;

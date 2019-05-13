@@ -483,7 +483,7 @@ extern TM_Result zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 							 TM_FailureData *hufd, bool changingPart);
 extern TM_Result zsbt_update(Relation rel, AttrNumber attno, zstid otid,
 							 Datum newdatum, bool newisnull, TransactionId xid,
-							 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
+							 CommandId cid, bool key_update, Snapshot snapshot, Snapshot crosscheck,
 							 bool wait, TM_FailureData *hufd, zstid *newtid_p);
 extern void zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr);
 extern void zsbt_remove_item(Relation rel, AttrNumber attno, zstid tid);

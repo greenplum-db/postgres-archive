@@ -625,6 +625,122 @@ retry:
 	return TM_Ok;
 }
 
+/* like heap_tuple_attr_equals */
+static bool
+zs_tuple_attr_equals(int attrnum, TupleTableSlot *slot1, TupleTableSlot *slot2)
+{
+	TupleDesc	tupdesc = slot1->tts_tupleDescriptor;
+	Datum		value1,
+				value2;
+	bool		isnull1,
+				isnull2;
+	Form_pg_attribute att;
+
+	/*
+	 * If it's a whole-tuple reference, say "not equal".  It's not really
+	 * worth supporting this case, since it could only succeed after a no-op
+	 * update, which is hardly a case worth optimizing for.
+	 */
+	if (attrnum == 0)
+		return false;
+
+	/*
+	 * Likewise, automatically say "not equal" for any system attribute other
+	 * than tableOID; we cannot expect these to be consistent in a HOT chain,
+	 * or even to be set correctly yet in the new tuple.
+	 */
+	if (attrnum < 0)
+	{
+		if (attrnum != TableOidAttributeNumber)
+			return false;
+	}
+
+	/*
+	 * Extract the corresponding values.  XXX this is pretty inefficient if
+	 * there are many indexed columns.  Should HeapDetermineModifiedColumns do
+	 * a single heap_deform_tuple call on each tuple, instead?	But that
+	 * doesn't work for system columns ...
+	 */
+	value1 = slot_getattr(slot1, attrnum, &isnull1);
+	value2 = slot_getattr(slot2, attrnum, &isnull2);
+
+	/*
+	 * If one value is NULL and other is not, then they are certainly not
+	 * equal
+	 */
+	if (isnull1 != isnull2)
+		return false;
+
+	/*
+	 * If both are NULL, they can be considered equal.
+	 */
+	if (isnull1)
+		return true;
+
+	/*
+	 * We do simple binary comparison of the two datums.  This may be overly
+	 * strict because there can be multiple binary representations for the
+	 * same logical value.  But we should be OK as long as there are no false
+	 * positives.  Using a type-specific equality operator is messy because
+	 * there could be multiple notions of equality in different operator
+	 * classes; furthermore, we cannot safely invoke user-defined functions
+	 * while holding exclusive buffer lock.
+	 */
+	if (attrnum <= 0)
+	{
+		/* The only allowed system columns are OIDs, so do this */
+		return (DatumGetObjectId(value1) == DatumGetObjectId(value2));
+	}
+	else
+	{
+		Assert(attrnum <= tupdesc->natts);
+		att = TupleDescAttr(tupdesc, attrnum - 1);
+		return datumIsEqual(value1, value2, att->attbyval, att->attlen);
+	}
+}
+
+static bool
+is_key_update(Relation relation, TupleTableSlot *oldslot, TupleTableSlot *newslot)
+{
+	Bitmapset  *key_attrs;
+	Bitmapset  *interesting_attrs;
+	Bitmapset  *modified_attrs;
+	int			attnum;
+
+	/*
+	 * Fetch the list of attributes to be checked for various operations.
+	 *
+	 * For HOT considerations, this is wasted effort if we fail to update or
+	 * have to put the new tuple on a different page.  But we must compute the
+	 * list before obtaining buffer lock --- in the worst case, if we are
+	 * doing an update on one of the relevant system catalogs, we could
+	 * deadlock if we try to fetch the list later.  In any case, the relcache
+	 * caches the data so this is usually pretty cheap.
+	 *
+	 * We also need columns used by the replica identity and columns that are
+	 * considered the "key" of rows in the table.
+	 *
+	 * Note that we get copies of each bitmap, so we need not worry about
+	 * relcache flush happening midway through.
+	 */
+	key_attrs = RelationGetIndexAttrBitmap(relation, INDEX_ATTR_BITMAP_KEY);
+
+	interesting_attrs = NULL;
+	interesting_attrs = bms_add_members(interesting_attrs, key_attrs);
+
+	/* Determine columns modified by the update. */
+	modified_attrs = NULL;
+	while ((attnum = bms_first_member(interesting_attrs)) >= 0)
+	{
+		attnum += FirstLowInvalidHeapAttributeNumber;
+
+		if (!zs_tuple_attr_equals(attnum, oldslot, newslot))
+			modified_attrs = bms_add_member(modified_attrs,
+											attnum - FirstLowInvalidHeapAttributeNumber);
+	}
+
+	return bms_overlap(modified_attrs, key_attrs);
+}
 
 static TM_Result
 zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
@@ -635,18 +751,21 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	zstid		otid = ZSTidFromItemPointer(*otid_p);
 	TransactionId xid = GetCurrentTransactionId();
 	AttrNumber	attno;
+	bool		key_update;
 	Datum	   *d;
 	bool	   *isnulls;
 	TM_Result	result;
 	zstid		newtid;
 	Datum       newdatum = 0;
-
-	/* TODO: Use LockTupleNoKeyExclusive if key columns were not updated */
-	*lockmode = LockTupleExclusive;
+	TupleTableSlot *oldslot;
+	IndexFetchTableData *fetcher;
 
 	slot_getallattrs(slot);
 	d = slot->tts_values;
 	isnulls = slot->tts_isnull;
+
+	oldslot = table_slot_create(relation, NULL);
+	fetcher = zedstoream_begin_index_fetch(relation);
 
 	/*
 	 * The meta-attribute holds the visibility information, including the "t_ctid"
@@ -655,8 +774,24 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	 */
 retry:
 	newtid = InvalidZSTid;
+
+	/*
+	 * Fetch the old row, so that we can figure out which columns were modified.
+	 *
+	 * FIXME: if we have to follow the update chain, we should look at the
+	 * currently latest tuple version, rather than the one visible to our snapshot.
+	 */
+	if (!zedstoream_fetch_row((ZedStoreIndexFetchData *) fetcher,
+							 otid_p, snapshot, oldslot))
+	{
+		return TM_Invisible;
+	}
+	key_update = is_key_update(relation, oldslot, slot);
+
+	*lockmode = key_update ? LockTupleExclusive : LockTupleNoKeyExclusive;
+
 	result = zsbt_update(relation, ZS_META_ATTRIBUTE_NUM, otid, newdatum, true,
-						 xid, cid, snapshot, crosscheck,
+						 xid, cid, key_update, snapshot, crosscheck,
 						 wait, hufd, &newtid);
 
 	if (result == TM_Ok)
@@ -713,6 +848,9 @@ retry:
 			}
 		}
 	}
+
+	zedstoream_end_index_fetch(fetcher);
+	ExecDropSingleTupleTableSlot(oldslot);
 
 	return result;
 }

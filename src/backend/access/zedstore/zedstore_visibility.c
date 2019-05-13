@@ -167,20 +167,31 @@ fetch_undo_record:
 	}
 	else
 	{
+		LockTupleMode old_lockmode;
+
 		/* deleted or updated-away tuple */
 		Assert(undorec->type == ZSUNDO_TYPE_DELETE ||
 			   undorec->type == ZSUNDO_TYPE_UPDATE);
 
 		if (undorec->type == ZSUNDO_TYPE_DELETE)
 		{
+			old_lockmode = LockTupleExclusive;
 		}
 		else if (undorec->type == ZSUNDO_TYPE_UPDATE)
-			*next_tid = ((ZSUndoRec_Update *) undorec)->newtid;
+		{
+			ZSUndoRec_Update *updaterec = (ZSUndoRec_Update *) undorec;
+
+			*next_tid = updaterec->newtid;
+			old_lockmode = updaterec->key_update ? LockTupleExclusive : LockTupleNoKeyExclusive;
+		}
 		else
 			elog(ERROR, "unexpected UNDO record type for updated/deleted item: %d", undorec->type);
 
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
+			if (zs_tuplelock_compatible(old_lockmode, mode))
+				return TM_Ok;
+
 			if (undorec->cid >= snapshot->curcid)
 			{
 				tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
@@ -194,6 +205,9 @@ fetch_undo_record:
 
 		if (TransactionIdIsInProgress(undorec->xid))
 		{
+			if (zs_tuplelock_compatible(old_lockmode, mode))
+				return TM_Ok;
+
 			tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
 			tmfd->xmax = undorec->xid;
 			tmfd->cmax = InvalidCommandId;
@@ -217,6 +231,9 @@ fetch_undo_record:
 		}
 		else
 		{
+			if (zs_tuplelock_compatible(old_lockmode, mode))
+				return TM_Ok;
+
 			tmfd->ctid = ItemPointerFromZSTid(((ZSUndoRec_Update *) undorec)->newtid);
 			tmfd->xmax = undorec->xid;
 			tmfd->cmax = InvalidCommandId;

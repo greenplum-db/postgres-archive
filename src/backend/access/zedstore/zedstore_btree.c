@@ -66,13 +66,13 @@ static bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int
 static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems);
 
 static TM_Result zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
-					 TransactionId xid, CommandId cid, Snapshot snapshot,
+									  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot,
 					 Snapshot crosscheck, bool wait, TM_FailureData *hufd);
 static void zsbt_update_insert_new(Relation rel, AttrNumber attno,
 					   Datum newdatum, bool newisnull, zstid *newtid,
 					   TransactionId xid, CommandId cid);
 static void zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
-					  TransactionId xid, CommandId cid, Snapshot snapshot);
+					  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot);
 
 /* ----------------------------------------------------------------
  *						 Public interface
@@ -822,7 +822,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
  */
 TM_Result
 zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
-			bool newisnull, TransactionId xid, CommandId cid, Snapshot snapshot,
+			bool newisnull, TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot,
 			Snapshot crosscheck, bool wait, TM_FailureData *hufd,
 			zstid *newtid_p)
 {
@@ -844,7 +844,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	 * buffer locked, and use the same page for the new tuple.
 	 */
 	result = zsbt_update_lock_old(rel, attno, otid,
-								  xid, cid, snapshot,
+								  xid, cid, key_update, snapshot,
 								  crosscheck, wait, hufd);
 
 	if (result != TM_Ok)
@@ -854,7 +854,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
 	zsbt_update_insert_new(rel, attno, newdatum, newisnull, newtid_p, xid, cid);
 
 	/* update the old item with the "t_ctid pointer" for the new item */
-	zsbt_mark_old_updated(rel, attno, otid, *newtid_p, xid, cid, snapshot);
+	zsbt_mark_old_updated(rel, attno, otid, *newtid_p, xid, cid, key_update, snapshot);
 
 	return TM_Ok;
 }
@@ -864,7 +864,7 @@ zsbt_update(Relation rel, AttrNumber attno, zstid otid, Datum newdatum,
  */
 static TM_Result
 zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
-					 TransactionId xid, CommandId cid, Snapshot snapshot,
+					 TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot,
 					 Snapshot crosscheck, bool wait, TM_FailureData *hufd)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
@@ -893,7 +893,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 	 */
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
 								(ZSBtreeItem *) olditem,
-								LockTupleExclusive, /* TODO: use LockTupleNoKeyExclusive, if key columns were not updated */
+								key_update ? LockTupleExclusive : LockTupleNoKeyExclusive,
 								&keep_old_undo_ptr, hufd, &next_tid);
 	if (result != TM_Ok)
 	{
@@ -928,7 +928,7 @@ zsbt_update_insert_new(Relation rel, AttrNumber attno,
  */
 static void
 zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
-					  TransactionId xid, CommandId cid, Snapshot snapshot)
+					  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 	Buffer		buf;
@@ -960,7 +960,7 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	 */
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
 								(ZSBtreeItem *) olditem,
-								LockTupleExclusive, /* TODO: use LockTupleNoKeyExclusive, if key columns were not updated */
+								key_update ? LockTupleExclusive : LockTupleNoKeyExclusive,
 								&keep_old_undo_ptr, &tmfd, &next_tid);
 	if (result != TM_Ok)
 	{
@@ -982,6 +982,7 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 		else
 			ZSUndoRecPtrInitialize(&undorec.prevundorec);
 		undorec.newtid = newtid;
+		undorec.key_update = key_update;
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
