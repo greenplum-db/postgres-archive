@@ -610,6 +610,7 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 		buf = ReadBuffer(rel, lastblk);
 		page = BufferGetPage(buf);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
+
 		opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(page);
 
 		if (opaque->zs_page_id != ZS_UNDO_PAGE_ID)

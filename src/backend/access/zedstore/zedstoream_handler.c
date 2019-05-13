@@ -599,12 +599,6 @@ retry:
 				break;
 		}
 
-		/* if there are updates, follow the update chain */
-		if (follow_updates && next_tid != tid)
-		{
-			elog(ERROR, "following updates not implemented");
-		}
-
 		/*
 		 * xwait is done. Retry.
 		 */
