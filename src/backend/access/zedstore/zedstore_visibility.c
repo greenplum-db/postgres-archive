@@ -64,6 +64,7 @@ zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 	ZSUndoRecPtr undo_ptr;
 	bool		is_deleted;
 	ZSUndoRec  *undorec;
+	int			chain_depth = 0;
 
 	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
 
@@ -73,6 +74,7 @@ zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 	undo_ptr = zsbt_item_undoptr(item);
 
 fetch_undo_record:
+	chain_depth++;
 
 	/* Is it visible? */
 	if (undo_ptr.counter < recent_oldest_undo.counter)
@@ -88,7 +90,8 @@ fetch_undo_record:
 			 * the old UNDO record is no longer visible to anyone, so we don't
 			 * need to keep it.
 			 */
-			*undo_record_needed = false;
+			if (chain_depth == 1)
+				*undo_record_needed = false;
 			return TM_Ok;
 		}
 	}
@@ -135,7 +138,10 @@ fetch_undo_record:
 			if (TransactionIdIsCurrentTransactionId(undorec->xid))
 			{
 				if (lock_undorec->lockmode >= mode)
+				{
+					*undo_record_needed = true;
 					return TM_Ok;
+				}
 			}
 			else if (!zs_tuplelock_compatible(lock_undorec->lockmode, mode) &&
 					 TransactionIdIsInProgress(undorec->xid))
