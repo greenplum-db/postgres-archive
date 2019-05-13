@@ -799,10 +799,9 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
 
-	/* Replace the ZSBreeItem with a DELETED item. */
+	/* Replace the ZSBreeItem with one with the new UNDO pointer. */
 	deleteditem = palloc(item->t_size);
 	memcpy(deleteditem, item, item->t_size);
-	deleteditem->t_flags |= ZSBT_DELETED;
 	deleteditem->t_undo_ptr = undorecptr;
 
 	zsbt_replace_item(rel, attno, buf,
@@ -987,10 +986,9 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
 
-	/* Replace the ZSBreeItem with an UPDATED item. */
+	/* Replace the ZSBreeItem with one with the updated undo pointer. */
 	deleteditem = palloc(olditem->t_size);
 	memcpy(deleteditem, olditem, olditem->t_size);
-	deleteditem->t_flags |= ZSBT_UPDATED;
 	deleteditem->t_undo_ptr = undorecptr;
 
 	zsbt_replace_item(rel, attno, buf,
@@ -1044,12 +1042,6 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 		return result;
 	}
 
-	if ((item->t_flags & ZSBT_DELETED) != 0)
-		elog(ERROR, "cannot lock deleted tuple");
-
-	if ((item->t_flags & ZSBT_UPDATED) != 0)
-		elog(ERROR, "cannot lock updated tuple");
-
 	/* Create UNDO record. */
 	{
 		ZSUndoRec_TupleLock undorec;
@@ -1072,6 +1064,14 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 	newitem = palloc(item->t_size);
 	memcpy(newitem, item, item->t_size);
 	newitem->t_undo_ptr = undorecptr;
+
+	/*
+	 * It's possible that the item was marked as updated/deleted, but the transaction
+	 * aborted, and hence we're now able to lock the tuple again.
+	 *
+	 * FIXME: should we clear the flags?
+	 */
+	//newitem->t_flags &= ~(ZSBT_DELETED | ZSBT_UPDATED);
 
 	zsbt_replace_item(rel, attno, buf,
 					  item->t_tid, (ZSBtreeItem *) newitem,
@@ -1182,7 +1182,6 @@ zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr 
 	{
 		copy = palloc(item->t_size);
 		memcpy(copy, item, item->t_size);
-		copy->t_flags &= ~(ZSBT_DELETED | ZSBT_UPDATED);
 		ZSUndoRecPtrInitialize(&copy->t_undo_ptr);
 		zsbt_replace_item(rel, attno, buf,
 						  tid, (ZSBtreeItem *) copy,

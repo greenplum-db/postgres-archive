@@ -219,8 +219,6 @@ typedef struct ZSCompressedBtreeItem
 
 #define ZSBT_COMPRESSED		0x0001
 #define ZSBT_ARRAY			0x0002
-#define ZSBT_DELETED		0x0004
-#define ZSBT_UPDATED		0x0008
 #define ZSBT_NULL			0x0010
 #define ZSBT_DEAD			0x0020
 

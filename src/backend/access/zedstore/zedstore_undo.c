@@ -665,7 +665,7 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 						 */
 						/*
 						 * Don't do this if we're called from zsundo_get_oldest_undo_ptr(),
-						 * because we might be holding a lock on the page, and deadlock
+						 * because we might be holding a lock on the page, and deadlock.
 						 */
 						if (trimstats->max_dead_tuples == 0)
 							trimstats->dead_tuples_overflowed = true;
