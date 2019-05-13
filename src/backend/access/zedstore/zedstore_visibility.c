@@ -53,6 +53,10 @@ zs_tuplelock_compatible(LockTupleMode mode, LockTupleMode newmode)
  * checks if the new lock mode is compatible with the old one, and returns TM_Ok
  * if so. Waiting for conflicting locks is left to the caller.
  *
+ * This is also used for tuple locking (e.g. SELECT FOR UPDATE). 'mode' indicates
+ * the lock mode. For a genuine UPDATE, pass LockTupleExclusive or
+ * LockTupleNoKeyExclusive depending on whether key columns are being modified.
+ *
  * If the tuple was UPDATEd, *next_tid is set to the TID of the new row version.
  */
 TM_Result
