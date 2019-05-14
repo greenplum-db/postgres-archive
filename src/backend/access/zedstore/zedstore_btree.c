@@ -783,6 +783,26 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		return result;
 	}
 
+	if (crosscheck != InvalidSnapshot && result == TM_Ok)
+	{
+		/* Perform additional check for transaction-snapshot mode RI updates */
+		/* FIXME: dummmy scan */
+		ZSBtreeScan scan;
+		TransactionId obsoleting_xid;
+
+		memset(&scan, 0, sizeof(scan));
+		scan.rel = rel;
+		scan.snapshot = crosscheck;
+		scan.recent_oldest_undo = recent_oldest_undo;
+
+		if (!zs_SatisfiesVisibility(&scan, (ZSBtreeItem *) item, &obsoleting_xid))
+		{
+			UnlockReleaseBuffer(buf);
+			/* FIXME: We should fill TM_FailureData *hufd correctly */
+			result = TM_Updated;
+		}
+	}
+
 	/* Create UNDO record. */
 	{
 		ZSUndoRec_Delete undorec;
@@ -903,6 +923,26 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 		UnlockReleaseBuffer(buf);
 		/* FIXME: We should fill TM_FailureData *hufd correctly */
 		return result;
+	}
+
+	if (crosscheck != InvalidSnapshot && result == TM_Ok)
+	{
+		/* Perform additional check for transaction-snapshot mode RI updates */
+		/* FIXME: dummmy scan */
+		ZSBtreeScan scan;
+		TransactionId obsoleting_xid;
+
+		memset(&scan, 0, sizeof(scan));
+		scan.rel = rel;
+		scan.snapshot = crosscheck;
+		scan.recent_oldest_undo = recent_oldest_undo;
+
+		if (!zs_SatisfiesVisibility(&scan, (ZSBtreeItem *) olditem, &obsoleting_xid))
+		{
+			UnlockReleaseBuffer(buf);
+			/* FIXME: We should fill TM_FailureData *hufd correctly */
+			result = TM_Updated;
+		}
 	}
 
 	/*

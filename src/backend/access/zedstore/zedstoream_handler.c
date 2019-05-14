@@ -521,7 +521,8 @@ retry:
 		 */
 		return TM_Invisible;
 	}
-	else if (result == TM_Updated)
+	else if (result == TM_Updated ||
+			 (result == TM_SelfModified && tmfd->cmax == cid))
 	{
 		/*
 		 * The other transaction is an update and it already committed.
