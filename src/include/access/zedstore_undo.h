@@ -85,6 +85,8 @@ typedef struct
 {
 	ZSUndoRec	rec;
 
+	bool		changedPart;	/* tuple was moved to a different partition by UPDATE */
+
 	/*
 	 * TODO: It might be good to move the deleted tuple to the undo-log, so
 	 * that the space can immediately be reused. But currently, we don't do

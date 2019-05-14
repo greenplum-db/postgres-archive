@@ -164,6 +164,8 @@ fetch_undo_record:
 	}
 	else if (undorec->type == ZSUNDO_TYPE_DELETE)
 	{
+		ZSUndoRec_Delete *deleterec = (ZSUndoRec_Delete *) undorec;
+
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
 			if (undorec->cid >= snapshot->curcid)
@@ -195,10 +197,19 @@ fetch_undo_record:
 			goto fetch_undo_record;
 		}
 
-		tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
 		tmfd->xmax = undorec->xid;
 		tmfd->cmax = InvalidCommandId;
-		return TM_Deleted;
+		if (deleterec->changedPart)
+		{
+			ItemPointerSet(&tmfd->ctid, MovedPartitionsBlockNumber, MovedPartitionsOffsetNumber);
+			*next_tid = InvalidZSTid;
+			return TM_Updated;
+		}
+		else
+		{
+			tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
+			return TM_Deleted;
+		}
 	}
 	else if (undorec->type == ZSUNDO_TYPE_UPDATE)
 	{

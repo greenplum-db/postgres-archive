@@ -812,6 +812,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
 		undorec.rec.tid = tid;
+		undorec.changedPart = changingPart;
 
 		if (keep_old_undo_ptr)
 			undorec.rec.prevundorec = item->t_undo_ptr;

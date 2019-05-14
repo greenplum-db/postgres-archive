@@ -537,17 +537,16 @@ retry:
 				have_tuple_lock = false;
 			}
 
+			if (ItemPointerIndicatesMovedPartitions(&tmfd->ctid))
+				ereport(ERROR,
+						(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+						 errmsg("tuple to be locked was already moved to another partition due to concurrent update")));
+
 			/* it was updated, so look at the updated version */
 			*tid_p = ItemPointerFromZSTid(next_tid);
 
 			/* signal that a tuple later in the chain is getting locked */
 			tmfd->traversed = true;
-
-			/* TODO: We don't indicate an update across partitions like this in zedstore, do we? */
-			if (ItemPointerIndicatesMovedPartitions(tid_p))
-				ereport(ERROR,
-						(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-						 errmsg("tuple to be locked was already moved to another partition due to concurrent update")));
 
 			/* loop back to fetch next in chain */
 
