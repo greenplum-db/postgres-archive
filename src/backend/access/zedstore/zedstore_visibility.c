@@ -424,8 +424,13 @@ fetch_undo_record:
 
 		if (!TransactionIdDidCommit(undorec->xid))
 		{
-			/* deleter aborted or crashed */
-			return true;
+			/*
+			 * Deleter must have aborted or crashed. But we have to keep following the
+			 * undo chain, to check if the insertion was visible in the first
+			 * place.
+			 */
+			undo_ptr = undorec->prevundorec;
+			goto fetch_undo_record;
 		}
 
 		return false;
@@ -507,8 +512,13 @@ fetch_undo_record:
 
 		if (!TransactionIdDidCommit(undorec->xid))
 		{
-			/* deleter aborted or crashed */
-			return true;
+			/*
+			 * Deleter must have aborted or crashed. But we have to keep following the
+			 * undo chain, to check if the insertion was visible in the first
+			 * place.
+			 */
+			undo_ptr = undorec->prevundorec;
+			goto fetch_undo_record;
 		}
 
 		return false;
