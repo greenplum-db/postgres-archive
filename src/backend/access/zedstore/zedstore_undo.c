@@ -254,6 +254,9 @@ zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr)
 
 	undorec = (ZSUndoRec *) (((char *) page) + undoptr.offset);
 
+	if (undorec->type != ZSUNDO_TYPE_INSERT)
+		elog(ERROR, "unexpected undo record type %d on speculatively inserted row", undorec->type);
+
 	undorec->speculative_token = INVALID_SPECULATIVE_TOKEN;
 	MarkBufferDirty(buf);
 	UnlockReleaseBuffer(buf);

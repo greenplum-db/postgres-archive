@@ -51,7 +51,7 @@ static zs_split_stack *zsbt_newroot(Relation rel, AttrNumber attno, int level,
 									List *downlinks);
 static zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level);
 static zs_split_stack *zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf, bool target_is_left);
-static ZSSingleBtreeItem *zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot,
+static ZSSingleBtreeItem *zsbt_fetch(Relation rel, AttrNumber attno,
 		   ZSUndoRecPtr *recent_oldest_undo, zstid tid, Buffer *buf_p);
 static void zsbt_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 							  zstid oldtid, ZSBtreeItem *replacementitem,
@@ -763,7 +763,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	Assert(attno == ZS_META_ATTRIBUTE_NUM);
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, NULL, &recent_oldest_undo, tid, &buf);
+	item = zsbt_fetch(rel, attno, &recent_oldest_undo, tid, &buf);
 	if (item == NULL)
 	{
 		/*
@@ -879,7 +879,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 	/*
 	 * Find the item to delete.
 	 */
-	olditem = zsbt_fetch(rel, attno, NULL, &recent_oldest_undo, otid, &buf);
+	olditem = zsbt_fetch(rel, attno, &recent_oldest_undo, otid, &buf);
 	if (olditem == NULL)
 	{
 		/*
@@ -947,7 +947,7 @@ zsbt_mark_old_updated(Relation rel, AttrNumber attno, zstid otid, zstid newtid,
 	 * Find the item to delete.  It could be part of a compressed item,
 	 * we let zsbt_fetch() handle that.
 	 */
-	olditem = zsbt_fetch(rel, attno, NULL, &recent_oldest_undo, otid, &buf);
+	olditem = zsbt_fetch(rel, attno, &recent_oldest_undo, otid, &buf);
 	if (olditem == NULL)
 	{
 		/*
@@ -1027,7 +1027,7 @@ zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
 	Assert(attno == ZS_META_ATTRIBUTE_NUM);
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, NULL, &recent_oldest_undo, tid, &buf);
+	item = zsbt_fetch(rel, attno, &recent_oldest_undo, tid, &buf);
 	if (item == NULL)
 	{
 		/*
@@ -1106,7 +1106,7 @@ zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undo
 	Assert(attno == ZS_META_ATTRIBUTE_NUM);
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, NULL, NULL, tid, &buf);
+	item = zsbt_fetch(rel, attno, NULL, tid, &buf);
 	if (item == NULL)
 	{
 		elog(WARNING, "could not find tuple to mark dead with TID (%u, %u) for attribute %d",
@@ -1140,7 +1140,7 @@ zsbt_remove_item(Relation rel, AttrNumber attno, zstid tid)
 	ZSSingleBtreeItem *item;
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, NULL, NULL, tid, &buf);
+	item = zsbt_fetch(rel, attno, NULL, tid, &buf);
 	if (item == NULL)
 	{
 		elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
@@ -1174,7 +1174,7 @@ zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr 
 	Assert(attno == ZS_META_ATTRIBUTE_NUM);
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_fetch(rel, attno, NULL, NULL, tid, &buf);
+	item = zsbt_fetch(rel, attno, NULL, tid, &buf);
 	if (item == NULL)
 	{
 		elog(WARNING, "could not find aborted tuple to remove with TID (%u, %u) for attribute %d",
@@ -1788,7 +1788,7 @@ zsbt_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool for
 	ZSSingleBtreeItem *item = NULL;
 	ZSUndoRecPtr recent_oldest_undo;
 
-	item = zsbt_fetch(rel, ZS_META_ATTRIBUTE_NUM, SnapshotAny, &recent_oldest_undo, tid, &buf);
+	item = zsbt_fetch(rel, ZS_META_ATTRIBUTE_NUM, &recent_oldest_undo, tid, &buf);
 
 	if (item == NULL)
 		elog(ERROR, "couldn't find item for meta column for inserted tuple with TID (%u, %u) in rel %s",
@@ -1800,8 +1800,13 @@ zsbt_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool for
 	UnlockReleaseBuffer(buf);
 }
 
+/*
+ * Fetch the item with given TID. The page containing the item is kept locked, and
+ * returned to the caller in *buf_p. This is used to locate a tuple for updating
+ * or deleting it.
+ */
 static ZSSingleBtreeItem *
-zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, ZSUndoRecPtr *recent_oldest_undo,
+zsbt_fetch(Relation rel, AttrNumber attno, ZSUndoRecPtr *recent_oldest_undo,
 		   zstid tid, Buffer *buf_p)
 {
 	Buffer		buf;
@@ -1869,25 +1874,6 @@ zsbt_fetch(Relation rel, AttrNumber attno, Snapshot snapshot, ZSUndoRecPtr *rece
 				break;
 			}
 		}
-	}
-
-	if (found && snapshot)
-	{
-		/*
-		 * Ok, we have the item that covers the target TID now, in 'item'. Check
-		 * if it's visible.
-		 */
-		/* FIXME: dummmy scan */
-		ZSBtreeScan scan;
-		TransactionId obsoleting_xid;
-
-		memset(&scan, 0, sizeof(scan));
-		scan.rel = rel;
-		scan.snapshot = snapshot;
-		scan.recent_oldest_undo = *recent_oldest_undo;
-
-		if (!zs_SatisfiesVisibility(&scan, item, &obsoleting_xid))
-			found = false;
 	}
 
 	if (found)
