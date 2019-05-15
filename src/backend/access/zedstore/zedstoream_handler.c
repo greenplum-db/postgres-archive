@@ -32,6 +32,7 @@
 #include "catalog/index.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
+#include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "optimizer/plancat.h"
@@ -878,6 +879,7 @@ static inline void
 zs_initialize_proj_attributes(TupleDesc tupledesc, ZedStoreProjectData *proj_data)
 {
 	MemoryContext oldcontext;
+
 	if (proj_data->num_proj_atts != 0)
 		return;
 
@@ -1938,6 +1940,171 @@ zedstoream_relation_copy_data(Relation rel, const RelFileNode *newrnode)
 	smgrclose(dstrel);
 }
 
+/*
+ * Subroutine of the zedstoream_relation_copy_for_cluster() callback.
+ *
+ * Creates the TID item with correct visibility information for the
+ * given tuple in the old table. Returns the tid of the tuple in the
+ * new table, or InvalidZSTid if this tuple can be left out completely.
+ *
+ * FIXME: This break UPDATE chains. I.e. after this is done, an UPDATE
+ * looks like DELETE + INSERT, instead of an UPDATe, to any transaction that
+ * might try to follow the update chain.
+ */
+static zstid
+zs_cluster_process_tuple(Relation OldHeap, Relation NewHeap,
+						 zstid oldtid, ZSUndoRecPtr old_undoptr,
+						 ZSUndoRecPtr recent_oldest_undo,
+						 TransactionId OldestXmin)
+{
+	TransactionId this_xmin;
+	CommandId this_cmin;
+	TransactionId this_xmax;
+	CommandId this_cmax;
+	bool		this_changedPart;
+	ZSUndoRecPtr undo_ptr;
+	ZSUndoRec  *undorec;
+
+	/*
+	 * Follow the chain of UNDO records for this tuple, to find the
+	 * transaction that originally inserted the row  (xmin/cmin), and
+	 * the transaction that deleted or updated it away, if any (xmax/cmax)
+	 */
+	this_xmin = FrozenTransactionId;
+	this_cmin = InvalidCommandId;
+	this_xmax = InvalidTransactionId;
+	this_cmax = InvalidCommandId;
+
+	undo_ptr = old_undoptr;
+	for (;;)
+	{
+		if (undo_ptr.counter < recent_oldest_undo.counter)
+		{
+			/* This tuple version is visible to everyone. */
+			break;
+		}
+
+		/* Fetch the next UNDO record. */
+		undorec = zsundo_fetch(OldHeap, undo_ptr);
+
+		if (undorec->type == ZSUNDO_TYPE_INSERT)
+		{
+			if (!TransactionIdIsCurrentTransactionId(undorec->xid) &&
+				!TransactionIdIsInProgress(undorec->xid) &&
+				!TransactionIdDidCommit(undorec->xid))
+			{
+				/*
+				 * inserter aborted or crashed. This row is not visible to
+				 * anyone. Including any later tuple versions we might have
+				 * seen.
+				 */
+				this_xmin = InvalidTransactionId;
+				break;
+			}
+			else
+			{
+				/* Inserter committed. */
+				this_xmin = undorec->xid;
+				this_cmin = undorec->cid;
+
+				/* we know everything there is to know about this tuple version. */
+				break;
+			}
+		}
+		else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
+		{
+			/* Ignore tuple locks for now.
+			 *
+			 * FIXME: we should propagate them to the new copy of the table
+			 */
+			undo_ptr = undorec->prevundorec;
+			continue;
+		}
+		else if (undorec->type == ZSUNDO_TYPE_DELETE ||
+				undorec->type == ZSUNDO_TYPE_UPDATE)
+		{
+			/* Row was deleted (or updated away). */
+			if (!TransactionIdIsCurrentTransactionId(undorec->xid) &&
+				!TransactionIdIsInProgress(undorec->xid) &&
+				!TransactionIdDidCommit(undorec->xid))
+			{
+				/* deleter aborted or crashed. The previous record should
+				 * be an insertion (possibly with some tuple-locking in
+				 * between). We'll remember the tuple when we see the
+				 * insertion.
+				 */
+				undo_ptr = undorec->prevundorec;
+				continue;
+			}
+			else
+			{
+				/* deleter committed or is still in progress. */
+				if (TransactionIdPrecedes(undorec->xid, OldestXmin))
+				{
+					/* the deletion is visible to everyone. We can skip the row completely. */
+					this_xmin = InvalidTransactionId;
+					break;
+				}
+				else
+				{
+					/* deleter committed or is in progress. Remember that it was
+					 * deleted by this XID.
+					 */
+					this_xmax = undorec->xid;
+					this_cmax = undorec->cid;
+					if (undorec->type == ZSUNDO_TYPE_DELETE)
+						this_changedPart = ((ZSUndoRec_Delete *) undorec)->changedPart;
+					else
+						this_changedPart = false;
+
+					/* follow the UNDO chain to find information about the inserting
+					 * transaction (xmin/cmin)
+					 */
+					undo_ptr = undorec->prevundorec;
+					continue;
+				}
+			}
+		}
+	}
+
+	/*
+	 * We now know the visibility of this tuple. Re-create it in the new table.
+	 */
+	if (this_xmin != InvalidTransactionId)
+	{
+		/* Insert the first version of the row. */
+		ZSUndoRecPtr prevundoptr;
+		Datum		datum = (Datum) 0;
+		bool        isnull = true;
+		zstid		newtid = InvalidZSTid;
+
+		/* First, insert the tuple. */
+		ZSUndoRecPtrInitialize(&prevundoptr);
+		zsbt_multi_insert(NewHeap, ZS_META_ATTRIBUTE_NUM,
+						  &datum, &isnull, &newtid, 1,
+						  this_xmin,
+						  this_cmin,
+						  INVALID_SPECULATIVE_TOKEN,
+						  prevundoptr);
+
+		/* And if the tuple was deleted/updated away, do the same in the new table. */
+		if (this_xmax != InvalidTransactionId)
+		{
+			TM_Result	delete_result;
+
+			/* tuple was deleted. */
+			delete_result = zsbt_delete(NewHeap, ZS_META_ATTRIBUTE_NUM, newtid,
+										this_xmax, this_cmax,
+										NULL, NULL, false, NULL, this_changedPart);
+			Assert(delete_result == TM_Ok);
+		}
+		return newtid;
+	}
+	else
+		return InvalidZSTid;
+}
+
+
 static void
 zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 									 Relation OldIndex, bool use_sort,
@@ -1948,9 +2115,187 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 									 double *tups_vacuumed,
 									 double *tups_recently_dead)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("function %s not implemented yet", __func__)));
+	TupleDesc	olddesc;
+	ZSBtreeScan meta_scan;
+	ZSBtreeScan	*attr_scans;
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(OldHeap);
+	int			attno;
+	IndexScanDesc indexScan;
+
+	olddesc = RelationGetDescr(OldHeap),
+
+	attr_scans = palloc((olddesc->natts + 1) * sizeof(ZSBtreeScan));
+
+	/*
+	 * Scan the old table. We ignore any old updated-away tuple versions,
+	 * and only stop at the latest tuple version of each row. At the latest
+	 * version, follow the update chain to get all the old versions of that
+	 * row, too. That way, the whole update chain is processed in one go,
+	 * and can be reproduced in the new table.
+	 */
+	zsbt_begin_scan(OldHeap, olddesc, ZS_META_ATTRIBUTE_NUM,
+					MinZSTid, MaxPlusOneZSTid,
+					SnapshotAny, &meta_scan);
+
+	for (attno = 1; attno <= olddesc->natts; attno++)
+	{
+		if (TupleDescAttr(olddesc, attno - 1)->attisdropped)
+			continue;
+
+		zsbt_begin_scan(OldHeap,
+						olddesc,
+						attno,
+						MinZSTid,
+						MaxPlusOneZSTid,
+						SnapshotAny,
+						&attr_scans[attno]);
+	}
+
+	/* TODO: sorting not implemented yet. (it would require materializing each
+	 * row into a HeapTuple or something like that, which could carry the xmin/xmax
+	 * information through the sorter).
+	 */
+	use_sort = false;
+
+	/*
+	 * Prepare to scan the OldHeap.  To ensure we see recently-dead tuples
+	 * that still need to be copied, we scan with SnapshotAny and use
+	 * HeapTupleSatisfiesVacuum for the visibility test.
+	 */
+	if (OldIndex != NULL && !use_sort)
+	{
+		const int	ci_index[] = {
+			PROGRESS_CLUSTER_PHASE,
+			PROGRESS_CLUSTER_INDEX_RELID
+		};
+		int64		ci_val[2];
+
+		/* Set phase and OIDOldIndex to columns */
+		ci_val[0] = PROGRESS_CLUSTER_PHASE_INDEX_SCAN_HEAP;
+		ci_val[1] = RelationGetRelid(OldIndex);
+		pgstat_progress_update_multi_param(2, ci_index, ci_val);
+
+		indexScan = index_beginscan(OldHeap, OldIndex, SnapshotAny, 0, 0);
+		index_rescan(indexScan, NULL, 0, NULL, 0);
+	}
+	else
+	{
+		/* In scan-and-sort mode and also VACUUM FULL, set phase */
+		pgstat_progress_update_param(PROGRESS_CLUSTER_PHASE,
+									 PROGRESS_CLUSTER_PHASE_SEQ_SCAN_HEAP);
+
+		indexScan = NULL;
+
+		/* Set total heap blocks */
+		/* TODO */
+#if 0
+		pgstat_progress_update_param(PROGRESS_CLUSTER_TOTAL_HEAP_BLKS,
+									 heapScan->rs_nblocks);
+#endif
+	}
+
+	for (;;)
+	{
+		zstid		old_tid;
+		ZSUndoRecPtr old_undoptr;
+		zstid		new_tid;
+		ZSUndoRecPtr prevundoptr;
+		Datum		datum;
+		bool        isnull;
+		zstid		fetchtid = InvalidZSTid;
+
+		CHECK_FOR_INTERRUPTS();
+
+		if (indexScan != NULL)
+		{
+			ItemPointer itemptr;
+
+			itemptr = index_getnext_tid(indexScan, ForwardScanDirection);
+			if (!itemptr)
+				break;
+
+			/* Since we used no scan keys, should never need to recheck */
+			if (indexScan->xs_recheck)
+				elog(ERROR, "CLUSTER does not support lossy index conditions");
+
+			fetchtid = ZSTidFromItemPointer(*itemptr);
+			zsbt_reset_scan(&meta_scan, fetchtid);
+		}
+		else
+		{
+			old_tid = zsbt_scan_next_tid(&meta_scan);
+			fetchtid = old_tid;
+		}
+		old_tid = zsbt_scan_next_tid(&meta_scan);
+		if (old_tid == InvalidZSTid)
+			break;
+		if (old_tid != fetchtid)
+			break;
+		old_undoptr = meta_scan.array_undoptr;
+
+		new_tid = zs_cluster_process_tuple(OldHeap, NewHeap,
+										   old_tid, old_undoptr,
+										   recent_oldest_undo,
+										   OldestXmin);
+		if (new_tid != InvalidZSTid)
+		{
+			/* Fetch the attributes and write them out */
+			for (attno = 1; attno <= olddesc->natts; attno++)
+			{
+				Form_pg_attribute att = TupleDescAttr(olddesc, attno - 1);
+				Datum		toastptr = (Datum) 0;
+
+				if (att->attisdropped)
+				{
+					datum = (Datum) 0;
+					isnull = true;
+				}
+				else
+				{
+					if (indexScan)
+						zsbt_reset_scan(&attr_scans[attno], old_tid);
+
+					if (!zsbt_scan_next_fetch(&attr_scans[attno], &datum, &isnull, old_tid))
+						zsbt_fill_missing_attribute_value(&attr_scans[attno], &datum, &isnull);
+				}
+
+				/* flatten and re-toast any ZS-TOASTed values */
+				if (!isnull && att->attlen == -1)
+				{
+					if (VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+					{
+						datum = zedstore_toast_flatten(OldHeap, attno, old_tid, datum);
+					}
+
+					if (VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
+					{
+						toastptr = datum = zedstore_toast_datum(NewHeap, attno, datum);
+					}
+				}
+
+				zsbt_multi_insert(NewHeap, attno,
+								  &datum, &isnull, &new_tid, 1,
+								  FrozenTransactionId /* FIXME */,
+								  InvalidCommandId,
+								  INVALID_SPECULATIVE_TOKEN, prevundoptr);
+
+				if (toastptr != (Datum) 0)
+					zedstore_toast_finish(NewHeap, attno, toastptr, new_tid);
+			}
+		}
+	}
+
+	if (indexScan != NULL)
+		index_endscan(indexScan);
+
+	zsbt_end_scan(&meta_scan);
+	for (attno = 1; attno <= olddesc->natts; attno++)
+	{
+		if (TupleDescAttr(olddesc, attno - 1)->attisdropped)
+			continue;
+
+		zsbt_end_scan(&attr_scans[attno]);
+	}
 }
 
 /*

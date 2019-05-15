@@ -104,6 +104,7 @@ zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,
 	scan->nexttid = starttid;
 	scan->endtid = endtid;
 	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
+	memset(&scan->array_undoptr, 0, sizeof(scan->array_undoptr));
 	scan->array_datums = palloc(sizeof(Datum));
 	scan->array_datums_allocated_size = 1;
 	scan->array_elements_left = 0;
@@ -123,6 +124,26 @@ zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,
 
 	zs_decompress_init(&scan->decompressor);
 	scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+}
+
+/*
+ * Reset the 'next' TID in a scan to the given TID.
+ */
+void
+zsbt_reset_scan(ZSBtreeScan *scan, zstid starttid)
+{
+	if (starttid < scan->nexttid)
+	{
+		/* have to restart from scratch. */
+		scan->array_elements_left = 0;
+		scan->nexttid = starttid;
+		scan->has_decompressed = false;
+		if (scan->lastbuf != InvalidBuffer)
+			ReleaseBuffer(scan->lastbuf);
+		scan->lastbuf = InvalidBuffer;
+	}
+	else
+		zsbt_scan_skip(scan, starttid);
 }
 
 void
@@ -266,6 +287,7 @@ zsbt_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 			elog(ERROR, "cstrings not supported");
 		}
 	}
+	scan->array_undoptr = aitem->t_undo_ptr;
 	scan->array_next_datum = &scan->array_datums[0];
 	scan->array_elements_left = nelements;
 }
@@ -366,6 +388,7 @@ zsbt_scan_next(ZSBtreeScan *scan)
 				Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
 
 				scan->nexttid = sitem->t_tid;
+				scan->array_undoptr = sitem->t_undo_ptr;
 				scan->array_elements_left = 1;
 				scan->array_next_datum = &scan->array_datums[0];
 				if (sitem->t_flags & ZSBT_NULL)
@@ -506,6 +529,7 @@ zsbt_scan_next(ZSBtreeScan *scan)
 					Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
 
 					scan->nexttid = sitem->t_tid;
+					scan->array_undoptr = sitem->t_undo_ptr;
 					scan->array_elements_left = 1;
 					scan->array_next_datum = &scan->array_datums[0];
 					if (item->t_flags & ZSBT_NULL)
@@ -673,7 +697,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 	}
 
 	/* Form an undo record */
-	if (attno == ZS_META_ATTRIBUTE_NUM)
+	if (attno == ZS_META_ATTRIBUTE_NUM && xid != FrozenTransactionId)
 	{
 		undorec.rec.size = sizeof(ZSUndoRec_Insert);
 		undorec.rec.type = ZSUNDO_TYPE_INSERT;
@@ -768,33 +792,37 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 		elog(ERROR, "could not find tuple to delete with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
 	}
-	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
-								(ZSBtreeItem *) item, LockTupleExclusive,
-								&keep_old_undo_ptr, hufd, &next_tid);
-	if (result != TM_Ok)
+
+	if (snapshot)
 	{
-		UnlockReleaseBuffer(buf);
-		/* FIXME: We should fill TM_FailureData *hufd correctly */
-		return result;
-	}
-
-	if (crosscheck != InvalidSnapshot && result == TM_Ok)
-	{
-		/* Perform additional check for transaction-snapshot mode RI updates */
-		/* FIXME: dummmy scan */
-		ZSBtreeScan scan;
-		TransactionId obsoleting_xid;
-
-		memset(&scan, 0, sizeof(scan));
-		scan.rel = rel;
-		scan.snapshot = crosscheck;
-		scan.recent_oldest_undo = recent_oldest_undo;
-
-		if (!zs_SatisfiesVisibility(&scan, (ZSBtreeItem *) item, &obsoleting_xid))
+		result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
+									(ZSBtreeItem *) item, LockTupleExclusive,
+									&keep_old_undo_ptr, hufd, &next_tid);
+		if (result != TM_Ok)
 		{
 			UnlockReleaseBuffer(buf);
 			/* FIXME: We should fill TM_FailureData *hufd correctly */
-			result = TM_Updated;
+			return result;
+		}
+
+		if (crosscheck != InvalidSnapshot && result == TM_Ok)
+		{
+			/* Perform additional check for transaction-snapshot mode RI updates */
+			/* FIXME: dummmy scan */
+			ZSBtreeScan scan;
+			TransactionId obsoleting_xid;
+
+			memset(&scan, 0, sizeof(scan));
+			scan.rel = rel;
+			scan.snapshot = crosscheck;
+			scan.recent_oldest_undo = recent_oldest_undo;
+
+			if (!zs_SatisfiesVisibility(&scan, (ZSBtreeItem *) item, &obsoleting_xid))
+			{
+				UnlockReleaseBuffer(buf);
+				/* FIXME: We should fill TM_FailureData *hufd correctly */
+				result = TM_Updated;
+			}
 		}
 	}
 

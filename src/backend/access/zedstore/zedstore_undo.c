@@ -203,6 +203,9 @@ zsundo_fetch(Relation rel, ZSUndoRecPtr undoptr)
 	pagehdr = (PageHeader) page;
 
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	if (PageIsNew(page))
+		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u; not an UNDO page",
+			 undoptr.counter, undoptr.blkno, undoptr.offset);
 	opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(page);
 	if (opaque->zs_page_id != ZS_UNDO_PAGE_ID)
 		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u; not an UNDO page",

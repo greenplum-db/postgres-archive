@@ -436,7 +436,10 @@ typedef struct ZSBtreeScan
 
 	/*
 	 * These fields are used, if the scan is processing an array tuple.
+	 * And also for a single-item tuple - it works just like a single-element
+	 * array tuple.
 	 */
+	ZSUndoRecPtr array_undoptr;
 	int			array_datums_allocated_size;
 	Datum	   *array_datums;
 	Datum	   *array_next_datum;
@@ -491,6 +494,7 @@ extern void zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, Z
 extern void zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
 							zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan);
 extern bool zsbt_scan_next(ZSBtreeScan *scan);
+extern void zsbt_reset_scan(ZSBtreeScan *scan, zstid starttid);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
 
@@ -523,21 +527,9 @@ zsbt_scan_next_tid(ZSBtreeScan *scan)
 	return InvalidZSTid;
 }
 
-/*
- * Return the value of row identified with 'tid' in a scan.
- *
- * 'tid' must be greater than any previously returned item.
- *
- * Returns true if a matching item is found, false otherwise. After
- * a false return, it's OK to call this again with another greater TID.
- */
-static inline bool
-zsbt_scan_next_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
+static inline void
+zsbt_scan_skip(ZSBtreeScan *scan, zstid tid)
 {
-	if (!scan->active)
-		return false;
-
-	/* skip to the given tid. */
 	if (tid > scan->nexttid)
 	{
 		if (scan->array_elements_left > 0)
@@ -556,6 +548,24 @@ zsbt_scan_next_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 		}
 		scan->nexttid = tid;
 	}
+}
+
+/*
+ * Return the value of row identified with 'tid' in a scan.
+ *
+ * 'tid' must be greater than any previously returned item.
+ *
+ * Returns true if a matching item is found, false otherwise. After
+ * a false return, it's OK to call this again with another greater TID.
+ */
+static inline bool
+zsbt_scan_next_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
+{
+	if (!scan->active)
+		return false;
+
+	/* skip to the given tid. */
+	zsbt_scan_skip(scan, tid);
 
 	/*
 	 * Fetch the next item from the scan. The item we're looking for might
