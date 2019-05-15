@@ -415,7 +415,6 @@ typedef struct ZSBtreeScan
 
 	bool		active;
 	Buffer		lastbuf;
-	bool		lastbuf_is_locked;
 	OffsetNumber lastoff;
 	zstid		nexttid;
 	zstid		endtid;

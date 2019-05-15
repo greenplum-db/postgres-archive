@@ -99,7 +99,6 @@ zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,
 
 	scan->snapshot = snapshot;
 	scan->context = CurrentMemoryContext;
-	scan->lastbuf_is_locked = false;
 	scan->lastoff = InvalidOffsetNumber;
 	scan->has_decompressed = false;
 	scan->nexttid = starttid;
@@ -133,11 +132,7 @@ zsbt_end_scan(ZSBtreeScan *scan)
 		return;
 
 	if (scan->lastbuf != InvalidBuffer)
-	{
-		if (scan->lastbuf_is_locked)
-			LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
 		ReleaseBuffer(scan->lastbuf);
-	}
 	zs_decompress_free(&scan->decompressor);
 
 	scan->active = false;

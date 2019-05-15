@@ -1925,7 +1925,7 @@ zedstoream_relation_copy_data(Relation rel, const RelFileNode *newrnode)
 	 * RelationCreateStorage().
 	 *
 	 * NOTE: There is only the main fork in zedstore. Otherwise
-	 * this would need to copy other forkst, too.
+	 * this would need to copy other forks, too.
 	 */
 	RelationCreateStorage(*newrnode, rel->rd_rel->relpersistence);
 
@@ -2070,7 +2070,7 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin
 		isnull = (scan->bmscan_isnulls[i])[scan->bmscan_nexttuple];
 
 		/*
-		 * flatten any ZS-TOASTed values, becaue the rest of the system
+		 * flatten any ZS-TOASTed values, because the rest of the system
 		 * doesn't know how to deal with them.
 		 */
 		if (!isnull && att->attlen == -1 &&
@@ -2342,7 +2342,7 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 		isnull = (scan->bmscan_isnulls[i])[scan->bmscan_nexttuple];
 
 		/*
-		 * flatten any ZS-TOASTed values, becaue the rest of the system
+		 * flatten any ZS-TOASTed values, because the rest of the system
 		 * doesn't know how to deal with them.
 		 */
 		if (!isnull && att->attlen == -1 &&
