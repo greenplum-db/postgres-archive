@@ -2220,13 +2220,13 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 			fetchtid = ZSTidFromItemPointer(*itemptr);
 			zsbt_reset_scan(&meta_scan, fetchtid);
+			old_tid = zsbt_scan_next_tid(&meta_scan);
 		}
 		else
 		{
 			old_tid = zsbt_scan_next_tid(&meta_scan);
 			fetchtid = old_tid;
 		}
-		old_tid = zsbt_scan_next_tid(&meta_scan);
 		if (old_tid == InvalidZSTid)
 			break;
 		if (old_tid != fetchtid)
