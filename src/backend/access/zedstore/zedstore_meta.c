@@ -107,12 +107,12 @@ zsmeta_initmetapage(Relation rel)
 /*
  * Get the block number of the b-tree root for given attribute.
  *
- * If 'forupdate' is true, and the root doesn't exist yet (ie. it's an empty
- * table), a new root is allocated. Otherwise, returns InvalidBlockNumber if
+ * If 'readonly' is true, and the root doesn't exist yet (ie. it's an empty
+ * table), returns InvalidBlockNumber. Otherwise new root is allocated if
  * the root doesn't exist.
  */
 BlockNumber
-zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
+zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 {
 	Buffer		metabuf;
 	ZSMetaPage *metapg;
@@ -121,7 +121,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
 
 	if (RelationGetNumberOfBlocks(rel) == 0)
 	{
-		if (!forupdate)
+		if (readonly)
 			return InvalidBlockNumber;
 
 		zsmeta_initmetapage(rel);
@@ -144,18 +144,20 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool forupdate)
 	 */
 	if (attno >= metapg->nattributes)
 	{
-		if (forupdate)
-			zsmeta_add_root_for_attributes(rel, page, false);
-		else
+		if (readonly)
 		{
 			UnlockReleaseBuffer(metabuf);
 			return InvalidBlockNumber;
+		}
+		else
+		{
+			zsmeta_add_root_for_attributes(rel, page, false);
 		}
 	}
 
 	rootblk = metapg->tree_root_dir[attno].root;
 
-	if (forupdate && rootblk == InvalidBlockNumber)
+	if (!readonly && rootblk == InvalidBlockNumber)
 	{
 		/* try to allocate one */
 		Buffer		rootbuf;

@@ -39,7 +39,7 @@
 #include "utils/rel.h"
 
 /* prototypes for local functions */
-static Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level);
+static Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
 static void zsbt_recompress_replace(Relation rel, AttrNumber attno,
 									Buffer oldbuf, List *items);
 static zs_split_stack *zsbt_insert_downlinks(Relation rel, AttrNumber attno,
@@ -107,7 +107,7 @@ zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,
 	scan->array_datums_allocated_size = 1;
 	scan->array_elements_left = 0;
 
-	buf = zsbt_descend(rel, attno, starttid, 0);
+	buf = zsbt_descend(rel, attno, starttid, 0, true);
 	if (!BufferIsValid(buf))
 	{
 		/* completely empty tree */
@@ -452,7 +452,7 @@ zsbt_scan_next(ZSBtreeScan *scan)
 
 			if (!BufferIsValid(buf))
 			{
-				buf = scan->lastbuf = zsbt_descend(scan->rel, scan->attno, scan->nexttid, 0);
+				buf = scan->lastbuf = zsbt_descend(scan->rel, scan->attno, scan->nexttid, 0, true);
 				buf_is_locked = true;
 			}
 		}
@@ -585,7 +585,7 @@ zsbt_get_last_tid(Relation rel, AttrNumber attno)
 
 	/* Find the rightmost leaf */
 	rightmostkey = MaxZSTid;
-	buf = zsbt_descend(rel, attno, rightmostkey, 0);
+	buf = zsbt_descend(rel, attno, rightmostkey, 0, true);
 	if (!BufferIsValid(buf))
 	{
 		return MinZSTid;
@@ -659,7 +659,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 	else
 		insert_target_key = MaxZSTid;
 
-	buf = zsbt_descend(rel, attno, insert_target_key, 0);
+	buf = zsbt_descend(rel, attno, insert_target_key, 0, false);
 	page = BufferGetPage(buf);
 	opaque = ZSBtreePageGetOpaque(page);
 	maxoff = PageGetMaxOffsetNumber(page);
@@ -1271,7 +1271,7 @@ zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr 
  * Find the leaf page containing the given key TID.
  */
 static Buffer
-zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level)
+zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly)
 {
 	BlockNumber next;
 	Buffer		buf;
@@ -1286,7 +1286,7 @@ zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level)
 
 	/* start from root */
 restart:
-	rootblk = zsmeta_get_root_for_attribute(rel, attno, true);
+	rootblk = zsmeta_get_root_for_attribute(rel, attno, readonly);
 
 	if (rootblk == InvalidBlockNumber)
 	{
@@ -1489,7 +1489,7 @@ zsbt_insert_downlinks(Relation rel, AttrNumber attno,
 	 * tree, and if we just remembered the path we descended, we could just
 	 * walk back up.
 	 */
-	parentbuf = zsbt_descend(rel, attno, leftlokey, level);
+	parentbuf = zsbt_descend(rel, attno, leftlokey, level, false);
 	parentpage = BufferGetPage(parentbuf);
 
 	firstdownlink = (ZSBtreeInternalPageItem *) linitial(downlinks);
@@ -1697,7 +1697,7 @@ zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level)
 	if (opaque->zs_lokey != MinZSTid)
 	{
 		rightbuf = buf;
-		leftbuf = zsbt_descend(rel, attno, opaque->zs_lokey - 1, level);
+		leftbuf = zsbt_descend(rel, attno, opaque->zs_lokey - 1, level, false);
 
 		stack = zsbt_merge_pages(rel, attno, leftbuf, rightbuf, false);
 		if (!stack)
@@ -1708,7 +1708,7 @@ zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level)
 	}
 	else
 	{
-		rightbuf = zsbt_descend(rel, attno, opaque->zs_hikey, level);
+		rightbuf = zsbt_descend(rel, attno, opaque->zs_hikey, level, false);
 		leftbuf = buf;
 		stack = zsbt_merge_pages(rel, attno, leftbuf, rightbuf, true);
 		if (!stack)
@@ -1753,7 +1753,7 @@ zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf
 	rightopaque = ZSBtreePageGetOpaque(rightpage);
 
 	/* find downlink for 'rightbuf' in the parent */
-	parentbuf = zsbt_descend(rel, attno, rightopaque->zs_lokey, origleftopaque->zs_level + 1);
+	parentbuf = zsbt_descend(rel, attno, rightopaque->zs_lokey, origleftopaque->zs_level + 1, false);
 	parentpage = BufferGetPage(parentbuf);
 
 	parentitems = ZSBtreeInternalPageGetItems(parentpage);
@@ -1878,7 +1878,7 @@ zsbt_fetch(Relation rel, AttrNumber attno, ZSUndoRecPtr *recent_oldest_undo,
 	OffsetNumber maxoff;
 	OffsetNumber off;
 
-	buf = zsbt_descend(rel, attno, tid, 0);
+	buf = zsbt_descend(rel, attno, tid, 0, false);
 	if (buf == InvalidBuffer)
 	{
 		*buf_p = InvalidBuffer;
