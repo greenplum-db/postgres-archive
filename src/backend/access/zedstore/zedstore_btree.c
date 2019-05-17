@@ -88,8 +88,6 @@ zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,
 {
 	Buffer		buf;
 
-	(void) zsmeta_get_root_for_attribute(rel, attno, false);
-
 	scan->rel = rel;
 	scan->attno = attno;
 	if (attno == ZS_META_ATTRIBUTE_NUM)
@@ -1879,12 +1877,6 @@ zsbt_fetch(Relation rel, AttrNumber attno, ZSUndoRecPtr *recent_oldest_undo,
 	bool		found = false;
 	OffsetNumber maxoff;
 	OffsetNumber off;
-
-	/*
-	 * XXX: This is duplicative with the zsmeta_get_root_for_attribute()
-	 * call in zsbt_descend.
-	 */
-	(void) zsmeta_get_root_for_attribute(rel, attno, true);
 
 	buf = zsbt_descend(rel, attno, tid, 0);
 	if (buf == InvalidBuffer)
