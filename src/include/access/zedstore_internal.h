@@ -390,8 +390,6 @@ typedef struct ZSMetaPageOpaque
 	BlockNumber zs_fpm_root;		/* root of the Free Page Map */
 
 	uint16		zs_flags;
-	uint16		padding1;			/* padding, to put zs_page_id last */
-	uint16		padding2;			/* padding, to put zs_page_id last */
 	uint16		zs_page_id;
 } ZSMetaPageOpaque;
 
