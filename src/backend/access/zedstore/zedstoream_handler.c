@@ -154,9 +154,9 @@ zedstoream_get_latest_tid(Relation relation,
 							 Snapshot snapshot,
 							 ItemPointer tid)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("function %s not implemented yet", __func__)));
+	zstid ztid = ZSTidFromItemPointer(*tid);
+	zsbt_find_latest_tid(relation, &ztid, snapshot);
+	*tid = ItemPointerFromZSTid(ztid);
 }
 
 static inline void

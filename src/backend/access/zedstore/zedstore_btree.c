@@ -359,7 +359,7 @@ zsbt_scan_next(ZSBtreeScan *scan)
 			if (uitem->t_tid >= scan->endtid)
 				break;
 
-			visible = zs_SatisfiesVisibility(scan, uitem, &obsoleting_xid);
+			visible = zs_SatisfiesVisibility(scan, uitem, &obsoleting_xid, NULL);
 
 			if (scan->serializable && TransactionIdIsValid(obsoleting_xid))
 				CheckForSerializableConflictOut(scan->rel, obsoleting_xid, scan->snapshot);
@@ -494,7 +494,7 @@ zsbt_scan_next(ZSBtreeScan *scan)
 			{
 				TransactionId obsoleting_xid;
 
-				visible = zs_SatisfiesVisibility(scan, item, &obsoleting_xid);
+				visible = zs_SatisfiesVisibility(scan, item, &obsoleting_xid, NULL);
 
 				if (!visible)
 				{
@@ -816,7 +816,7 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 			scan.snapshot = crosscheck;
 			scan.recent_oldest_undo = recent_oldest_undo;
 
-			if (!zs_SatisfiesVisibility(&scan, (ZSBtreeItem *) item, &obsoleting_xid))
+			if (!zs_SatisfiesVisibility(&scan, (ZSBtreeItem *) item, &obsoleting_xid, NULL))
 			{
 				UnlockReleaseBuffer(buf);
 				/* FIXME: We should fill TM_FailureData *hufd correctly */
@@ -857,6 +857,50 @@ zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
 	pfree(deleteditem);
 
 	return TM_Ok;
+}
+
+void
+zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot)
+{
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+	ZSSingleBtreeItem *item;
+	Buffer		buf;
+	/* Just using meta attribute, we can follow the update chain */
+	AttrNumber attno = ZS_META_ATTRIBUTE_NUM;
+	zstid curr_tid = *tid;
+
+	for(;;)
+	{
+		zstid next_tid = InvalidZSTid;
+		if (curr_tid == InvalidZSTid)
+			break;
+
+		/* Find the item */
+		item = zsbt_fetch(rel, attno, &recent_oldest_undo, curr_tid, &buf);
+		if (item == NULL)
+			break;
+
+		if (snapshot)
+		{
+			/* FIXME: dummmy scan */
+			ZSBtreeScan scan;
+			TransactionId obsoleting_xid;
+
+			memset(&scan, 0, sizeof(scan));
+			scan.rel = rel;
+			scan.snapshot = snapshot;
+			scan.recent_oldest_undo = recent_oldest_undo;
+
+			if (zs_SatisfiesVisibility(&scan, (ZSBtreeItem *) item,
+										&obsoleting_xid, &next_tid))
+			{
+				*tid = curr_tid;
+			}
+
+			curr_tid = next_tid;
+			UnlockReleaseBuffer(buf);
+		}
+	}
 }
 
 /*
@@ -960,7 +1004,7 @@ zsbt_update_lock_old(Relation rel, AttrNumber attno, zstid otid,
 		scan.snapshot = crosscheck;
 		scan.recent_oldest_undo = recent_oldest_undo;
 
-		if (!zs_SatisfiesVisibility(&scan, (ZSBtreeItem *) olditem, &obsoleting_xid))
+		if (!zs_SatisfiesVisibility(&scan, (ZSBtreeItem *) olditem, &obsoleting_xid, NULL))
 		{
 			UnlockReleaseBuffer(buf);
 			/* FIXME: We should fill TM_FailureData *hufd correctly */

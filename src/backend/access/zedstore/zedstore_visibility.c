@@ -312,7 +312,8 @@ xid_is_visible(Snapshot snapshot, TransactionId xid, CommandId cid, bool *aborte
  * Like HeapTupleSatisfiesMVCC
  */
 static bool
-zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item, TransactionId *obsoleting_xid)
+zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item,
+				 TransactionId *obsoleting_xid, zstid *next_tid)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -354,6 +355,13 @@ fetch_undo_record:
 	else if (undorec->type == ZSUNDO_TYPE_DELETE ||
 			 undorec->type == ZSUNDO_TYPE_UPDATE)
 	{
+		if (undorec->type == ZSUNDO_TYPE_UPDATE)
+		{
+			ZSUndoRec_Update *updaterec = (ZSUndoRec_Update *) undorec;
+			if (next_tid)
+				*next_tid = updaterec->newtid;
+		}
+
 		/*
 		 * Deleted or updated-away. They are treated the same in an MVCC snapshot.
 		 * They only need different treatment when updating or locking the row,
@@ -380,7 +388,7 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesSelf
  */
 static bool
-zs_SatisfiesSelf(ZSBtreeScan *scan, ZSBtreeItem *item)
+zs_SatisfiesSelf(ZSBtreeScan *scan, ZSBtreeItem *item, zstid *next_tid)
 {
 	Relation	rel = scan->rel;
 	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
@@ -424,6 +432,13 @@ fetch_undo_record:
 	else if (undorec->type == ZSUNDO_TYPE_DELETE ||
 			 undorec->type == ZSUNDO_TYPE_UPDATE)
 	{
+		if (undorec->type == ZSUNDO_TYPE_UPDATE)
+		{
+			ZSUndoRec_Update *updaterec = (ZSUndoRec_Update *) undorec;
+			if (next_tid)
+				*next_tid = updaterec->newtid;
+		}
+
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
 			/* deleted by me */
@@ -454,7 +469,7 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesDirty
  */
 static bool
-zs_SatisfiesDirty(ZSBtreeScan *scan, ZSBtreeItem *item)
+zs_SatisfiesDirty(ZSBtreeScan *scan, ZSBtreeItem *item, zstid *next_tid)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -508,6 +523,13 @@ fetch_undo_record:
 	else if (undorec->type == ZSUNDO_TYPE_DELETE ||
 			 undorec->type == ZSUNDO_TYPE_UPDATE)
 	{
+		if (undorec->type == ZSUNDO_TYPE_UPDATE)
+		{
+			ZSUndoRec_Update *updaterec = (ZSUndoRec_Update *) undorec;
+			if (next_tid)
+				*next_tid = updaterec->newtid;
+		}
+
 		/* deleted or updated-away tuple */
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
@@ -632,11 +654,19 @@ fetch_undo_record:
 
 /*
  * Like HeapTupleSatisfiesVisibility
+ *
+ * If next_tid is not NULL then gets populated for the tuple if tuple was
+ * UPDATEd. *next_tid_p is set to the TID of the new row version.
  */
 bool
-zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item, TransactionId *obsoleting_xid)
+zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item,
+					   TransactionId *obsoleting_xid, zstid *next_tid)
 {
 	ZSUndoRecPtr undo_ptr;
+
+	/* initialize as invalid, if we find valid one populate the same */
+	if (next_tid)
+		*next_tid = InvalidZSTid;
 
 	/*
 	 * This works on a single or array item. Compressed items don't have
@@ -671,10 +701,10 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item, TransactionId *obso
 	switch (scan->snapshot->snapshot_type)
 	{
 		case SNAPSHOT_MVCC:
-			return zs_SatisfiesMVCC(scan, item, obsoleting_xid);
+			return zs_SatisfiesMVCC(scan, item, obsoleting_xid, next_tid);
 
 		case SNAPSHOT_SELF:
-			return zs_SatisfiesSelf(scan, item);
+			return zs_SatisfiesSelf(scan, item, next_tid);
 
 		case SNAPSHOT_ANY:
 			return zs_SatisfiesAny(scan, item);
@@ -684,7 +714,7 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item, TransactionId *obso
 			break;
 
 		case SNAPSHOT_DIRTY:
-			return zs_SatisfiesDirty(scan, item);
+			return zs_SatisfiesDirty(scan, item, next_tid);
 
 		case SNAPSHOT_HISTORIC_MVCC:
 			elog(ERROR, "SnapshotHistoricMVCC not implemented in zedstore yet");

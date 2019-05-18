@@ -496,6 +496,7 @@ extern bool zsbt_scan_next(ZSBtreeScan *scan);
 extern void zsbt_reset_scan(ZSBtreeScan *scan, zstid starttid);
 extern void zsbt_end_scan(ZSBtreeScan *scan);
 extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
+extern void zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot);
 
 /*
  * Return the next visible TID in a scan.
@@ -606,7 +607,8 @@ extern TM_Result zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 									LockTupleMode mode,
 									bool *undo_record_needed,
 									TM_FailureData *tmfd, zstid *next_tid);
-extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item, TransactionId *obsoleting_xid);
+extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item,
+								   TransactionId *obsoleting_xid, zstid *next_tid);
 
 /* prototypes for functions in zedstore_toast.c */
 extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);
