@@ -1262,11 +1262,27 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	return false;
 }
 
-/* FIXME: Implement this function correctly */
 static bool
-zedstoream_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
+zedstoream_tuple_tid_valid(TableScanDesc sscan, ItemPointer tid)
 {
-	return true;
+	ZedStoreDesc scan = (ZedStoreDesc) sscan;
+	zstid ztid = ZSTidFromItemPointer(*tid);
+
+	if (scan->max_tid_to_scan == InvalidZSTid)
+	{
+		/*
+		 * get the max tid once and store it
+		 */
+		scan->max_tid_to_scan = zsbt_get_last_tid(sscan->rs_rd, ZS_META_ATTRIBUTE_NUM);
+	}
+
+	/*
+	 * FIXME: should we get lowest TID as well to further optimize the check.
+	 */
+	if (ztid <= scan->max_tid_to_scan)
+		return true;
+	else
+		return false;
 }
 
 static bool
