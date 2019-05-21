@@ -503,6 +503,7 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	bool		have_tuple_lock = false;
 	zstid		next_tid = tid;
 	SnapshotData SnapshotDirty;
+	bool		locked_something = false;
 
 	tmfd->traversed = false;
 	/*
@@ -521,7 +522,19 @@ retry:
 		 * order to give that case the opportunity to throw a more specific
 		 * error.
 		 */
-		return TM_Invisible;
+		/*
+		 * This can also happen, if we're locking an UPDATE chain for KEY SHARE mode:
+		 * A tuple has been inserted, and then updated, by a different transaction.
+		 * The updating transaction is still in progress. We can lock the row
+		 * in KEY SHARE mode, assuming the key columns were not updated, and we will
+		 * try to lock all the row version, even the still in-progress UPDATEs.
+		 * It's possible that the UPDATE aborts while we're chasing the update chain,
+		 * so that the updated tuple becomes invisible to us. That's OK.
+		 */
+		 if (mode == LockTupleKeyShare && locked_something)
+			 return TM_Ok;
+		 else
+			 return TM_Invisible;
 	}
 	else if (result == TM_Updated ||
 			 (result == TM_SelfModified && tmfd->cmax == cid))
@@ -620,13 +633,28 @@ retry:
 		 */
 		goto retry;
 	}
+	if (result == TM_Ok)
+		locked_something = true;
 
 	/*
 	 * Now that we have successfully marked the tuple as locked, we can
 	 * release the lmgr tuple lock, if we had it.
 	 */
 	if (have_tuple_lock)
+	{
 		UnlockTupleTuplock(relation, tid_p, mode);
+		have_tuple_lock = false;
+	}
+
+	if (mode == LockTupleKeyShare)
+	{
+		/* lock all row versions, if it's a KEY SHARE lock */
+		if (result == TM_Ok && tid != next_tid && next_tid != InvalidZSTid)
+		{
+			tid = next_tid;
+			goto retry;
+		}
+	}
 
 	/* Fetch the tuple, too. */
 	if (!zedstoream_fetch_row_version(relation, tid_p, SnapshotAny, slot))
