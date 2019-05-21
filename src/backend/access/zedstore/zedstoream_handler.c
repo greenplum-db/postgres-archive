@@ -142,6 +142,7 @@ zedstoream_fetch_row_version(Relation rel,
 	}
 	ExecMaterializeSlot(slot);
 	slot->tts_tableOid = RelationGetRelid(rel);
+	slot->tts_tid = *tid_p;
 
 	zedstoream_end_index_fetch(fetcher);
 
@@ -504,6 +505,9 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	zstid		next_tid = tid;
 	SnapshotData SnapshotDirty;
 	bool		locked_something = false;
+
+	slot->tts_tableOid = RelationGetRelid(relation);
+	slot->tts_tid = *tid_p;
 
 	tmfd->traversed = false;
 	/*

@@ -102,7 +102,7 @@ fetch_undo_record:
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
 			if (undorec->cid >= snapshot->curcid)
-				return TM_SelfModified;	/* inserted after scan started */
+				return TM_Invisible;	/* inserted after scan started */
 		}
 		else if (TransactionIdIsInProgress(undorec->xid))
 			return TM_Invisible;		/* inserter has not committed yet */
