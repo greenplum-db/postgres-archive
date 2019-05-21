@@ -92,6 +92,15 @@ static void ReindexPartitionedIndex(Relation parentIdx);
 static void update_relispartition(Oid relationId, bool newval);
 
 /*
+ * callback argument type for RangeVarCallbackForReindexIndex()
+ */
+struct ReindexIndexCallbackState
+{
+	bool        concurrent;			/* flag from statement */
+	Oid         locked_table_oid;	/* tracks previously locked table */
+};
+
+/*
  * CheckIndexCompatible
  *		Determine whether an existing index definition is compatible with a
  *		prospective index definition, such that the existing index storage
@@ -2303,8 +2312,8 @@ ChooseIndexColumnNames(List *indexElems)
 void
 ReindexIndex(RangeVar *indexRelation, int options, bool concurrent)
 {
+	struct ReindexIndexCallbackState state;
 	Oid			indOid;
-	Oid			heapOid = InvalidOid;
 	Relation	irel;
 	char		persistence;
 
@@ -2313,11 +2322,13 @@ ReindexIndex(RangeVar *indexRelation, int options, bool concurrent)
 	 * obtain lock on table first, to avoid deadlock hazard.  The lock level
 	 * used here must match the index lock obtained in reindex_index().
 	 */
+	state.concurrent = concurrent;
+	state.locked_table_oid = InvalidOid;
 	indOid = RangeVarGetRelidExtended(indexRelation,
 									  concurrent ? ShareUpdateExclusiveLock : AccessExclusiveLock,
 									  0,
 									  RangeVarCallbackForReindexIndex,
-									  (void *) &heapOid);
+									  &state);
 
 	/*
 	 * Obtain the current persistence of the existing index.  We already hold
@@ -2350,7 +2361,15 @@ RangeVarCallbackForReindexIndex(const RangeVar *relation,
 								Oid relId, Oid oldRelId, void *arg)
 {
 	char		relkind;
-	Oid		   *heapOid = (Oid *) arg;
+	struct ReindexIndexCallbackState *state = arg;
+	LOCKMODE	table_lockmode;
+
+	/*
+	 * Lock level here should match table lock in reindex_index() for
+	 * non-concurrent case and table locks used by index_concurrently_*() for
+	 * concurrent case.
+	 */
+	table_lockmode = state->concurrent ? ShareUpdateExclusiveLock : ShareLock;
 
 	/*
 	 * If we previously locked some other index's heap, and the name we're
@@ -2359,9 +2378,8 @@ RangeVarCallbackForReindexIndex(const RangeVar *relation,
 	 */
 	if (relId != oldRelId && OidIsValid(oldRelId))
 	{
-		/* lock level here should match reindex_index() heap lock */
-		UnlockRelationOid(*heapOid, ShareLock);
-		*heapOid = InvalidOid;
+		UnlockRelationOid(state->locked_table_oid, table_lockmode);
+		state->locked_table_oid = InvalidOid;
 	}
 
 	/* If the relation does not exist, there's nothing more to do. */
@@ -2389,14 +2407,17 @@ RangeVarCallbackForReindexIndex(const RangeVar *relation,
 	/* Lock heap before index to avoid deadlock. */
 	if (relId != oldRelId)
 	{
+		Oid			table_oid = IndexGetRelation(relId, true);
+
 		/*
-		 * Lock level here should match reindex_index() heap lock. If the OID
-		 * isn't valid, it means the index as concurrently dropped, which is
-		 * not a problem for us; just return normally.
+		 * If the OID isn't valid, it means the index was concurrently
+		 * dropped, which is not a problem for us; just return normally.
 		 */
-		*heapOid = IndexGetRelation(relId, true);
-		if (OidIsValid(*heapOid))
-			LockRelationOid(*heapOid, ShareLock);
+		if (OidIsValid(table_oid))
+		{
+			LockRelationOid(table_oid, table_lockmode);
+			state->locked_table_oid = table_oid;
+		}
 	}
 }
 
@@ -2569,15 +2590,11 @@ ReindexMultipleTables(const char *objectName, ReindexObjectType objectKind,
 			continue;
 
 		/*
-		 * Skip system tables that index_create() would reject to index
-		 * concurrently.  XXX We need the additional check for
-		 * FirstNormalObjectId to skip information_schema tables, because
-		 * IsCatalogClass() here does not cover information_schema, but the
-		 * check in index_create() will error on the TOAST tables of
-		 * information_schema tables.
+		 * Skip system tables, since index_create() would reject indexing them
+		 * concurrently (and it would likely fail if we tried).
 		 */
 		if (concurrent &&
-			(IsCatalogClass(relid, classtuple) || relid < FirstNormalObjectId))
+			IsCatalogRelationOid(relid))
 		{
 			if (!concurrent_warning)
 				ereport(WARNING,
@@ -2726,6 +2743,12 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 
 				MemoryContextSwitchTo(oldcontext);
 
+				/* A system catalog cannot be reindexed concurrently */
+				if (IsCatalogRelationOid(relationOid))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot reindex a system catalog concurrently")));
+
 				/* Open relation to get its indexes */
 				heapRelation = table_open(relationOid, ShareUpdateExclusiveLock);
 
@@ -2739,13 +2762,13 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 					if (!indexRelation->rd_index->indisvalid)
 						ereport(WARNING,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("cannot reindex concurrently invalid index \"%s.%s\", skipping",
+								 errmsg("cannot reindex invalid index \"%s.%s\" concurrently, skipping",
 										get_namespace_name(get_rel_namespace(cellOid)),
 										get_rel_name(cellOid))));
 					else if (indexRelation->rd_index->indisexclusion)
 						ereport(WARNING,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("cannot reindex concurrently exclusion constraint index \"%s.%s\", skipping",
+								 errmsg("cannot reindex exclusion constraint index \"%s.%s\" concurrently, skipping",
 										get_namespace_name(get_rel_namespace(cellOid)),
 										get_rel_name(cellOid))));
 					else
@@ -2785,7 +2808,7 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 						if (!indexRelation->rd_index->indisvalid)
 							ereport(WARNING,
 									(errcode(ERRCODE_INDEX_CORRUPTED),
-									 errmsg("cannot reindex concurrently invalid index \"%s.%s\", skipping",
+									 errmsg("cannot reindex invalid index \"%s.%s\" concurrently, skipping",
 											get_namespace_name(get_rel_namespace(cellOid)),
 											get_rel_name(cellOid))));
 						else
@@ -2814,17 +2837,11 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 			{
 				Oid			heapId = IndexGetRelation(relationOid, false);
 
-				/* A shared relation cannot be reindexed concurrently */
-				if (IsSharedRelation(heapId))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("concurrent reindex is not supported for shared relations")));
-
 				/* A system catalog cannot be reindexed concurrently */
-				if (IsSystemNamespace(get_rel_namespace(heapId)))
+				if (IsCatalogRelationOid(heapId))
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("concurrent reindex is not supported for catalog relations")));
+							 errmsg("cannot reindex a system catalog concurrently")));
 
 				/* Save the list of relation OIDs in private context */
 				oldcontext = MemoryContextSwitchTo(private_context);
@@ -2852,7 +2869,7 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 			/* Return error if type of relation is not supported */
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("cannot reindex concurrently this type of relation")));
+					 errmsg("cannot reindex this type of relation concurrently")));
 			break;
 	}
 

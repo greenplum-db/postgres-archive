@@ -8184,7 +8184,7 @@ addFkRecurseReferencing(List **wqueue, Constraint *fkconstraint, Relation rel,
 	if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("foreign keys constraints are not supported on foreign tables")));
+				 errmsg("foreign key constraints are not supported on foreign tables")));
 
 	/*
 	 * If the referencing relation is a plain table, add the check triggers to
@@ -8572,7 +8572,7 @@ CloneFkReferencing(List **wqueue, Relation parentRel, Relation partRel)
 	if (partRel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("foreign keys constraints are not supported on foreign tables")));
+				 errmsg("foreign key constraints are not supported on foreign tables")));
 
 	/*
 	 * The constraint key may differ, if the columns in the partition are
@@ -12465,9 +12465,10 @@ AlterTableMoveAll(AlterTableMoveAllStmt *stmt)
 		 * Also, explicitly avoid any shared tables, temp tables, or TOAST
 		 * (TOAST will be moved with the main table).
 		 */
-		if (IsSystemNamespace(relForm->relnamespace) || relForm->relisshared ||
+		if (IsCatalogNamespace(relForm->relnamespace) ||
+			relForm->relisshared ||
 			isAnyTempNamespace(relForm->relnamespace) ||
-			relForm->relnamespace == PG_TOAST_NAMESPACE)
+			IsToastNamespace(relForm->relnamespace))
 			continue;
 
 		/* Only move the object type requested */
@@ -15127,14 +15128,14 @@ ComputePartitionAttrs(ParseState *pstate, Relation rel, List *partParams, AttrNu
 				if (strategy == PARTITION_STRATEGY_HASH)
 					ereport(ERROR,
 							(errcode(ERRCODE_UNDEFINED_OBJECT),
-							 errmsg("data type %s has no default hash operator class",
-									format_type_be(atttype)),
+							 errmsg("data type %s has no default operator class for access method \"%s\"",
+									format_type_be(atttype), "hash"),
 							 errhint("You must specify a hash operator class or define a default hash operator class for the data type.")));
 				else
 					ereport(ERROR,
 							(errcode(ERRCODE_UNDEFINED_OBJECT),
-							 errmsg("data type %s has no default btree operator class",
-									format_type_be(atttype)),
+							 errmsg("data type %s has no default operator class for access method \"%s\"",
+									format_type_be(atttype), "btree"),
 							 errhint("You must specify a btree operator class or define a default btree operator class for the data type.")));
 
 			}

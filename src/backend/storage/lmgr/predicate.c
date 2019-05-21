@@ -3446,8 +3446,7 @@ ReleasePredicateLocks(bool isCommit, bool isReadOnlySafe)
 		 * cleanup. This means it should not be considered when calculating
 		 * SxactGlobalXmin.
 		 */
-		if (!isReadOnlySafe)
-			MySerializableXact->flags |= SXACT_FLAG_DOOMED;
+		MySerializableXact->flags |= SXACT_FLAG_DOOMED;
 		MySerializableXact->flags |= SXACT_FLAG_ROLLED_BACK;
 
 		/*
@@ -3643,8 +3642,7 @@ ReleasePredicateLocks(bool isCommit, bool isReadOnlySafe)
 	 * was launched.
 	 */
 	needToClear = false;
-	if (!isReadOnlySafe &&
-		TransactionIdEquals(MySerializableXact->xmin, PredXact->SxactGlobalXmin))
+	if (TransactionIdEquals(MySerializableXact->xmin, PredXact->SxactGlobalXmin))
 	{
 		Assert(PredXact->SxactGlobalXminCount > 0);
 		if (--(PredXact->SxactGlobalXminCount) == 0)

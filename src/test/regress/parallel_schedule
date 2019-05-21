@@ -20,7 +20,7 @@ test: boolean char name varchar text int2 int4 int8 oid float4 float8 bit numeri
 # strings depends on char, varchar and text
 # numerology depends on int2, int4, int8, float4, float8
 # ----------
-test: strings numerology point lseg line box path polygon circle date time timetz timestamp timestamptz interval inet macaddr macaddr8 tstypes fsm
+test: strings numerology point lseg line box path polygon circle date time timetz timestamp timestamptz interval inet macaddr macaddr8 tstypes
 
 # ----------
 # Another group of parallel tests
@@ -51,11 +51,6 @@ test: copy copyselect copydml insert insert_conflict
 test: create_misc create_operator create_procedure
 # These depend on create_misc and create_operator
 test: create_index create_index_spgist create_view index_including index_including_gist
-
-# ----------
-# Has to run in isolation, due to deadlock risk
-# ----------
-test: reindex_catalog
 
 # ----------
 # Another group of parallel tests

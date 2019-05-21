@@ -153,7 +153,7 @@ static BufferAccessStrategy vac_strategy;
 static void lazy_scan_heap(Relation onerel, VacuumParams *params,
 			   LVRelStats *vacrelstats, Relation *Irel, int nindexes,
 			   bool aggressive);
-static void lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats, BlockNumber nblocks);
+static void lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats);
 static bool lazy_check_needs_freeze(Buffer buf, bool *hastup);
 static void lazy_vacuum_index(Relation indrel,
 				  IndexBulkDeleteResult **stats,
@@ -163,7 +163,8 @@ static void lazy_cleanup_index(Relation indrel,
 				   LVRelStats *vacrelstats);
 static int lazy_vacuum_page(Relation onerel, BlockNumber blkno, Buffer buffer,
 				 int tupindex, LVRelStats *vacrelstats, Buffer *vmbuffer);
-static bool should_attempt_truncation(Relation rel, LVRelStats *vacrelstats);
+static bool should_attempt_truncation(VacuumParams *params,
+						 LVRelStats *vacrelstats);
 static void lazy_truncate_heap(Relation onerel, LVRelStats *vacrelstats);
 static BlockNumber count_nondeletable_pages(Relation onerel,
 						 LVRelStats *vacrelstats);
@@ -210,6 +211,7 @@ heap_vacuum_rel(Relation onerel, VacuumParams *params,
 
 	Assert(params != NULL);
 	Assert(params->index_cleanup != VACOPT_TERNARY_DEFAULT);
+	Assert(params->truncate != VACOPT_TERNARY_DEFAULT);
 
 	/* not every AM requires these to be valid, but heap does */
 	Assert(TransactionIdIsNormal(onerel->rd_rel->relfrozenxid));
@@ -308,7 +310,7 @@ heap_vacuum_rel(Relation onerel, VacuumParams *params,
 	/*
 	 * Optionally truncate the relation.
 	 */
-	if (should_attempt_truncation(onerel, vacrelstats))
+	if (should_attempt_truncation(params, vacrelstats))
 		lazy_truncate_heap(onerel, vacrelstats);
 
 	/* Report that we are now doing final cleanup */
@@ -507,7 +509,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 				live_tuples,	/* live tuples (reltuples estimate) */
 				tups_vacuumed,	/* tuples cleaned up by vacuum */
 				nkeep,			/* dead-but-not-removable tuples */
-				nunused;		/* unused item pointers */
+				nunused;		/* unused line pointers */
 	IndexBulkDeleteResult **indstats;
 	int			i;
 	PGRUsage	ru0;
@@ -652,7 +654,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 
 		/* see note above about forcing scanning of last page */
 #define FORCE_CHECK_PAGE() \
-		(blkno == nblocks - 1 && should_attempt_truncation(onerel, vacrelstats))
+		(blkno == nblocks - 1 && should_attempt_truncation(params, vacrelstats))
 
 		pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno);
 
@@ -780,7 +782,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 			pgstat_progress_update_multi_param(2, hvp_index, hvp_val);
 
 			/* Remove tuples from heap */
-			lazy_vacuum_heap(onerel, vacrelstats, nblocks);
+			lazy_vacuum_heap(onerel, vacrelstats);
 
 			/*
 			 * Forget the now-vacuumed tuples, and press on, but be careful
@@ -919,7 +921,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 					Size		freespace;
 
 					freespace = BufferGetPageSize(buf) - SizeOfPageHeaderData;
-					RecordPageWithFreeSpace(onerel, blkno, freespace, nblocks);
+					RecordPageWithFreeSpace(onerel, blkno, freespace);
 				}
 			}
 			continue;
@@ -963,7 +965,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 			}
 
 			UnlockReleaseBuffer(buf);
-			RecordPageWithFreeSpace(onerel, blkno, freespace, nblocks);
+			RecordPageWithFreeSpace(onerel, blkno, freespace);
 			continue;
 		}
 
@@ -1015,7 +1017,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 			ItemPointerSet(&(tuple.t_self), blkno, offnum);
 
 			/*
-			 * DEAD item pointers are to be vacuumed normally; but we don't
+			 * DEAD line pointers are to be vacuumed normally; but we don't
 			 * count them in tups_vacuumed, else we'd be double-counting (at
 			 * least in the common case where heap_page_prune() just freed up
 			 * a non-HOT tuple).
@@ -1381,7 +1383,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 		 * taken if there are no indexes.)
 		 */
 		if (vacrelstats->num_dead_tuples == prev_dead_count)
-			RecordPageWithFreeSpace(onerel, blkno, freespace, nblocks);
+			RecordPageWithFreeSpace(onerel, blkno, freespace);
 	}
 
 	/* report that everything is scanned and vacuumed */
@@ -1443,7 +1445,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 		/* Remove tuples from heap */
 		pgstat_progress_update_param(PROGRESS_VACUUM_PHASE,
 									 PROGRESS_VACUUM_PHASE_VACUUM_HEAP);
-		lazy_vacuum_heap(onerel, vacrelstats, nblocks);
+		lazy_vacuum_heap(onerel, vacrelstats);
 		vacrelstats->num_index_scans++;
 	}
 
@@ -1481,7 +1483,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 	appendStringInfo(&buf,
 					 _("%.0f dead row versions cannot be removed yet, oldest xmin: %u\n"),
 					 nkeep, OldestXmin);
-	appendStringInfo(&buf, _("There were %.0f unused item pointers.\n"),
+	appendStringInfo(&buf, _("There were %.0f unused item identifiers.\n"),
 					 nunused);
 	appendStringInfo(&buf, ngettext("Skipped %u page due to buffer pins, ",
 									"Skipped %u pages due to buffer pins, ",
@@ -1517,10 +1519,9 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
  * Note: the reason for doing this as a second pass is we cannot remove
  * the tuples until we've removed their index entries, and we want to
  * process index entry removal in batches as large as possible.
- * Note: nblocks is passed as an optimization for RecordPageWithFreeSpace().
  */
 static void
-lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats, BlockNumber nblocks)
+lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats)
 {
 	int			tupindex;
 	int			npages;
@@ -1557,7 +1558,7 @@ lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats, BlockNumber nblocks)
 		freespace = PageGetHeapFreeSpace(page);
 
 		UnlockReleaseBuffer(buf);
-		RecordPageWithFreeSpace(onerel, tblk, freespace, nblocks);
+		RecordPageWithFreeSpace(onerel, tblk, freespace);
 		npages++;
 	}
 
@@ -1846,12 +1847,11 @@ lazy_cleanup_index(Relation indrel,
  * careful to depend only on fields that lazy_scan_heap updates on-the-fly.
  */
 static bool
-should_attempt_truncation(Relation rel, LVRelStats *vacrelstats)
+should_attempt_truncation(VacuumParams *params, LVRelStats *vacrelstats)
 {
 	BlockNumber possibly_freeable;
 
-	if (rel->rd_options != NULL &&
-		((StdRdOptions *) rel->rd_options)->vacuum_truncate == false)
+	if (params->truncate == VACOPT_TERNARY_DISABLED)
 		return false;
 
 	possibly_freeable = vacrelstats->rel_pages - vacrelstats->nonempty_pages;

@@ -88,6 +88,28 @@ VACUUM (INDEX_CLEANUP FALSE, FREEZE TRUE) vaccluster;
 -- index cleanup option is ignored if VACUUM FULL
 VACUUM (INDEX_CLEANUP TRUE, FULL TRUE) no_index_cleanup;
 VACUUM (FULL TRUE) no_index_cleanup;
+-- TRUNCATE option
+CREATE TABLE vac_truncate_test(i INT NOT NULL, j text)
+	WITH (vacuum_truncate=true, autovacuum_enabled=false);
+INSERT INTO vac_truncate_test VALUES (1, NULL), (NULL, NULL);
+ERROR:  null value in column "i" violates not-null constraint
+DETAIL:  Failing row contains (null, null).
+VACUUM (TRUNCATE FALSE) vac_truncate_test;
+SELECT pg_relation_size('vac_truncate_test') > 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+VACUUM vac_truncate_test;
+SELECT pg_relation_size('vac_truncate_test') = 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+VACUUM (TRUNCATE FALSE, FULL TRUE) vac_truncate_test;
+DROP TABLE vac_truncate_test;
 -- partitioned table
 CREATE TABLE vacparted (a int, b char) PARTITION BY LIST (a);
 CREATE TABLE vacparted1 PARTITION OF vacparted FOR VALUES IN (1);
@@ -124,9 +146,9 @@ ERROR:  column "does_not_exist" of relation "vacparted" does not exist
 ANALYZE (VERBOSE) does_not_exist;
 ERROR:  relation "does_not_exist" does not exist
 ANALYZE (nonexistent-arg) does_not_exist;
-ERROR:  syntax error at or near "-"
+ERROR:  syntax error at or near "arg"
 LINE 1: ANALYZE (nonexistent-arg) does_not_exist;
-                            ^
+                             ^
 ANALYZE (nonexistentarg) does_not_exit;
 ERROR:  unrecognized ANALYZE option "nonexistentarg"
 LINE 1: ANALYZE (nonexistentarg) does_not_exit;
@@ -141,6 +163,14 @@ ERROR:  relation "does_not_exist" does not exist
 VACUUM (SKIP_LOCKED) vactst;
 VACUUM (SKIP_LOCKED, FULL) vactst;
 ANALYZE (SKIP_LOCKED) vactst;
+-- ensure VACUUM and ANALYZE don't have a problem with serializable
+SET default_transaction_isolation = serializable;
+VACUUM vactst;
+ANALYZE vactst;
+RESET default_transaction_isolation;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+ANALYZE vactst;
+COMMIT;
 DROP TABLE vaccluster;
 DROP TABLE vactst;
 DROP TABLE vacparted;

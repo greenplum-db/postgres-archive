@@ -39,6 +39,28 @@ struct TBMIterateResult;
 struct VacuumParams;
 struct ValidateIndexState;
 
+/*
+ * Bitmask values for the flags argument to the scan_begin callback.
+ */
+typedef enum ScanOptions
+{
+	/* one of SO_TYPE_* may be specified */
+	SO_TYPE_SEQSCAN		= 1 << 0,
+	SO_TYPE_BITMAPSCAN	= 1 << 1,
+	SO_TYPE_SAMPLESCAN	= 1 << 2,
+	SO_TYPE_ANALYZE		= 1 << 3,
+
+	/* several of SO_ALLOW_* may be specified */
+	/* allow or disallow use of access strategy */
+	SO_ALLOW_STRAT		= 1 << 4,
+	/* report location to syncscan logic? */
+	SO_ALLOW_SYNC		= 1 << 5,
+	/* verify visibility page-at-a-time? */
+	SO_ALLOW_PAGEMODE	= 1 << 6,
+
+	/* unregister snapshot at scan end? */
+	SO_TEMP_SNAPSHOT	= 1 << 7
+} ScanOptions;
 
 /*
  * Result codes for table_{update,delete,lock_tuple}, and for visibility
@@ -77,7 +99,6 @@ typedef enum TM_Result
 	/* lock couldn't be acquired, action skipped. Only used by lock_tuple */
 	TM_WouldBlock
 } TM_Result;
-
 
 /*
  * When table_update, table_delete, or table_lock_tuple fail because the target
@@ -173,26 +194,17 @@ typedef struct TableAmRoutine
 	 * parallelscan_initialize(), and has to be for the same relation. Will
 	 * only be set coming from table_beginscan_parallel().
 	 *
-	 * allow_{strat, sync, pagemode} specify whether a scan strategy,
-	 * synchronized scans, or page mode may be used (although not every AM
-	 * will support those).
-	 *
-	 * is_{bitmapscan, samplescan} specify whether the scan is intended to
-	 * support those types of scans.
-	 *
-	 * if temp_snap is true, the snapshot will need to be deallocated at
-	 * scan_end.
+	 * `flags` is a bitmask indicating the type of scan (ScanOptions's
+	 * SO_TYPE_*, currently only one may be specified), options controlling
+	 * the scan's behaviour (ScanOptions's SO_ALLOW_*, several may be
+	 * specified, an AM may ignore unsupported ones) and whether the snapshot
+	 * needs to be deallocated at scan_end (ScanOptions's SO_TEMP_SNAPSHOT).
 	 */
 	TableScanDesc (*scan_begin) (Relation rel,
 								 Snapshot snapshot,
 								 int nkeys, struct ScanKeyData *key,
 								 ParallelTableScanDesc pscan,
-								 bool allow_strat,
-								 bool allow_sync,
-								 bool allow_pagemode,
-								 bool is_bitmapscan,
-								 bool is_samplescan,
-								 bool temp_snap);
+								 uint32 flags);
 
 	TableScanDesc (*scan_begin_with_column_projection)(Relation relation,
 													   Snapshot snapshot,
@@ -331,11 +343,16 @@ typedef struct TableAmRoutine
 											TupleTableSlot *slot);
 
 	/*
+	 * Is tid valid for a scan of this relation.
+	 */
+	bool		(*tuple_tid_valid) (TableScanDesc scan,
+									ItemPointer tid);
+
+	/*
 	 * Return the latest version of the tuple at `tid`, by updating `tid` to
 	 * point at the newest version.
 	 */
-	void		(*tuple_get_latest_tid) (Relation rel,
-										 Snapshot snapshot,
+	void		(*tuple_get_latest_tid) (TableScanDesc scan,
 										 ItemPointer tid);
 
 	/*
@@ -563,6 +580,32 @@ typedef struct TableAmRoutine
 
 
 	/* ------------------------------------------------------------------------
+	 * Miscellaneous functions.
+	 * ------------------------------------------------------------------------
+	 */
+
+	/*
+	 * See table_relation_size().
+	 *
+	 * Note that currently a few callers use the MAIN_FORKNUM size to figure
+	 * out the range of potentially interesting blocks (brin, analyze). It's
+	 * probable that we'll need to revise the interface for those at some
+	 * point.
+	 */
+	uint64		(*relation_size) (Relation rel, ForkNumber forkNumber);
+
+
+	/*
+	 * This callback should return true if the relation requires a TOAST table
+	 * and false if it does not.  It may wish to examine the relation's
+	 * tuple descriptor before making a decision, but if it uses some other
+	 * method of storing large values (or if it does not support them) it can
+	 * simply return false.
+	 */
+	bool	    (*relation_needs_toast_table) (Relation rel);
+
+
+	/* ------------------------------------------------------------------------
 	 * Planner related functions.
 	 * ------------------------------------------------------------------------
 	 */
@@ -572,6 +615,10 @@ typedef struct TableAmRoutine
 	 *
 	 * While block oriented, it shouldn't be too hard for an AM that doesn't
 	 * doesn't internally use blocks to convert into a usable representation.
+	 *
+	 * This differs from the relation_size callback by returning size
+	 * estimates (both relation size and tuple count) for planning purposes,
+	 * rather than returning a currently correct estimate.
 	 */
 	void		(*relation_estimate_size) (Relation rel, int32 *attr_widths,
 										   BlockNumber *pages, double *tuples,
@@ -717,8 +764,10 @@ static inline TableScanDesc
 table_beginscan(Relation rel, Snapshot snapshot,
 				int nkeys, struct ScanKeyData *key)
 {
-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL,
-									   true, true, true, false, false, false);
+	uint32		flags = SO_TYPE_SEQSCAN |
+		SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
+
+	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
 
 static inline bool
@@ -746,9 +795,14 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 					  int nkeys, struct ScanKeyData *key,
 					  bool allow_strat, bool allow_sync)
 {
-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL,
-									   allow_strat, allow_sync, true,
-									   false, false, false);
+	uint32		flags = SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE;
+
+	if (allow_strat)
+		flags |= SO_ALLOW_STRAT;
+	if (allow_sync)
+		flags |= SO_ALLOW_SYNC;
+
+	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
 
 static inline TableScanDesc
@@ -773,8 +827,9 @@ static inline TableScanDesc
 table_beginscan_bm(Relation rel, Snapshot snapshot,
 				   int nkeys, struct ScanKeyData *key)
 {
-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL,
-									   false, false, true, true, false, false);
+	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
+
+	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
 
 /*
@@ -790,9 +845,16 @@ table_beginscan_sampling(Relation rel, Snapshot snapshot,
 						 bool allow_strat, bool allow_sync,
 						 bool allow_pagemode)
 {
-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL,
-									   allow_strat, allow_sync, allow_pagemode,
-									   false, true, false);
+	uint32		flags = SO_TYPE_SAMPLESCAN;
+
+	if (allow_strat)
+		flags |= SO_ALLOW_STRAT;
+	if (allow_sync)
+		flags |= SO_ALLOW_SYNC;
+	if (allow_pagemode)
+		flags |= SO_ALLOW_PAGEMODE;
+
+	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
 
 /*
@@ -803,9 +865,9 @@ table_beginscan_sampling(Relation rel, Snapshot snapshot,
 static inline TableScanDesc
 table_beginscan_analyze(Relation rel)
 {
-	return rel->rd_tableam->scan_begin(rel, NULL, 0, NULL, NULL,
-									   true, false, true,
-									   false, true, false);
+	uint32		flags = SO_TYPE_ANALYZE;
+
+	return rel->rd_tableam->scan_begin(rel, NULL, 0, NULL, NULL, flags);
 }
 
 /*
@@ -1018,14 +1080,24 @@ table_fetch_row_version(Relation rel,
 }
 
 /*
+ * Verify that `tid` is a potentially valid tuple identifier. That doesn't
+ * mean that the pointed to row needs to exist or be visible, but that
+ * attempting to fetch the row (e.g. with table_get_latest_tid() or
+ * table_fetch_row_version()) should not error out if called with that tid.
+ *
+ * `scan` needs to have been started via table_beginscan().
+ */
+static inline bool
+table_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
+{
+	return scan->rs_rd->rd_tableam->tuple_tid_valid(scan, tid);
+}
+
+/*
  * Return the latest version of the tuple at `tid`, by updating `tid` to
  * point at the newest version.
  */
-static inline void
-table_get_latest_tid(Relation rel, Snapshot snapshot, ItemPointer tid)
-{
-	rel->rd_tableam->tuple_get_latest_tid(rel, snapshot, tid);
-}
+extern void table_get_latest_tid(TableScanDesc scan, ItemPointer tid);
 
 /*
  * Return true iff tuple in slot satisfies the snapshot.
@@ -1552,6 +1624,36 @@ table_index_validate_scan(Relation heap_rel,
 											  index_info,
 											  snapshot,
 											  state);
+}
+
+
+/* ----------------------------------------------------------------------------
+ * Miscellaneous functionality
+ * ----------------------------------------------------------------------------
+ */
+
+/*
+ * Return the current size of `rel` in bytes. If `forkNumber` is
+ * InvalidForkNumber, return the relation's overall size, otherwise the size
+ * for the indicated fork.
+ *
+ * Note that the overall size might not be the equivalent of the sum of sizes
+ * for the individual forks for some AMs, e.g. because the AMs storage does
+ * not neatly map onto the builtin types of forks.
+ */
+static inline uint64
+table_relation_size(Relation rel, ForkNumber forkNumber)
+{
+	return rel->rd_tableam->relation_size(rel, forkNumber);
+}
+
+/*
+ * table_needs_toast_table - does this relation need a toast table?
+ */
+static inline bool
+table_relation_needs_toast_table(Relation rel)
+{
+	return rel->rd_tableam->relation_needs_toast_table(rel);
 }
 
 

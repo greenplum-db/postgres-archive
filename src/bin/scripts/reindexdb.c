@@ -11,7 +11,7 @@
 
 #include "postgres_fe.h"
 #include "common.h"
-#include "fe_utils/logging.h"
+#include "common/logging.h"
 #include "fe_utils/simple_list.h"
 #include "fe_utils/string_utils.h"
 
@@ -325,10 +325,10 @@ reindex_one_database(const char *name, const char *dbname, const char *type,
 		if (strcmp(type, "TABLE") == 0)
 			pg_log_error("reindexing of table \"%s\" in database \"%s\" failed: %s",
 						 name, PQdb(conn), PQerrorMessage(conn));
-		if (strcmp(type, "INDEX") == 0)
+		else if (strcmp(type, "INDEX") == 0)
 			pg_log_error("reindexing of index \"%s\" in database \"%s\" failed: %s",
 						 name, PQdb(conn), PQerrorMessage(conn));
-		if (strcmp(type, "SCHEMA") == 0)
+		else if (strcmp(type, "SCHEMA") == 0)
 			pg_log_error("reindexing of schema \"%s\" in database \"%s\" failed: %s",
 						 name, PQdb(conn), PQerrorMessage(conn));
 		else

@@ -71,6 +71,17 @@ VACUUM (INDEX_CLEANUP FALSE, FREEZE TRUE) vaccluster;
 VACUUM (INDEX_CLEANUP TRUE, FULL TRUE) no_index_cleanup;
 VACUUM (FULL TRUE) no_index_cleanup;
 
+-- TRUNCATE option
+CREATE TABLE vac_truncate_test(i INT NOT NULL, j text)
+	WITH (vacuum_truncate=true, autovacuum_enabled=false);
+INSERT INTO vac_truncate_test VALUES (1, NULL), (NULL, NULL);
+VACUUM (TRUNCATE FALSE) vac_truncate_test;
+SELECT pg_relation_size('vac_truncate_test') > 0;
+VACUUM vac_truncate_test;
+SELECT pg_relation_size('vac_truncate_test') = 0;
+VACUUM (TRUNCATE FALSE, FULL TRUE) vac_truncate_test;
+DROP TABLE vac_truncate_test;
+
 -- partitioned table
 CREATE TABLE vacparted (a int, b char) PARTITION BY LIST (a);
 CREATE TABLE vacparted1 PARTITION OF vacparted FOR VALUES IN (1);
@@ -112,6 +123,15 @@ ANALYZE (VERBOSE, SKIP_LOCKED) does_not_exist;
 VACUUM (SKIP_LOCKED) vactst;
 VACUUM (SKIP_LOCKED, FULL) vactst;
 ANALYZE (SKIP_LOCKED) vactst;
+
+-- ensure VACUUM and ANALYZE don't have a problem with serializable
+SET default_transaction_isolation = serializable;
+VACUUM vactst;
+ANALYZE vactst;
+RESET default_transaction_isolation;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+ANALYZE vactst;
+COMMIT;
 
 DROP TABLE vaccluster;
 DROP TABLE vactst;

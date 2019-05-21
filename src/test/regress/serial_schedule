@@ -40,7 +40,6 @@ test: inet
 test: macaddr
 test: macaddr8
 test: tstypes
-test: fsm
 test: geometry
 test: horology
 test: regex
@@ -67,7 +66,6 @@ test: create_index_spgist
 test: create_view
 test: index_including
 test: index_including_gist
-test: reindex_catalog
 test: create_aggregate
 test: create_function_3
 test: create_cast

@@ -116,7 +116,7 @@ select regexp_match('abc', '(B)(c)', 'i');
 (1 row)
 
 select regexp_match('abc', 'Bd', 'ig'); -- error
-ERROR:  regexp_match does not support the global option
+ERROR:  regexp_match() does not support the "global" option
 HINT:  Use the regexp_matches function instead.
 -- Test lookahead constraints
 select regexp_matches('ab', 'a(?=b)b*');
@@ -490,6 +490,55 @@ select regexp_matches('foo/bar/baz',
  regexp_matches 
 ----------------
  {foo,bar,baz}
+(1 row)
+
+-- Test that greediness can be overridden by outer quantifier
+select regexp_matches('llmmmfff', '^(l*)(.*)(f*)$');
+ regexp_matches 
+----------------
+ {ll,mmmfff,""}
+(1 row)
+
+select regexp_matches('llmmmfff', '^(l*){1,1}(.*)(f*)$');
+ regexp_matches 
+----------------
+ {ll,mmmfff,""}
+(1 row)
+
+select regexp_matches('llmmmfff', '^(l*){1,1}?(.*)(f*)$');
+  regexp_matches  
+------------------
+ {"",llmmmfff,""}
+(1 row)
+
+select regexp_matches('llmmmfff', '^(l*){1,1}?(.*){1,1}?(f*)$');
+ regexp_matches 
+----------------
+ {"",llmmm,fff}
+(1 row)
+
+select regexp_matches('llmmmfff', '^(l*?)(.*)(f*)$');
+  regexp_matches  
+------------------
+ {"",llmmmfff,""}
+(1 row)
+
+select regexp_matches('llmmmfff', '^(l*?){1,1}(.*)(f*)$');
+ regexp_matches 
+----------------
+ {ll,mmmfff,""}
+(1 row)
+
+select regexp_matches('llmmmfff', '^(l*?){1,1}?(.*)(f*)$');
+  regexp_matches  
+------------------
+ {"",llmmmfff,""}
+(1 row)
+
+select regexp_matches('llmmmfff', '^(l*?){1,1}?(.*){1,1}?(f*)$');
+ regexp_matches 
+----------------
+ {"",llmmm,fff}
 (1 row)
 
 -- Test for infinite loop in cfindloop with zero-length possible match

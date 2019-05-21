@@ -2813,7 +2813,7 @@ CopyFrom(CopyState cstate)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("cannot perform FREEZE on a partitioned table")));
+					 errmsg("cannot perform COPY FREEZE on a partitioned table")));
 		}
 
 		/*
@@ -2828,13 +2828,13 @@ CopyFrom(CopyState cstate)
 		if (!ThereAreNoPriorRegisteredSnapshots() || !ThereAreNoReadyPortals())
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
-					 errmsg("cannot perform FREEZE because of prior transaction activity")));
+					 errmsg("cannot perform COPY FREEZE because of prior transaction activity")));
 
 		if (cstate->rel->rd_createSubid != GetCurrentSubTransactionId() &&
 			cstate->rel->rd_newRelfilenodeSubid != GetCurrentSubTransactionId())
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("cannot perform FREEZE because the table was not created or truncated in the current subtransaction")));
+					 errmsg("cannot perform COPY FREEZE because the table was not created or truncated in the current subtransaction")));
 
 		ti_options |= TABLE_INSERT_FROZEN;
 	}
@@ -3236,12 +3236,7 @@ CopyFrom(CopyState cstate)
 			}
 			else
 			{
-				/*
-				 * Compute stored generated columns
-				 *
-				 * Switch memory context so that the new tuple is in the same
-				 * context as the old one.
-				 */
+				/* Compute stored generated columns */
 				if (resultRelInfo->ri_RelationDesc->rd_att->constr &&
 					resultRelInfo->ri_RelationDesc->rd_att->constr->has_generated_stored)
 					ExecComputeStoredGenerated(estate, myslot);

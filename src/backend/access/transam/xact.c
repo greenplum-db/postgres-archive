@@ -48,7 +48,6 @@
 #include "replication/walsender.h"
 #include "storage/condition_variable.h"
 #include "storage/fd.h"
-#include "storage/freespace.h"
 #include "storage/lmgr.h"
 #include "storage/md.h"
 #include "storage/predicate.h"
@@ -2587,12 +2586,6 @@ AbortTransaction(void)
 	pgstat_report_wait_end();
 	pgstat_progress_end_command();
 
-	/*
-	 * In case we aborted during RelationGetBufferForTuple(), clear the local
-	 * map of heap pages.
-	 */
-	FSMClearLocalMap();
-
 	/* Clean up buffer I/O and buffer context locks, too */
 	AbortBufferIO();
 	UnlockBuffers();
@@ -4880,13 +4873,6 @@ AbortSubTransaction(void)
 
 	pgstat_report_wait_end();
 	pgstat_progress_end_command();
-
-	/*
-	 * In case we aborted during RelationGetBufferForTuple(), clear the local
-	 * map of heap pages.
-	 */
-	FSMClearLocalMap();
-
 	AbortBufferIO();
 	UnlockBuffers();
 
@@ -5901,8 +5887,7 @@ xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid)
 											  xid, parsed->nsubxacts, parsed->subxacts, max_xid);
 
 		/*
-		 * There are no flat files that need updating, nor invalidation
-		 * messages to send or undo.
+		 * There are no invalidation messages to send or undo.
 		 */
 
 		/*

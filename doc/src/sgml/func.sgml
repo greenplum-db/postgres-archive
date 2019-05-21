@@ -4296,19 +4296,45 @@ cast(-44 as bit(12))           <lineannotation>111111010100</lineannotation>
    </para>
 
    <para>
-    The <function>substring</function> function with three parameters,
-    <function>substring(<replaceable>string</replaceable> from
-    <replaceable>pattern</replaceable> for
-    <replaceable>escape-character</replaceable>)</function>, provides
-    extraction of a substring that matches an SQL
-    regular expression pattern.  As with <literal>SIMILAR TO</literal>, the
+    The <function>substring</function> function with three parameters
+    provides extraction of a substring that matches an SQL
+    regular expression pattern.  The function can be written according
+    to SQL99 syntax:
+<synopsis>
+substring(<replaceable>string</replaceable> from <replaceable>pattern</replaceable> for <replaceable>escape-character</replaceable>)
+</synopsis>
+    or as a plain three-argument function:
+<synopsis>
+substring(<replaceable>string</replaceable>, <replaceable>pattern</replaceable>, <replaceable>escape-character</replaceable>)
+</synopsis>
+    As with <literal>SIMILAR TO</literal>, the
     specified pattern must match the entire data string, or else the
     function fails and returns null.  To indicate the part of the
-    pattern that should be returned on success, the pattern must contain
+    pattern for which the matching data sub-string is of interest,
+    the pattern should contain
     two occurrences of the escape character followed by a double quote
     (<literal>"</literal>). <!-- " font-lock sanity -->
     The text matching the portion of the pattern
-    between these markers is returned.
+    between these separators is returned when the match is successful.
+   </para>
+
+   <para>
+    The escape-double-quote separators actually
+    divide <function>substring</function>'s pattern into three independent
+    regular expressions; for example, a vertical bar (<literal>|</literal>)
+    in any of the three sections affects only that section.  Also, the first
+    and third of these regular expressions are defined to match the smallest
+    possible amount of text, not the largest, when there is any ambiguity
+    about how much of the data string matches which pattern.  (In POSIX
+    parlance, the first and third regular expressions are forced to be
+    non-greedy.)
+   </para>
+
+   <para>
+    As an extension to the SQL standard, <productname>PostgreSQL</productname>
+    allows there to be just one escape-double-quote separator, in which case
+    the third regular expression is taken as empty; or no separators, in which
+    case the first and third regular expressions are taken as empty.
    </para>
 
    <para>
@@ -5078,18 +5104,37 @@ SELECT foo FROM regexp_split_to_table('the quick brown fox', '\s*') AS foo;
    <para>
     Within a bracket expression, the name of a character class
     enclosed in <literal>[:</literal> and <literal>:]</literal> stands
-    for the list of all characters belonging to that class.  Standard
-    character class names are: <literal>alnum</literal>,
-    <literal>alpha</literal>, <literal>blank</literal>,
-    <literal>cntrl</literal>, <literal>digit</literal>,
-    <literal>graph</literal>, <literal>lower</literal>,
-    <literal>print</literal>, <literal>punct</literal>,
-    <literal>space</literal>, <literal>upper</literal>,
-    <literal>xdigit</literal>.  These stand for the character classes
-    defined in
-    <citerefentry><refentrytitle>ctype</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
-    A locale can provide others.  A character class cannot be used as
-    an endpoint of a range.
+    for the list of all characters belonging to that class.  A character
+    class cannot be used as an endpoint of a range.
+    The <acronym>POSIX</acronym> standard defines these character class
+    names:
+    <literal>alnum</literal> (letters and numeric digits),
+    <literal>alpha</literal> (letters),
+    <literal>blank</literal> (space and tab),
+    <literal>cntrl</literal> (control characters),
+    <literal>digit</literal> (numeric digits),
+    <literal>graph</literal> (printable characters except space),
+    <literal>lower</literal> (lower-case letters),
+    <literal>print</literal> (printable characters including space),
+    <literal>punct</literal> (punctuation),
+    <literal>space</literal> (any white space),
+    <literal>upper</literal> (upper-case letters),
+    and <literal>xdigit</literal> (hexadecimal digits).
+    The behavior of these standard character classes is generally
+    consistent across platforms for characters in the 7-bit ASCII set.
+    Whether a given non-ASCII character is considered to belong to one
+    of these classes depends on the <firstterm>collation</firstterm>
+    that is used for the regular-expression function or operator
+    (see <xref linkend="collation"/>), or by default on the
+    database's <envar>LC_CTYPE</envar> locale setting (see
+    <xref linkend="locale"/>).  The classification of non-ASCII
+    characters can vary across platforms even in similarly-named
+    locales.  (But the <literal>C</literal> locale never considers any
+    non-ASCII characters to belong to any of these classes.)
+    In addition to these standard character
+    classes, <productname>PostgreSQL</productname> defines
+    the <literal>ascii</literal> character class, which contains exactly
+    the 7-bit ASCII set.
    </para>
 
    <para>
@@ -5100,8 +5145,7 @@ SELECT foo FROM regexp_split_to_table('the quick brown fox', '\s*') AS foo;
     and end of a word respectively.  A word is defined as a sequence
     of word characters that is neither preceded nor followed by word
     characters.  A word character is an <literal>alnum</literal> character (as
-    defined by
-    <citerefentry><refentrytitle>ctype</refentrytitle><manvolnum>3</manvolnum></citerefentry>)
+    defined by the <acronym>POSIX</acronym> character class described above)
     or an underscore.  This is an extension, compatible with but not
     specified by <acronym>POSIX</acronym> 1003.2, and should be used with
     caution in software intended to be portable to other systems.
@@ -11721,7 +11765,7 @@ table2-mapping
     converting its elements into an SQL/JSON sequence before performing
     this operation. Besides, comparison operators automatically unwrap their
     operands in the lax mode, so you can compare SQL/JSON arrays
-    out-of-the-box. Arrays of size 1 are interchangeable with a singleton.
+    out-of-the-box. An array of size 1 is considered equal to its sole element.
     Automatic unwrapping is not performed only when:
     <itemizedlist>
      <listitem>
@@ -20337,8 +20381,10 @@ postgres=# SELECT * FROM pg_walfile_name_offset(pg_stop_backup());
     See <xref linkend="streaming-replication"/>,
     <xref linkend="streaming-replication-slots"/>, and
     <xref linkend="replication-origins"/>
-    for information about the underlying features.  Use of these
-    functions is restricted to superusers.
+    for information about the underlying features.
+    Use of functions for replication origin is restricted to superusers.
+    Use of functions for replication slot is restricted to superusers
+    and users having <literal>REPLICATION</literal> privilege.
    </para>
 
    <para>
