@@ -150,12 +150,11 @@ zedstoream_fetch_row_version(Relation rel,
 }
 
 static void
-zedstoream_get_latest_tid(Relation relation,
-							 Snapshot snapshot,
-							 ItemPointer tid)
+zedstoream_get_latest_tid(TableScanDesc sscan,
+						  ItemPointer tid)
 {
 	zstid ztid = ZSTidFromItemPointer(*tid);
-	zsbt_find_latest_tid(relation, &ztid, snapshot);
+	zsbt_find_latest_tid(sscan->rs_rd, &ztid, sscan->rs_snapshot);
 	*tid = ItemPointerFromZSTid(ztid);
 }
 
@@ -254,8 +253,8 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 	/*
 	 * there is a conflict
 	 */
-	if (succeeded)
-		elog(ERROR, "zedstoream_complete_speculative succeeded case is not handled ");
+	if (!succeeded)
+		elog(ERROR, "zedstoream_complete_speculative abort is not handled");
 }
 
 static void
@@ -960,7 +959,9 @@ zs_initialize_proj_attributes_extended(ZedStoreDesc scan, TupleDesc tupledesc)
 
 	oldcontext = MemoryContextSwitchTo(proj_data->context);
 	/* Extra setup for bitmap and sample scans */
-	if (scan->rs_scan.rs_bitmapscan || scan->rs_scan.rs_samplescan)
+	if ((scan->rs_scan.rs_flags & SO_TYPE_BITMAPSCAN) ||
+		(scan->rs_scan.rs_flags & SO_TYPE_SAMPLESCAN) ||
+		(scan->rs_scan.rs_flags & SO_TYPE_ANALYZE))
 	{
 		scan->bmscan_ntuples = 0;
 		scan->bmscan_tids = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(zstid));
@@ -980,20 +981,15 @@ static TableScanDesc
 zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot,
 											int nkeys, ScanKey key,
 											ParallelTableScanDesc parallel_scan,
-											bool *project_columns,
-											bool allow_strat,
-											bool allow_sync,
-											bool allow_pagemode,
-											bool is_bitmapscan,
-											bool is_samplescan,
-											bool temp_snap)
+											uint32 flags,
+											bool *project_columns)
 {
 	ZedStoreDesc scan;
 
 	/* Sample scans have no snapshot, but we need one */
 	if (!snapshot)
 	{
-		Assert(is_samplescan);
+		Assert(!(flags & SO_TYPE_SAMPLESCAN));
 		snapshot = SnapshotAny;
 	}
 
@@ -1005,17 +1001,12 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	scan->rs_scan.rs_rd = relation;
 	scan->rs_scan.rs_snapshot = snapshot;
 	scan->rs_scan.rs_nkeys = nkeys;
-	scan->rs_scan.rs_bitmapscan = is_bitmapscan;
-	scan->rs_scan.rs_samplescan = is_samplescan;
-	scan->rs_scan.rs_allow_strat = allow_strat;
-	scan->rs_scan.rs_allow_sync = allow_sync;
-	scan->rs_scan.rs_temp_snap = temp_snap;
+	scan->rs_scan.rs_flags = flags;
 	scan->rs_scan.rs_parallel = parallel_scan;
 
 	/*
 	 * we can use page-at-a-time mode if it's an MVCC-safe snapshot
 	 */
-	scan->rs_scan.rs_pageatatime = allow_pagemode && snapshot && IsMVCCSnapshot(snapshot);
 	scan->state = ZSSCAN_STATE_UNSTARTED;
 
 	/*
@@ -1041,7 +1032,8 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	 * covering the predicate. But in that case we still have to lock any
 	 * matching heap tuples.
 	 */
-	if (!is_bitmapscan)
+	if (!(flags & SO_TYPE_BITMAPSCAN) &&
+		!(flags & SO_TYPE_ANALYZE))
 		PredicateLockRelation(relation, snapshot);
 
 	/*
@@ -1049,7 +1041,7 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	 * underlying bitmap index scans will be counted) or sample scans (we only
 	 * update stats for tuple fetches there)
 	 */
-	if (!is_bitmapscan && !is_samplescan)
+	if (!(flags & SO_TYPE_BITMAPSCAN) && !(flags & SO_TYPE_SAMPLESCAN))
 		pgstat_count_heap_scan(relation);
 
 	return (TableScanDesc) scan;
@@ -1059,16 +1051,10 @@ static TableScanDesc
 zedstoream_beginscan(Relation relation, Snapshot snapshot,
 					 int nkeys, ScanKey key,
 					 ParallelTableScanDesc parallel_scan,
-					 bool allow_strat,
-					 bool allow_sync,
-					 bool allow_pagemode,
-					 bool is_bitmapscan,
-					 bool is_samplescan,
-					 bool temp_snap)
+					 uint32 flags)
 {
-	return zedstoream_beginscan_with_column_projection(relation, snapshot, nkeys, key, parallel_scan,
-													   NULL, allow_strat, allow_sync, allow_pagemode,
-													   is_bitmapscan, is_samplescan, temp_snap);
+	return zedstoream_beginscan_with_column_projection(relation, snapshot,
+													   nkeys, key, parallel_scan, flags, NULL);
 }
 
 static void
@@ -1083,7 +1069,7 @@ zedstoream_endscan(TableScanDesc sscan)
 	for (int i = 0; i < proj_data->num_proj_atts; i++)
 		zsbt_end_scan(&proj_data->btree_scans[i]);
 
-	if (scan->rs_scan.rs_temp_snap)
+	if (scan->rs_scan.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_scan.rs_snapshot);
 
 	if (proj_data->btree_scans)
@@ -1101,10 +1087,21 @@ zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
 	/* these params don't do much in zedstore yet, but whatever */
 	if (set_params)
 	{
-		scan->rs_scan.rs_allow_strat = allow_strat;
-		scan->rs_scan.rs_allow_sync = allow_sync;
-		scan->rs_scan.rs_pageatatime =
-			allow_pagemode && IsMVCCSnapshot(scan->rs_scan.rs_snapshot);
+		if (allow_strat)
+			scan->rs_scan.rs_flags |= SO_ALLOW_STRAT;
+		else
+			scan->rs_scan.rs_flags &= ~SO_ALLOW_STRAT;
+
+		if (allow_sync)
+			scan->rs_scan.rs_flags |= SO_ALLOW_SYNC;
+		else
+			scan->rs_scan.rs_flags &= ~SO_ALLOW_SYNC;
+
+		if (allow_pagemode && scan->rs_scan.rs_snapshot &&
+			IsMVCCSnapshot(scan->rs_scan.rs_snapshot))
+			scan->rs_scan.rs_flags |= SO_ALLOW_PAGEMODE;
+		else
+			scan->rs_scan.rs_flags &= ~SO_ALLOW_PAGEMODE;
 	}
 
 	for (int i = 0; i < scan->proj_data.num_proj_atts; i++)
@@ -1263,6 +1260,13 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 	ExecClearTuple(slot);
 	return false;
+}
+
+/* FIXME: Implement this function correctly */
+static bool
+zedstoream_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
+{
+	return true;
 }
 
 static bool
@@ -2474,6 +2478,37 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin
 }
 
 /* ------------------------------------------------------------------------
+ * Miscellaneous callbacks for the heap AM
+ * ------------------------------------------------------------------------
+ */
+
+/*
+ * FIXME: Implement this function as best for zedstore. The return value is
+ * for example leveraged by analyze to find which blocks to sample.
+ */
+static uint64
+zedstoream_relation_size(Relation rel, ForkNumber forkNumber)
+{
+	uint64		nblocks = 0;
+
+	/* Open it at the smgr level if not already done */
+	RelationOpenSmgr(rel);
+	nblocks = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
+	return nblocks * BLCKSZ;
+}
+
+/*
+ * Zedstore stores TOAST chunks within the table file itself. Hence, doesn't
+ * need separate toast table to be created. Return false for this callback
+ * avoids creation of toast table.
+ */
+static bool
+zedstoream_relation_needs_toast_table(Relation rel)
+{
+	return false;
+}
+
+/* ------------------------------------------------------------------------
  * Planner related callbacks for the zedstore AM
  * ------------------------------------------------------------------------
  */
@@ -2961,6 +2996,7 @@ static const TableAmRoutine zedstoream_methods = {
 
 	.tuple_fetch_row_version = zedstoream_fetch_row_version,
 	.tuple_get_latest_tid = zedstoream_get_latest_tid,
+	.tuple_tid_valid = zedstoream_tuple_tid_valid,
 	.tuple_satisfies_snapshot = zedstoream_tuple_satisfies_snapshot,
 	.compute_xid_horizon_for_tuples = zedstoream_compute_xid_horizon_for_tuples,
 
@@ -2975,6 +3011,8 @@ static const TableAmRoutine zedstoream_methods = {
 	.index_build_range_scan = zedstoream_index_build_range_scan,
 	.index_validate_scan = zedstoream_index_validate_scan,
 
+	.relation_size = zedstoream_relation_size,
+	.relation_needs_toast_table = zedstoream_relation_needs_toast_table,
 	.relation_estimate_size = zedstoream_relation_estimate_size,
 
 	.scan_bitmap_next_block = zedstoream_scan_bitmap_next_block,
