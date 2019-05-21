@@ -1123,6 +1123,9 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	Datum	   *slot_values = slot->tts_values;
 	bool	   *slot_isnull = slot->tts_isnull;
 
+	if (direction != ForwardScanDirection)
+		elog(ERROR, "backward scan not implemented in zedstore");
+
 	zs_initialize_proj_attributes(slot->tts_tupleDescriptor, scan_proj);
 	Assert((scan_proj->num_proj_atts - 1) <= slot_natts);
 
