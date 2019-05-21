@@ -483,6 +483,7 @@ extern TM_Result zsbt_update(Relation rel, AttrNumber attno, zstid otid,
 							 Datum newdatum, bool newisnull, TransactionId xid,
 							 CommandId cid, bool key_update, Snapshot snapshot, Snapshot crosscheck,
 							 bool wait, TM_FailureData *hufd, zstid *newtid_p);
+extern void zsbt_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete);
 extern void zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr);
 extern void zsbt_remove_item(Relation rel, AttrNumber attno, zstid tid);
 extern TM_Result zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
@@ -591,6 +592,8 @@ zsbt_scan_next_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 	return false;
 }
 
+extern PGDLLIMPORT const TupleTableSlotOps TTSOpsZedstore;
+
 /* prototypes for functions in zedstore_meta.c */
 extern void zsmeta_initmetapage(Relation rel);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
@@ -610,7 +613,6 @@ extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);
 extern void zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, zstid tid);
 extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted);
 
-extern void zsbt_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete);
 /* prototypes for functions in zedstore_freepagemap.c */
 extern Buffer zspage_getnewbuf(Relation rel, Buffer metabuf);
 extern Buffer zspage_extendrel_newbuf(Relation rel);

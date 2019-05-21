@@ -311,7 +311,6 @@ zsbt_scan_next(ZSBtreeScan *scan)
 	OffsetNumber maxoff;
 	BlockNumber	next;
 	bool		visible;
-	TransactionId obsoleting_xid;
 
 	Assert(scan->active);
 
@@ -493,6 +492,8 @@ zsbt_scan_next(ZSBtreeScan *scan)
 			}
 			else
 			{
+				TransactionId obsoleting_xid;
+
 				visible = zs_SatisfiesVisibility(scan, item, &obsoleting_xid);
 
 				if (!visible)

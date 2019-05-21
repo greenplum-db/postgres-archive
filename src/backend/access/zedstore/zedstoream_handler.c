@@ -141,6 +141,7 @@ zedstoream_fetch_row_version(Relation rel,
 		PredicateLockTID(rel, tid_p, snapshot);
 	}
 	ExecMaterializeSlot(slot);
+	slot->tts_tableOid = RelationGetRelid(rel);
 
 	zedstoream_end_index_fetch(fetcher);
 
@@ -872,7 +873,7 @@ retry:
 static const TupleTableSlotOps *
 zedstoream_slot_callbacks(Relation relation)
 {
-	return &TTSOpsVirtual;
+	return &TTSOpsZedstore;
 }
 
 static inline void
