@@ -117,9 +117,12 @@ zsundo_insert(Relation rel, ZSUndoRec *rec)
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
 
+retry_lock_tail:
 	tail_blk = metaopaque->zs_undo_tail;
 
-	/* Is there space on the tail page? */
+	/*
+	 * Is there space on the tail page? If not, allocate a new UNDO page.
+	 */
 	if (tail_blk != InvalidBlockNumber)
 	{
 		tail_buf = ReadBuffer(rel, tail_blk);
@@ -134,8 +137,34 @@ zsundo_insert(Relation rel, ZSUndoRec *rec)
 		Page		newpage;
 		ZSUndoPageOpaque *newopaque;
 
+		/*
+		 * Release the lock on the metapage while we find a new block, because
+		 * that could take a while. (And accessing the Free Page Map might lock
+		 * the metapage, too, causing self-deadlock.)
+		 */
+		LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
+
 		/* new page */
 		newbuf = zspage_getnewbuf(rel, metabuf);
+
+		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+		if (metaopaque->zs_undo_tail != tail_blk)
+		{
+			/*
+			 * It should not be possible for another backend to extend the UNDO log
+			 * while we're holding the tail block locked.
+			 */
+			if (tail_blk != InvalidBlockNumber)
+				elog(ERROR, "UNDO tail block pointer was changed unexpectedly");
+
+			/*
+			 * we don't need the new page, after all. (Or maybe we do, if the new
+			 * tail block is already full, but we're not smart about it.)
+			 */
+			zspage_delete_page(rel, newbuf);
+			goto retry_lock_tail;
+		}
+
 		newblk = BufferGetBlockNumber(newbuf);
 		newpage = BufferGetPage(newbuf);
 		PageInit(newpage, BLCKSZ, sizeof(ZSUndoPageOpaque));
