@@ -2614,21 +2614,19 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 	btree_scan.serializable = true;
 	while ((tid = zsbt_scan_next_tid(&btree_scan)) != InvalidZSTid)
 	{
+		ItemPointerData itemptr;
+
 		Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
+
+		ItemPointerSet(&itemptr, tid_blkno, ZSTidGetOffsetNumber(tid));
 
 		if (tbmres->ntuples != -1)
 		{
 			while (ZSTidGetOffsetNumber(tid) > tbmres->offsets[noff] && noff < tbmres->ntuples)
 			{
-				ItemPointerData itemptr;
-
-				ItemPointerSet(&itemptr, tid_blkno, ZSTidGetOffsetNumber(tid));
-
-				/* FIXME: heapam acquires the predicate lock first, and then
-				 * calls CheckForSerializableConflictOut(). We do it in the
-				 * opposite order, because CheckForSerializableConflictOut()
-				 * call as done in zsbt_get_last_tid() already. Does it matter?
-				 * I'm not sure.
+				/*
+				 * Acquire predicate lock on all tuples that we scan, even those that are
+				 * not visible to the snapshot.
 				 */
 				PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot);
 
@@ -2646,6 +2644,14 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 
 		scan->bmscan_tids[ntuples] = tid;
 		ntuples++;
+
+		/* FIXME: heapam acquires the predicate lock first, and then
+		 * calls CheckForSerializableConflictOut(). We do it in the
+		 * opposite order, because CheckForSerializableConflictOut()
+		 * call as done in zsbt_get_last_tid() already. Does it matter?
+		 * I'm not sure.
+		 */
+		PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot);
 	}
 	zsbt_end_scan(&btree_scan);
 
