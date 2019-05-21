@@ -1949,7 +1949,7 @@ zedstoream_relation_set_new_filenode(Relation rel,
 			   rel->rd_rel->relkind == RELKIND_TOASTVALUE);
 		smgrcreate(srel, INIT_FORKNUM, false);
 		log_smgrcreate(newrnode, INIT_FORKNUM);
-		smgrimmedsync(rel->rd_smgr, INIT_FORKNUM);
+		smgrimmedsync(srel, INIT_FORKNUM);
 	}
 }
 
