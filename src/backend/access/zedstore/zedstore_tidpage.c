@@ -1196,10 +1196,9 @@ zsbt_tid_fetch(Relation rel, ZSUndoRecPtr *recent_oldest_undo,
 		if ((item->t_flags & ZSBT_ARRAY) != 0)
 		{
 			ZSArrayBtreeItem *aitem = (ZSArrayBtreeItem *) item;
-			int			elemno = tid - aitem->t_tid;
 			int			resultsize;
 
-			Assert(elemno < aitem->t_nelements);
+			Assert((tid - aitem->t_tid) < aitem->t_nelements);
 
 			resultsize = offsetof(ZSSingleBtreeItem, t_payload);
 			result = palloc(resultsize);

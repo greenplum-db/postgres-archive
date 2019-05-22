@@ -2169,7 +2169,8 @@ zs_cluster_process_tuple(Relation OldHeap, Relation NewHeap,
 			delete_result = zsbt_tid_delete(NewHeap, newtid,
 											this_xmax, this_cmax,
 											NULL, NULL, false, NULL, this_changedPart);
-			Assert(delete_result == TM_Ok);
+			if (delete_result != TM_Ok)
+				elog(ERROR, "tuple deletion failed during table rewrite");
 		}
 		return newtid;
 	}
