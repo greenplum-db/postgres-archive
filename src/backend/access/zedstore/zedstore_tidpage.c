@@ -394,6 +394,8 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 			continue;
 
 		/* No more items on this page. Walk right, if possible */
+		if (scan->nexttid < opaque->zs_hikey)
+			scan->nexttid = opaque->zs_hikey;
 		next = opaque->zs_next;
 		if (next == BufferGetBlockNumber(buf))
 			elog(ERROR, "btree page %u next-pointer points to itself", next);
