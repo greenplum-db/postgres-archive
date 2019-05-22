@@ -714,7 +714,7 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 		ZSUndoRecPtrInitialize(&undorecptr);
 	}
 
-	/* Create items to insert */
+	/* Create items to insert. */
 	newitems = NIL;
 	i = 0;
 	while (i < nitems)
@@ -723,6 +723,14 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 		int			j;
 		ZSBtreeItem *newitem;
 
+		/*
+		 * Try to collapse as many items as possible into an Array item.
+		 * The first item in the array is now at tids[i]/datums[i]/isnulls[i].
+		 * Items can be stored in the same array as long as the TIDs are
+		 * consecutive, they all have the same isnull flag, and the array
+		 * isn't too large to be stored on a single leaf page. Scan the
+		 * arrays, checking those conditions.
+		 */
 		datasz = zsbt_compute_data_size(attr, datums[i], isnulls[i]);
 		for (j = i + 1; j < nitems; j++)
 		{
@@ -732,6 +740,15 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 			if (tids[j] != tids[j - 1] + 1)
 				break;
 
+			/*
+			 * Will the array still fit on a leaf page, if this datum is
+			 * included in it? We actually use 1/4 of the page, to avoid
+			 * making very large arrays, which might be slower to update in
+			 * the future. Also, using an array that completely fills a page
+			 * might cause more fragmentation. (XXX: The 1/4 threshold
+			 * is arbitrary, though, and this probably needs more smarts
+			 * or testing to determine the optimum.)
+			 */
 			if (!isnulls[i])
 			{
 				Datum		val = datums[j];
@@ -744,6 +761,12 @@ zsbt_multi_insert(Relation rel, AttrNumber attno,
 			}
 		}
 
+		/*
+		 * 'i' is now the first entry to store in the array, and 'j' is the
+		 * last + 1 elemnt to store. If j == i + 1, then there is only one
+		 * element and zsbt_create_item() will create a 'single' item rather
+		 * than an array.
+		 */
 		newitem = zsbt_create_item(attr, tids[i], undorecptr,
 								   j - i, &datums[i], NULL, datasz, isnulls[i]);
 
