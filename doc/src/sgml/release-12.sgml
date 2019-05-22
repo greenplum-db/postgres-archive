@@ -127,15 +127,20 @@ Author: Peter Eisentraut <peter_e@gmx.net>
 -->
 
      <para>
-      Do not allow multiple different <link
+      Do not allow multiple conflicting <link
       linkend="runtime-config-wal-recovery-target"><varname>recovery_target</varname>*</link>
       specifications (Peter Eisentraut)
      </para>
 
      <para>
-      Previously, multiple different <varname>recovery_target</varname>*
-      variables could be specified, and the last one specified was
-      honored.  Now, only one can be specified, though the same one can
+      Specifically, only allow one of <xref
+      linkend="guc-recovery-target"/>, <xref
+      linkend="guc-recovery-target-lsn"/>,
+      <xref linkend="guc-recovery-target-name"/>,
+      <xref linkend="guc-recovery-target-time"/>, <xref
+      linkend="guc-recovery-target-xid"/>.  Previously, multiple different
+      instances of the variables above could be specified, and the last one
+      was honored.  Now, only one can be specified, though the same one can
       be specified multiple times and the last specification is honored.
      </para>
     </listitem>
@@ -821,29 +826,6 @@ Author: Tom Lane <tgl@sss.pgh.pa.us>
 
        <para>
         Improve optimization of self-joins (Tom Lane)
-       </para>
-      </listitem>
-
-      <listitem>
-<!--
-Author: Tom Lane <tgl@sss.pgh.pa.us>
-2019-02-09 [1fb57af92] Create the infrastructure for planner support functions.
-Author: Tom Lane <tgl@sss.pgh.pa.us>
-2019-02-09 [a391ff3c3] Build out the planner support function infrastructure.
--->
-
-       <para>
-        Add support function capability to improve optimizer estimates
-        for functions (Tom Lane)
-       </para>
-
-       <para>
-        This allows extensions to create planner support functions that
-        can provide function-specific selectivity, cost, and row-count
-        estimates that can depend on the function arguments.  Also, improve
-        in-core estimates for <function>generate_series()</function>,
-        <function>unnest()</function>, and functions that return boolean
-        values.
        </para>
       </listitem>
 
@@ -2001,8 +1983,8 @@ Author: Robert Haas <rhaas@postgresql.org>
 -->
 
       <para>
-       Allow <command>VACUUM</command> to take optional boolean argument
-       specifications (Masahiko Sawada)
+       Allow <command>VACUUM</command> and <command>ANALYZE</command>
+       to take optional boolean argument specifications (Masahiko Sawada)
       </para>
      </listitem>
 
@@ -2892,6 +2874,28 @@ existin
        remains the default.
       </para>
      </listitem>
+
+      <listitem>
+<!--
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+2019-02-09 [1fb57af92] Create the infrastructure for planner support functions.
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+2019-02-09 [a391ff3c3] Build out the planner support function infrastructure.
+-->
+
+       <para>
+        Add support function capability to improve optimizer estimates,
+        inlining, and indexing for functions (Tom Lane)
+       </para>
+
+       <para>
+        This allows extensions to create planner support functions that
+        can provide function-specific selectivity, cost, and row-count
+        estimates that can depend on the function's arguments.  Support
+        functions can also supply simplified representations and index
+        conditions, greatly expanding optimization possibilities.
+       </para>
+      </listitem>
 
      <listitem>
 <!--

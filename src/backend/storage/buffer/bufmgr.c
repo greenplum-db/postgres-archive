@@ -430,9 +430,9 @@ ForgetPrivateRefCountEntry(PrivateRefCountEntry *ref)
 
 
 static Buffer ReadBuffer_common(SMgrRelation reln, char relpersistence,
-				  ForkNumber forkNum, BlockNumber blockNum,
-				  ReadBufferMode mode, BufferAccessStrategy strategy,
-				  bool *hit);
+								ForkNumber forkNum, BlockNumber blockNum,
+								ReadBufferMode mode, BufferAccessStrategy strategy,
+								bool *hit);
 static bool PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy);
 static void PinBuffer_Locked(BufferDesc *buf);
 static void UnpinBuffer(BufferDesc *buf, bool fixOwner);
@@ -442,15 +442,15 @@ static int	SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *
 static void WaitIO(BufferDesc *buf);
 static bool StartBufferIO(BufferDesc *buf, bool forInput);
 static void TerminateBufferIO(BufferDesc *buf, bool clear_dirty,
-				  uint32 set_flag_bits);
+							  uint32 set_flag_bits);
 static void shared_buffer_write_error_callback(void *arg);
 static void local_buffer_write_error_callback(void *arg);
 static BufferDesc *BufferAlloc(SMgrRelation smgr,
-			char relpersistence,
-			ForkNumber forkNum,
-			BlockNumber blockNum,
-			BufferAccessStrategy strategy,
-			bool *foundPtr);
+							   char relpersistence,
+							   ForkNumber forkNum,
+							   BlockNumber blockNum,
+							   BufferAccessStrategy strategy,
+							   bool *foundPtr);
 static void FlushBuffer(BufferDesc *buf, SMgrRelation reln);
 static void AtProcExit_Buffers(int code, Datum arg);
 static void CheckForBufferLeaks(void);
@@ -2813,12 +2813,12 @@ RelationGetNumberOfBlocksInFork(Relation relation, ForkNumber forkNum)
 		case RELKIND_MATVIEW:
 			{
 				/*
-				 * Not every table AM uses BLCKSZ wide fixed size
-				 * blocks. Therefore tableam returns the size in bytes - but
-				 * for the purpose of this routine, we want the number of
-				 * blocks. Therefore divide, rounding up.
+				 * Not every table AM uses BLCKSZ wide fixed size blocks.
+				 * Therefore tableam returns the size in bytes - but for the
+				 * purpose of this routine, we want the number of blocks.
+				 * Therefore divide, rounding up.
 				 */
-				uint64 szbytes;
+				uint64		szbytes;
 
 				szbytes = table_relation_size(relation, forkNum);
 

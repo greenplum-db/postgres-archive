@@ -309,199 +309,199 @@ PG_FUNCTION_INFO_V1(postgres_fdw_handler);
  * FDW callback routines
  */
 static void postgresGetForeignRelSize(PlannerInfo *root,
-						  RelOptInfo *baserel,
-						  Oid foreigntableid);
+									  RelOptInfo *baserel,
+									  Oid foreigntableid);
 static void postgresGetForeignPaths(PlannerInfo *root,
-						RelOptInfo *baserel,
-						Oid foreigntableid);
+									RelOptInfo *baserel,
+									Oid foreigntableid);
 static ForeignScan *postgresGetForeignPlan(PlannerInfo *root,
-					   RelOptInfo *foreignrel,
-					   Oid foreigntableid,
-					   ForeignPath *best_path,
-					   List *tlist,
-					   List *scan_clauses,
-					   Plan *outer_plan);
+										   RelOptInfo *foreignrel,
+										   Oid foreigntableid,
+										   ForeignPath *best_path,
+										   List *tlist,
+										   List *scan_clauses,
+										   Plan *outer_plan);
 static void postgresBeginForeignScan(ForeignScanState *node, int eflags);
 static TupleTableSlot *postgresIterateForeignScan(ForeignScanState *node);
 static void postgresReScanForeignScan(ForeignScanState *node);
 static void postgresEndForeignScan(ForeignScanState *node);
 static void postgresAddForeignUpdateTargets(Query *parsetree,
-								RangeTblEntry *target_rte,
-								Relation target_relation);
+											RangeTblEntry *target_rte,
+											Relation target_relation);
 static List *postgresPlanForeignModify(PlannerInfo *root,
-						  ModifyTable *plan,
-						  Index resultRelation,
-						  int subplan_index);
+									   ModifyTable *plan,
+									   Index resultRelation,
+									   int subplan_index);
 static void postgresBeginForeignModify(ModifyTableState *mtstate,
-						   ResultRelInfo *resultRelInfo,
-						   List *fdw_private,
-						   int subplan_index,
-						   int eflags);
+									   ResultRelInfo *resultRelInfo,
+									   List *fdw_private,
+									   int subplan_index,
+									   int eflags);
 static TupleTableSlot *postgresExecForeignInsert(EState *estate,
-						  ResultRelInfo *resultRelInfo,
-						  TupleTableSlot *slot,
-						  TupleTableSlot *planSlot);
+												 ResultRelInfo *resultRelInfo,
+												 TupleTableSlot *slot,
+												 TupleTableSlot *planSlot);
 static TupleTableSlot *postgresExecForeignUpdate(EState *estate,
-						  ResultRelInfo *resultRelInfo,
-						  TupleTableSlot *slot,
-						  TupleTableSlot *planSlot);
+												 ResultRelInfo *resultRelInfo,
+												 TupleTableSlot *slot,
+												 TupleTableSlot *planSlot);
 static TupleTableSlot *postgresExecForeignDelete(EState *estate,
-						  ResultRelInfo *resultRelInfo,
-						  TupleTableSlot *slot,
-						  TupleTableSlot *planSlot);
+												 ResultRelInfo *resultRelInfo,
+												 TupleTableSlot *slot,
+												 TupleTableSlot *planSlot);
 static void postgresEndForeignModify(EState *estate,
-						 ResultRelInfo *resultRelInfo);
+									 ResultRelInfo *resultRelInfo);
 static void postgresBeginForeignInsert(ModifyTableState *mtstate,
-						   ResultRelInfo *resultRelInfo);
+									   ResultRelInfo *resultRelInfo);
 static void postgresEndForeignInsert(EState *estate,
-						 ResultRelInfo *resultRelInfo);
+									 ResultRelInfo *resultRelInfo);
 static int	postgresIsForeignRelUpdatable(Relation rel);
 static bool postgresPlanDirectModify(PlannerInfo *root,
-						 ModifyTable *plan,
-						 Index resultRelation,
-						 int subplan_index);
+									 ModifyTable *plan,
+									 Index resultRelation,
+									 int subplan_index);
 static void postgresBeginDirectModify(ForeignScanState *node, int eflags);
 static TupleTableSlot *postgresIterateDirectModify(ForeignScanState *node);
 static void postgresEndDirectModify(ForeignScanState *node);
 static void postgresExplainForeignScan(ForeignScanState *node,
-						   ExplainState *es);
+									   ExplainState *es);
 static void postgresExplainForeignModify(ModifyTableState *mtstate,
-							 ResultRelInfo *rinfo,
-							 List *fdw_private,
-							 int subplan_index,
-							 ExplainState *es);
+										 ResultRelInfo *rinfo,
+										 List *fdw_private,
+										 int subplan_index,
+										 ExplainState *es);
 static void postgresExplainDirectModify(ForeignScanState *node,
-							ExplainState *es);
+										ExplainState *es);
 static bool postgresAnalyzeForeignTable(Relation relation,
-							AcquireSampleRowsFunc *func,
-							BlockNumber *totalpages);
+										AcquireSampleRowsFunc *func,
+										BlockNumber *totalpages);
 static List *postgresImportForeignSchema(ImportForeignSchemaStmt *stmt,
-							Oid serverOid);
+										 Oid serverOid);
 static void postgresGetForeignJoinPaths(PlannerInfo *root,
-							RelOptInfo *joinrel,
-							RelOptInfo *outerrel,
-							RelOptInfo *innerrel,
-							JoinType jointype,
-							JoinPathExtraData *extra);
+										RelOptInfo *joinrel,
+										RelOptInfo *outerrel,
+										RelOptInfo *innerrel,
+										JoinType jointype,
+										JoinPathExtraData *extra);
 static bool postgresRecheckForeignScan(ForeignScanState *node,
-						   TupleTableSlot *slot);
+									   TupleTableSlot *slot);
 static void postgresGetForeignUpperPaths(PlannerInfo *root,
-							 UpperRelationKind stage,
-							 RelOptInfo *input_rel,
-							 RelOptInfo *output_rel,
-							 void *extra);
+										 UpperRelationKind stage,
+										 RelOptInfo *input_rel,
+										 RelOptInfo *output_rel,
+										 void *extra);
 
 /*
  * Helper functions
  */
 static void estimate_path_cost_size(PlannerInfo *root,
-						RelOptInfo *foreignrel,
-						List *param_join_conds,
-						List *pathkeys,
-						PgFdwPathExtraData *fpextra,
-						double *p_rows, int *p_width,
-						Cost *p_startup_cost, Cost *p_total_cost);
+									RelOptInfo *foreignrel,
+									List *param_join_conds,
+									List *pathkeys,
+									PgFdwPathExtraData *fpextra,
+									double *p_rows, int *p_width,
+									Cost *p_startup_cost, Cost *p_total_cost);
 static void get_remote_estimate(const char *sql,
-					PGconn *conn,
-					double *rows,
-					int *width,
-					Cost *startup_cost,
-					Cost *total_cost);
+								PGconn *conn,
+								double *rows,
+								int *width,
+								Cost *startup_cost,
+								Cost *total_cost);
 static void adjust_foreign_grouping_path_cost(PlannerInfo *root,
-								  List *pathkeys,
-								  double retrieved_rows,
-								  double width,
-								  double limit_tuples,
-								  Cost *p_startup_cost,
-								  Cost *p_run_cost);
+											  List *pathkeys,
+											  double retrieved_rows,
+											  double width,
+											  double limit_tuples,
+											  Cost *p_startup_cost,
+											  Cost *p_run_cost);
 static bool ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
-						  EquivalenceClass *ec, EquivalenceMember *em,
-						  void *arg);
+									  EquivalenceClass *ec, EquivalenceMember *em,
+									  void *arg);
 static void create_cursor(ForeignScanState *node);
 static void fetch_more_data(ForeignScanState *node);
 static void close_cursor(PGconn *conn, unsigned int cursor_number);
 static PgFdwModifyState *create_foreign_modify(EState *estate,
-					  RangeTblEntry *rte,
-					  ResultRelInfo *resultRelInfo,
-					  CmdType operation,
-					  Plan *subplan,
-					  char *query,
-					  List *target_attrs,
-					  bool has_returning,
-					  List *retrieved_attrs);
+											   RangeTblEntry *rte,
+											   ResultRelInfo *resultRelInfo,
+											   CmdType operation,
+											   Plan *subplan,
+											   char *query,
+											   List *target_attrs,
+											   bool has_returning,
+											   List *retrieved_attrs);
 static TupleTableSlot *execute_foreign_modify(EState *estate,
-					   ResultRelInfo *resultRelInfo,
-					   CmdType operation,
-					   TupleTableSlot *slot,
-					   TupleTableSlot *planSlot);
+											  ResultRelInfo *resultRelInfo,
+											  CmdType operation,
+											  TupleTableSlot *slot,
+											  TupleTableSlot *planSlot);
 static void prepare_foreign_modify(PgFdwModifyState *fmstate);
 static const char **convert_prep_stmt_params(PgFdwModifyState *fmstate,
-						 ItemPointer tupleid,
-						 TupleTableSlot *slot);
+											 ItemPointer tupleid,
+											 TupleTableSlot *slot);
 static void store_returning_result(PgFdwModifyState *fmstate,
-					   TupleTableSlot *slot, PGresult *res);
+								   TupleTableSlot *slot, PGresult *res);
 static void finish_foreign_modify(PgFdwModifyState *fmstate);
 static List *build_remote_returning(Index rtindex, Relation rel,
-					   List *returningList);
+									List *returningList);
 static void rebuild_fdw_scan_tlist(ForeignScan *fscan, List *tlist);
 static void execute_dml_stmt(ForeignScanState *node);
 static TupleTableSlot *get_returning_data(ForeignScanState *node);
 static void init_returning_filter(PgFdwDirectModifyState *dmstate,
-					  List *fdw_scan_tlist,
-					  Index rtindex);
+								  List *fdw_scan_tlist,
+								  Index rtindex);
 static TupleTableSlot *apply_returning_filter(PgFdwDirectModifyState *dmstate,
-					   TupleTableSlot *slot,
-					   EState *estate);
+											  TupleTableSlot *slot,
+											  EState *estate);
 static void prepare_query_params(PlanState *node,
-					 List *fdw_exprs,
-					 int numParams,
-					 FmgrInfo **param_flinfo,
-					 List **param_exprs,
-					 const char ***param_values);
+								 List *fdw_exprs,
+								 int numParams,
+								 FmgrInfo **param_flinfo,
+								 List **param_exprs,
+								 const char ***param_values);
 static void process_query_params(ExprContext *econtext,
-					 FmgrInfo *param_flinfo,
-					 List *param_exprs,
-					 const char **param_values);
-static int postgresAcquireSampleRowsFunc(Relation relation, int elevel,
-							  HeapTuple *rows, int targrows,
-							  double *totalrows,
-							  double *totaldeadrows);
+								 FmgrInfo *param_flinfo,
+								 List *param_exprs,
+								 const char **param_values);
+static int	postgresAcquireSampleRowsFunc(Relation relation, int elevel,
+										  HeapTuple *rows, int targrows,
+										  double *totalrows,
+										  double *totaldeadrows);
 static void analyze_row_processor(PGresult *res, int row,
-					  PgFdwAnalyzeState *astate);
+								  PgFdwAnalyzeState *astate);
 static HeapTuple make_tuple_from_result_row(PGresult *res,
-						   int row,
-						   Relation rel,
-						   AttInMetadata *attinmeta,
-						   List *retrieved_attrs,
-						   ForeignScanState *fsstate,
-						   MemoryContext temp_context);
+											int row,
+											Relation rel,
+											AttInMetadata *attinmeta,
+											List *retrieved_attrs,
+											ForeignScanState *fsstate,
+											MemoryContext temp_context);
 static void conversion_error_callback(void *arg);
 static bool foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel,
-				JoinType jointype, RelOptInfo *outerrel, RelOptInfo *innerrel,
-				JoinPathExtraData *extra);
+							JoinType jointype, RelOptInfo *outerrel, RelOptInfo *innerrel,
+							JoinPathExtraData *extra);
 static bool foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
-					Node *havingQual);
+								Node *havingQual);
 static List *get_useful_pathkeys_for_relation(PlannerInfo *root,
-								 RelOptInfo *rel);
+											  RelOptInfo *rel);
 static List *get_useful_ecs_for_relation(PlannerInfo *root, RelOptInfo *rel);
 static void add_paths_with_pathkeys_for_rel(PlannerInfo *root, RelOptInfo *rel,
-								Path *epq_path);
+											Path *epq_path);
 static void add_foreign_grouping_paths(PlannerInfo *root,
-						   RelOptInfo *input_rel,
-						   RelOptInfo *grouped_rel,
-						   GroupPathExtraData *extra);
+									   RelOptInfo *input_rel,
+									   RelOptInfo *grouped_rel,
+									   GroupPathExtraData *extra);
 static void add_foreign_ordered_paths(PlannerInfo *root,
-						  RelOptInfo *input_rel,
-						  RelOptInfo *ordered_rel);
+									  RelOptInfo *input_rel,
+									  RelOptInfo *ordered_rel);
 static void add_foreign_final_paths(PlannerInfo *root,
-						RelOptInfo *input_rel,
-						RelOptInfo *final_rel,
-						FinalPathExtraData *extra);
+									RelOptInfo *input_rel,
+									RelOptInfo *final_rel,
+									FinalPathExtraData *extra);
 static void apply_server_options(PgFdwRelationInfo *fpinfo);
 static void apply_table_options(PgFdwRelationInfo *fpinfo);
 static void merge_fdw_options(PgFdwRelationInfo *fpinfo,
-				  const PgFdwRelationInfo *fpinfo_o,
-				  const PgFdwRelationInfo *fpinfo_i);
+							  const PgFdwRelationInfo *fpinfo_o,
+							  const PgFdwRelationInfo *fpinfo_i);
 
 
 /*
@@ -1858,7 +1858,7 @@ postgresExecForeignInsert(EState *estate,
 	if (fmstate->aux_fmstate)
 		resultRelInfo->ri_FdwState = fmstate->aux_fmstate;
 	rslot = execute_foreign_modify(estate, resultRelInfo, CMD_INSERT,
-								  slot, planSlot);
+								   slot, planSlot);
 	/* Revert that change */
 	if (fmstate->aux_fmstate)
 		resultRelInfo->ri_FdwState = fmstate;
@@ -1934,11 +1934,11 @@ postgresBeginForeignInsert(ModifyTableState *mtstate,
 	bool		doNothing = false;
 
 	/*
-	 * If the foreign table we are about to insert routed rows into is also
-	 * an UPDATE subplan result rel that will be updated later, proceeding
-	 * with the INSERT will result in the later UPDATE incorrectly modifying
-	 * those routed rows, so prevent the INSERT --- it would be nice if we
-	 * could handle this case; but for now, throw an error for safety.
+	 * If the foreign table we are about to insert routed rows into is also an
+	 * UPDATE subplan result rel that will be updated later, proceeding with
+	 * the INSERT will result in the later UPDATE incorrectly modifying those
+	 * routed rows, so prevent the INSERT --- it would be nice if we could
+	 * handle this case; but for now, throw an error for safety.
 	 */
 	if (plan && plan->operation == CMD_UPDATE &&
 		(resultRelInfo->ri_usesFdwDirectModify ||
@@ -3169,7 +3169,7 @@ adjust_foreign_grouping_path_cost(PlannerInfo *root,
 	if (!grouping_is_sortable(root->parse->groupClause) ||
 		!pathkeys_contained_in(pathkeys, root->group_pathkeys))
 	{
-		Path		sort_path;		/* dummy for result of cost_sort */
+		Path		sort_path;	/* dummy for result of cost_sort */
 
 		cost_sort(&sort_path,
 				  root,
@@ -3191,7 +3191,7 @@ adjust_foreign_grouping_path_cost(PlannerInfo *root,
 		 * add 1/4th of that default.
 		 */
 		double		sort_multiplier = 1.0 + (DEFAULT_FDW_SORT_MULTIPLIER
- - 1.0) * 0.25;
+											 - 1.0) * 0.25;
 
 		*p_startup_cost *= sort_multiplier;
 		*p_run_cost *= sort_multiplier;
@@ -3773,6 +3773,7 @@ store_returning_result(PgFdwModifyState *fmstate,
 											fmstate->retrieved_attrs,
 											NULL,
 											fmstate->temp_cxt);
+
 		/*
 		 * The returning slot will not necessarily be suitable to store
 		 * heaptuples directly, so allow for conversion.
@@ -6059,8 +6060,8 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		/*
 		 * Grouping and aggregation are not supported with FOR UPDATE/SHARE,
 		 * so the input_rel should be a base, join, or ordered relation; and
-		 * if it's an ordered relation, its input relation should be a base
-		 * or join relation.
+		 * if it's an ordered relation, its input relation should be a base or
+		 * join relation.
 		 */
 		Assert(input_rel->reloptkind == RELOPT_BASEREL ||
 			   input_rel->reloptkind == RELOPT_JOINREL ||

@@ -485,7 +485,7 @@ static const SchemaQuery Query_for_list_of_relations = {
 static const SchemaQuery Query_for_list_of_partitioned_relations = {
 	.catname = "pg_catalog.pg_class c",
 	.selcondition = "c.relkind IN (" CppAsString2(RELKIND_PARTITIONED_TABLE)
-		", " CppAsString2(RELKIND_PARTITIONED_INDEX) ")",
+	", " CppAsString2(RELKIND_PARTITIONED_INDEX) ")",
 	.viscondition = "pg_catalog.pg_table_is_visible(c.oid)",
 	.namespace = "c.relnamespace",
 	.result = "pg_catalog.quote_ident(c.relname)",
@@ -1075,15 +1075,15 @@ static char *complete_from_versioned_query(const char *text, int state);
 static char *complete_from_schema_query(const char *text, int state);
 static char *complete_from_versioned_schema_query(const char *text, int state);
 static char *_complete_from_query(const char *simple_query,
-					 const SchemaQuery *schema_query,
-					 const char *text, int state);
+								  const SchemaQuery *schema_query,
+								  const char *text, int state);
 static char *complete_from_list(const char *text, int state);
 static char *complete_from_const(const char *text, int state);
 static void append_variable_names(char ***varnames, int *nvars,
-					  int *maxvars, const char *varname,
-					  const char *prefix, const char *suffix);
+								  int *maxvars, const char *varname,
+								  const char *prefix, const char *suffix);
 static char **complete_from_variables(const char *text,
-						const char *prefix, const char *suffix, bool need_value);
+									  const char *prefix, const char *suffix, bool need_value);
 static char *complete_from_files(const char *text, int state);
 
 static char *pg_strdup_keyword_case(const char *s, const char *ref);
@@ -2101,6 +2101,8 @@ psql_completion(const char *text, int start, int end)
 		 */
 		if (ends_with(prev_wd, '(') || ends_with(prev_wd, ','))
 			COMPLETE_WITH("VERBOSE", "SKIP_LOCKED");
+		else if (TailMatches("VERBOSE|SKIP_LOCKED"))
+			COMPLETE_WITH("ON", "OFF");
 	}
 	else if (HeadMatches("ANALYZE") && TailMatches("("))
 		/* "ANALYZE (" should be caught above, so assume we want columns */
@@ -4359,7 +4361,7 @@ exec_query(const char *query)
 	{
 #ifdef NOT_USED
 		pg_log_error("tab completion query failed: %s\nQuery was:\n%s",
-				   PQerrorMessage(pset.db), query);
+					 PQerrorMessage(pset.db), query);
 #endif
 		PQclear(result);
 		result = NULL;

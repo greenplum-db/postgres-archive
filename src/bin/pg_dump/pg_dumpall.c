@@ -45,11 +45,11 @@ static void dumpDatabases(PGconn *conn);
 static void dumpTimestamp(const char *msg);
 static int	runPgDump(const char *dbname, const char *create_opts);
 static void buildShSecLabels(PGconn *conn,
-				 const char *catalog_name, Oid objectId,
-				 const char *objtype, const char *objname,
-				 PQExpBuffer buffer);
+							 const char *catalog_name, Oid objectId,
+							 const char *objtype, const char *objname,
+							 PQExpBuffer buffer);
 static PGconn *connectDatabase(const char *dbname, const char *connstr, const char *pghost, const char *pgport,
-				const char *pguser, trivalue prompt_password, bool fail_on_error);
+							   const char *pguser, trivalue prompt_password, bool fail_on_error);
 static char *constructConnStr(const char **keywords, const char **values);
 static PGresult *executeQuery(PGconn *conn, const char *query);
 static void executeCommand(PGconn *conn, const char *query);
@@ -1406,8 +1406,8 @@ expand_dbname_patterns(PGconn *conn,
 
 	/*
 	 * The loop below runs multiple SELECTs, which might sometimes result in
-	 * duplicate entries in the name list, but we don't care, since all
-	 * we're going to do is test membership of the list.
+	 * duplicate entries in the name list, but we don't care, since all we're
+	 * going to do is test membership of the list.
 	 */
 
 	for (SimpleStringListCell *cell = patterns->head; cell; cell = cell->next)

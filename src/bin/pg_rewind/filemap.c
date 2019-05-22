@@ -25,7 +25,7 @@ filemap_t  *filemap = NULL;
 
 static bool isRelDataFile(const char *path);
 static char *datasegpath(RelFileNode rnode, ForkNumber forknum,
-			BlockNumber segno);
+						 BlockNumber segno);
 static int	path_cmp(const void *a, const void *b);
 static int	final_filemap_cmp(const void *a, const void *b);
 static void filemap_list_to_array(filemap_t *map);
@@ -508,10 +508,10 @@ check_file_excluded(const char *path, bool is_source)
 		{
 			if (is_source)
 				pg_log_debug("entry \"%s\" excluded from source file list",
-					   path);
+							 path);
 			else
 				pg_log_debug("entry \"%s\" excluded from target file list",
-					   path);
+							 path);
 			return true;
 		}
 	}
@@ -528,10 +528,10 @@ check_file_excluded(const char *path, bool is_source)
 		{
 			if (is_source)
 				pg_log_debug("entry \"%s\" excluded from source file list",
-					   path);
+							 path);
 			else
 				pg_log_debug("entry \"%s\" excluded from target file list",
-					   path);
+							 path);
 			return true;
 		}
 	}
@@ -659,7 +659,7 @@ print_filemap(void)
 			entry->pagemap.bitmapsize > 0)
 		{
 			pg_log_debug("%s (%s)", entry->path,
-				   action_to_str(entry->action));
+						 action_to_str(entry->action));
 
 			if (entry->pagemap.bitmapsize > 0)
 				datapagemap_print(&entry->pagemap);

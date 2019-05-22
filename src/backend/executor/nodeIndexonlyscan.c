@@ -47,7 +47,7 @@
 
 static TupleTableSlot *IndexOnlyNext(IndexOnlyScanState *node);
 static void StoreIndexTuple(TupleTableSlot *slot, IndexTuple itup,
-				TupleDesc itupdesc);
+							TupleDesc itupdesc);
 
 
 /* ----------------------------------------------------------------
@@ -192,9 +192,9 @@ IndexOnlyNext(IndexOnlyScanState *node)
 
 		/*
 		 * Fill the scan tuple slot with data from the index.  This might be
-		 * provided in either HeapTuple or IndexTuple format.  Conceivably
-		 * an index AM might fill both fields, in which case we prefer the
-		 * heap format, since it's probably a bit cheaper to fill a slot from.
+		 * provided in either HeapTuple or IndexTuple format.  Conceivably an
+		 * index AM might fill both fields, in which case we prefer the heap
+		 * format, since it's probably a bit cheaper to fill a slot from.
 		 */
 		if (scandesc->xs_hitup)
 		{
