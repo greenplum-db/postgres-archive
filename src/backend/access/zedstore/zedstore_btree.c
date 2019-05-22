@@ -559,6 +559,7 @@ zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf
 
 	/* update left hikey */
 	leftopaque->zs_hikey = ZSBtreePageGetOpaque(rightpage)->zs_hikey;
+	leftopaque->zs_next = ZSBtreePageGetOpaque(rightpage)->zs_next;
 
 	Assert(ZSBtreePageGetOpaque(leftpage)->zs_level == ZSBtreePageGetOpaque(rightpage)->zs_level);
 
