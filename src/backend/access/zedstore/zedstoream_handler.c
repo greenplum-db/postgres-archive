@@ -184,9 +184,9 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 
 	isnull = true;
 	ZSUndoRecPtrInitialize(&prevundoptr);
-	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
-					  &datum, &isnull, &tid, 1,
-					  xid, cid, speculative_token, prevundoptr);
+	zsbt_tid_multi_insert(relation,
+						  &tid, 1,
+						  xid, cid, speculative_token, prevundoptr);
 
 	/*
 	 * We only need to check for table-level SSI locks. Our
@@ -213,9 +213,8 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 			toastptr = datum = zedstore_toast_datum(relation, attno, datum);
 		}
 
-		zsbt_multi_insert(relation, attno,
-						  &datum, &isnull, &tid, 1,
-						  xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
+		zsbt_attr_multi_insert(relation, attno,
+						  &datum, &isnull, &tid, 1);
 
 		if (toastptr != (Datum) 0)
 			zedstore_toast_finish(relation, attno, toastptr, tid);
@@ -249,7 +248,7 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 	zstid tid;
 
 	tid = ZSTidFromItemPointer(slot->tts_tid);
-	zsbt_clear_speculative_token(relation, tid, spekToken, true /* for complete */);
+	zsbt_tid_clear_speculative_token(relation, tid, spekToken, true /* for complete */);
 	/*
 	 * there is a conflict
 	 */
@@ -280,9 +279,8 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		isnulls[i] = true;
 
 	ZSUndoRecPtrInitialize(&prevundoptr);
-	zsbt_multi_insert(relation, ZS_META_ATTRIBUTE_NUM,
-					  datums, isnulls, tids, ntuples,
-					  xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
+	zsbt_tid_multi_insert(relation, tids, ntuples,
+						  xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
 
 	/*
 	 * We only need to check for table-level SSI locks. Our
@@ -318,9 +316,8 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			isnulls[i] = isnull;
 		}
 
-		zsbt_multi_insert(relation, attno,
-						  datums, isnulls, tids, ntuples,
-						  xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
+		zsbt_attr_multi_insert(relation, attno,
+							   datums, isnulls, tids, ntuples);
 
 		for (i = 0; i < ntupletoasted; i++)
 		{
@@ -356,8 +353,8 @@ zedstoream_delete(Relation relation, ItemPointer tid_p, CommandId cid,
 	TM_Result result = TM_Ok;
 
 retry:
-	result = zsbt_delete(relation, ZS_META_ATTRIBUTE_NUM, tid, xid, cid,
-						 snapshot, crosscheck, wait, hufd, changingPart);
+	result = zsbt_tid_delete(relation, tid, xid, cid,
+							 snapshot, crosscheck, wait, hufd, changingPart);
 
 	if (result != TM_Ok)
 	{
@@ -514,8 +511,8 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	 * does that, that's enough.
 	 */
 retry:
-	result = zsbt_lock_item(relation, ZS_META_ATTRIBUTE_NUM /* attno */, tid, xid, cid,
-							mode, snapshot, tmfd, &next_tid);
+	result = zsbt_tid_lock(relation, tid, xid, cid,
+						   mode, snapshot, tmfd, &next_tid);
 
 	if (result == TM_Invisible)
 	{
@@ -797,7 +794,6 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	bool	   *isnulls;
 	TM_Result	result;
 	zstid		newtid;
-	Datum       newdatum = 0;
 	TupleTableSlot *oldslot;
 	IndexFetchTableData *fetcher;
 	ZSUndoRecPtr prevundoptr;
@@ -836,9 +832,9 @@ retry:
 
 	*lockmode = key_update ? LockTupleExclusive : LockTupleNoKeyExclusive;
 
-	result = zsbt_update(relation, ZS_META_ATTRIBUTE_NUM, otid, newdatum, true,
-						 xid, cid, key_update, snapshot, crosscheck,
-						 wait, hufd, &newtid);
+	result = zsbt_tid_update(relation, otid,
+							 xid, cid, key_update, snapshot, crosscheck,
+							 wait, hufd, &newtid);
 
 	if (result == TM_Ok)
 	{
@@ -864,9 +860,8 @@ retry:
 				toastptr = newdatum = zedstore_toast_datum(relation, attno, newdatum);
 			}
 
-			zsbt_multi_insert(relation, attno,
-							  &newdatum, &newisnull, &newtid, 1,
-							  xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
+			zsbt_attr_multi_insert(relation, attno,
+								   &newdatum, &newisnull, &newtid, 1);
 
 			if (toastptr != (Datum) 0)
 				zedstore_toast_finish(relation, attno, toastptr, newtid);
@@ -1066,8 +1061,12 @@ zedstoream_endscan(TableScanDesc sscan)
 	if (proj_data->proj_atts)
 		pfree(proj_data->proj_atts);
 
-	for (int i = 0; i < proj_data->num_proj_atts; i++)
-		zsbt_end_scan(&proj_data->btree_scans[i]);
+	if (proj_data->num_proj_atts > 0)
+	{
+		zsbt_tid_end_scan(&proj_data->btree_scans[0]);
+		for (int i = 1; i < proj_data->num_proj_atts; i++)
+			zsbt_attr_end_scan(&proj_data->btree_scans[i]);
+	}
 
 	if (scan->rs_scan.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_scan.rs_snapshot);
@@ -1104,8 +1103,12 @@ zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
 			scan->rs_scan.rs_flags &= ~SO_ALLOW_PAGEMODE;
 	}
 
-	for (int i = 0; i < scan->proj_data.num_proj_atts; i++)
-		zsbt_end_scan(&scan->proj_data.btree_scans[i]);
+	if (scan->proj_data.num_proj_atts > 0)
+	{
+		zsbt_tid_end_scan(&scan->proj_data.btree_scans[0]);
+		for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
+			zsbt_attr_end_scan(&scan->proj_data.btree_scans[i]);
+	}
 
 	scan->state = ZSSCAN_STATE_UNSTARTED;
 }
@@ -1171,19 +1174,23 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 			}
 
 			oldcontext = MemoryContextSwitchTo(scan_proj->context);
-			for (int i = 0; i < scan_proj->num_proj_atts; i++)
-			{
-				int			attno = scan_proj->proj_atts[i];
-
-				zsbt_begin_scan(scan->rs_scan.rs_rd,
-								slot->tts_tupleDescriptor,
-								attno,
+			zsbt_tid_begin_scan(scan->rs_scan.rs_rd,
 								scan->cur_range_start,
 								scan->cur_range_end,
 								scan->rs_scan.rs_snapshot,
-								&scan_proj->btree_scans[i]);
-			}
+								&scan_proj->btree_scans[0]);
 			scan_proj->btree_scans[0].serializable = true;
+			for (int i = 1; i < scan_proj->num_proj_atts; i++)
+			{
+				int			attno = scan_proj->proj_atts[i];
+
+				zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
+									 slot->tts_tupleDescriptor,
+									 attno,
+									 scan->cur_range_start,
+									 scan->cur_range_end,
+									 &scan_proj->btree_scans[i]);
+			}
 			MemoryContextSwitchTo(oldcontext);
 			scan->state = ZSSCAN_STATE_SCANNING;
 		}
@@ -1191,7 +1198,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		/* We now have a range to scan. Find the next visible TID. */
 		Assert(scan->state == ZSSCAN_STATE_SCANNING);
 
-		this_tid = zsbt_scan_next_tid(&scan_proj->btree_scans[0]);
+		this_tid = zsbt_tid_scan_next(&scan_proj->btree_scans[0]);
 		if (this_tid == InvalidZSTid)
 		{
 			scan->state = ZSSCAN_STATE_FINISHED_RANGE;
@@ -1243,8 +1250,9 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 		if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
 		{
-			for (int i = 0; i < scan_proj->num_proj_atts; i++)
-				zsbt_end_scan(&scan_proj->btree_scans[i]);
+			zsbt_tid_end_scan(&scan_proj->btree_scans[0]);
+			for (int i = 1; i < scan_proj->num_proj_atts; i++)
+				zsbt_attr_end_scan(&scan_proj->btree_scans[i]);
 		}
 		else
 		{
@@ -1273,7 +1281,7 @@ zedstoream_tuple_tid_valid(TableScanDesc sscan, ItemPointer tid)
 		/*
 		 * get the max tid once and store it
 		 */
-		scan->max_tid_to_scan = zsbt_get_last_tid(sscan->rs_rd, ZS_META_ATTRIBUTE_NUM);
+		scan->max_tid_to_scan = zsbt_get_last_tid(sscan->rs_rd);
 	}
 
 	/*
@@ -1295,16 +1303,15 @@ zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	 * good idea..
 	 */
 	zstid		tid = ZSTidFromItemPointer(slot->tts_tid);
-	ZSBtreeScan btree_scan;
+	ZSBtreeScan meta_scan;
 	bool		found;
 
 	/* Use the meta-data tree for the visibility information. */
-	zsbt_begin_scan(rel, slot->tts_tupleDescriptor, ZS_META_ATTRIBUTE_NUM, tid,
-					tid + 1, snapshot, &btree_scan);
+	zsbt_tid_begin_scan(rel, tid, tid + 1, snapshot, &meta_scan);
 
-	found = zsbt_scan_next_tid(&btree_scan) != InvalidZSTid;
+	found = zsbt_tid_scan_next(&meta_scan) != InvalidZSTid;
 
-	zsbt_end_scan(&btree_scan);
+	zsbt_tid_end_scan(&meta_scan);
 
 	return found;
 }
@@ -1351,8 +1358,12 @@ zedstoream_end_index_fetch(IndexFetchTableData *scan)
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
 	ZedStoreProjectData *zscan_proj = &zscan->proj_data;
 
-	for (int i = 0; i < zscan_proj->num_proj_atts; i++)
-		zsbt_end_scan(&zscan_proj->btree_scans[i]);
+	if (zscan_proj->num_proj_atts > 0)
+	{
+		zsbt_tid_end_scan(&zscan_proj->btree_scans[0]);
+		for (int i = 1; i < zscan_proj->num_proj_atts; i++)
+			zsbt_attr_end_scan(&zscan_proj->btree_scans[i]);
+	}
 
 	if (zscan_proj->proj_atts)
 		pfree(zscan_proj->proj_atts);
@@ -1414,8 +1425,9 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 	else
 	{
 		/* If we had a previous fetches still open, close them first */
-		for (int i = 0; i < fetch_proj->num_proj_atts; i++)
-			zsbt_end_scan(&fetch_proj->btree_scans[i]);
+		zsbt_tid_end_scan(&fetch_proj->btree_scans[0]);
+		for (int i = 1; i < fetch_proj->num_proj_atts; i++)
+			zsbt_attr_end_scan(&fetch_proj->btree_scans[i]);
 	}
 
 	/*
@@ -1429,10 +1441,9 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 	for (int i = 0; i < slot->tts_tupleDescriptor->natts; i++)
 		slot->tts_isnull[i] = true;
 
-	zsbt_begin_scan(rel, slot->tts_tupleDescriptor, 0, tid, tid + 1,
-					snapshot, &fetch_proj->btree_scans[0]);
+	zsbt_tid_begin_scan(rel, tid, tid + 1, snapshot, &fetch_proj->btree_scans[0]);
 	fetch_proj->btree_scans[0].serializable = true;
-	found = zsbt_scan_next_tid(&fetch_proj->btree_scans[0]) != InvalidZSTid;
+	found = zsbt_tid_scan_next(&fetch_proj->btree_scans[0]) != InvalidZSTid;
 	if (found)
 	{
 		for (int i = 1; i < fetch_proj->num_proj_atts; i++)
@@ -1443,8 +1454,8 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 			Datum		datum;
 			bool        isnull;
 
-			zsbt_begin_scan(rel, slot->tts_tupleDescriptor, natt, tid, tid + 1,
-							snapshot, btscan);
+			zsbt_attr_begin_scan(rel, slot->tts_tupleDescriptor, natt, tid, tid + 1,
+								 btscan);
 
 			attr = ZSBtreeScanGetAttInfo(btscan);
 			if (zsbt_scan_next_fetch(btscan, &datum, &isnull, tid))
@@ -1767,17 +1778,25 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 			zscan->cur_range_start = ZSTidFromBlkOff(start_blockno, 1);
 			zscan->cur_range_end = ZSTidFromBlkOff(numblocks, 1);
 
-			for (int i = 0; i < zscan_proj->num_proj_atts; i++)
+			/* FIXME: when can 'num_proj_atts' be 0? */
+			if (zscan_proj->num_proj_atts > 0)
 			{
-				int			natt = zscan_proj->proj_atts[i];
+				zsbt_tid_begin_scan(zscan->rs_scan.rs_rd,
+									zscan->cur_range_start,
+									zscan->cur_range_end,
+									zscan->rs_scan.rs_snapshot,
+									&zscan_proj->btree_scans[0]);
+				for (int i = 1; i < zscan_proj->num_proj_atts; i++)
+				{
+					int			natt = zscan_proj->proj_atts[i];
 
-				zsbt_begin_scan(zscan->rs_scan.rs_rd,
-								RelationGetDescr(zscan->rs_scan.rs_rd),
-								natt,
-								zscan->cur_range_start,
-								zscan->cur_range_end,
-								zscan->rs_scan.rs_snapshot,
-								&zscan_proj->btree_scans[i]);
+					zsbt_attr_begin_scan(zscan->rs_scan.rs_rd,
+										 RelationGetDescr(zscan->rs_scan.rs_rd),
+										 natt,
+										 zscan->cur_range_start,
+										 zscan->cur_range_end,
+										 &zscan_proj->btree_scans[i]);
+				}
 			}
 			zscan->state = ZSSCAN_STATE_SCANNING;
 		}
@@ -2130,18 +2149,16 @@ zs_cluster_process_tuple(Relation OldHeap, Relation NewHeap,
 	{
 		/* Insert the first version of the row. */
 		ZSUndoRecPtr prevundoptr;
-		Datum		datum = (Datum) 0;
-		bool        isnull = true;
 		zstid		newtid = InvalidZSTid;
 
 		/* First, insert the tuple. */
 		ZSUndoRecPtrInitialize(&prevundoptr);
-		zsbt_multi_insert(NewHeap, ZS_META_ATTRIBUTE_NUM,
-						  &datum, &isnull, &newtid, 1,
-						  this_xmin,
-						  this_cmin,
-						  INVALID_SPECULATIVE_TOKEN,
-						  prevundoptr);
+		zsbt_tid_multi_insert(NewHeap,
+							  &newtid, 1,
+							  this_xmin,
+							  this_cmin,
+							  INVALID_SPECULATIVE_TOKEN,
+							  prevundoptr);
 
 		/* And if the tuple was deleted/updated away, do the same in the new table. */
 		if (this_xmax != InvalidTransactionId)
@@ -2149,9 +2166,9 @@ zs_cluster_process_tuple(Relation OldHeap, Relation NewHeap,
 			TM_Result	delete_result;
 
 			/* tuple was deleted. */
-			delete_result = zsbt_delete(NewHeap, ZS_META_ATTRIBUTE_NUM, newtid,
-										this_xmax, this_cmax,
-										NULL, NULL, false, NULL, this_changedPart);
+			delete_result = zsbt_tid_delete(NewHeap, newtid,
+											this_xmax, this_cmax,
+											NULL, NULL, false, NULL, this_changedPart);
 			Assert(delete_result == TM_Ok);
 		}
 		return newtid;
@@ -2189,22 +2206,20 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	 * row, too. That way, the whole update chain is processed in one go,
 	 * and can be reproduced in the new table.
 	 */
-	zsbt_begin_scan(OldHeap, olddesc, ZS_META_ATTRIBUTE_NUM,
-					MinZSTid, MaxPlusOneZSTid,
-					SnapshotAny, &meta_scan);
+	zsbt_tid_begin_scan(OldHeap, MinZSTid, MaxPlusOneZSTid,
+						SnapshotAny, &meta_scan);
 
 	for (attno = 1; attno <= olddesc->natts; attno++)
 	{
 		if (TupleDescAttr(olddesc, attno - 1)->attisdropped)
 			continue;
 
-		zsbt_begin_scan(OldHeap,
-						olddesc,
-						attno,
-						MinZSTid,
-						MaxPlusOneZSTid,
-						SnapshotAny,
-						&attr_scans[attno]);
+		zsbt_attr_begin_scan(OldHeap,
+							 olddesc,
+							 attno,
+							 MinZSTid,
+							 MaxPlusOneZSTid,
+							 &attr_scans[attno]);
 	}
 
 	/* TODO: sorting not implemented yet. (it would require materializing each
@@ -2255,7 +2270,6 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		zstid		old_tid;
 		ZSUndoRecPtr old_undoptr;
 		zstid		new_tid;
-		ZSUndoRecPtr prevundoptr;
 		Datum		datum;
 		bool        isnull;
 		zstid		fetchtid = InvalidZSTid;
@@ -2275,12 +2289,12 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				elog(ERROR, "CLUSTER does not support lossy index conditions");
 
 			fetchtid = ZSTidFromItemPointer(*itemptr);
-			zsbt_reset_scan(&meta_scan, fetchtid);
-			old_tid = zsbt_scan_next_tid(&meta_scan);
+			zsbt_tid_reset_scan(&meta_scan, fetchtid);
+			old_tid = zsbt_tid_scan_next(&meta_scan);
 		}
 		else
 		{
-			old_tid = zsbt_scan_next_tid(&meta_scan);
+			old_tid = zsbt_tid_scan_next(&meta_scan);
 			fetchtid = old_tid;
 		}
 		if (old_tid == InvalidZSTid)
@@ -2309,7 +2323,7 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				else
 				{
 					if (indexScan)
-						zsbt_reset_scan(&attr_scans[attno], old_tid);
+						zsbt_attr_reset_scan(&attr_scans[attno], old_tid);
 
 					if (!zsbt_scan_next_fetch(&attr_scans[attno], &datum, &isnull, old_tid))
 						zsbt_fill_missing_attribute_value(&attr_scans[attno], &datum, &isnull);
@@ -2329,11 +2343,7 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 					}
 				}
 
-				zsbt_multi_insert(NewHeap, attno,
-								  &datum, &isnull, &new_tid, 1,
-								  FrozenTransactionId /* FIXME */,
-								  InvalidCommandId,
-								  INVALID_SPECULATIVE_TOKEN, prevundoptr);
+				zsbt_attr_multi_insert(NewHeap, attno, &datum, &isnull, &new_tid, 1);
 
 				if (toastptr != (Datum) 0)
 					zedstore_toast_finish(NewHeap, attno, toastptr, new_tid);
@@ -2344,13 +2354,13 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	if (indexScan != NULL)
 		index_endscan(indexScan);
 
-	zsbt_end_scan(&meta_scan);
+	zsbt_tid_end_scan(&meta_scan);
 	for (attno = 1; attno <= olddesc->natts; attno++)
 	{
 		if (TupleDescAttr(olddesc, attno - 1)->attisdropped)
 			continue;
 
-		zsbt_end_scan(&attr_scans[attno]);
+		zsbt_attr_end_scan(&attr_scans[attno]);
 	}
 }
 
@@ -2374,25 +2384,23 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 	zs_initialize_proj_attributes_extended(scan, RelationGetDescr(rel));
 
 	ntuples = 0;
-	zsbt_begin_scan(scan->rs_scan.rs_rd,
-					RelationGetDescr(scan->rs_scan.rs_rd),
-					ZS_META_ATTRIBUTE_NUM,
-					ZSTidFromBlkOff(blockno, 1),
-					ZSTidFromBlkOff(blockno + 1, 1),
-					scan->rs_scan.rs_snapshot,
-					&btree_scan);
+	zsbt_tid_begin_scan(scan->rs_scan.rs_rd,
+						ZSTidFromBlkOff(blockno, 1),
+						ZSTidFromBlkOff(blockno + 1, 1),
+						scan->rs_scan.rs_snapshot,
+						&btree_scan);
 	/*
 	 * TODO: it would be good to pass the next expected TID down to zsbt_scan_next,
 	 * so that it could skip over to it more efficiently.
 	 */
 	ntuples = 0;
-	while ((tid = zsbt_scan_next_tid(&btree_scan)) != InvalidZSTid)
+	while ((tid = zsbt_tid_scan_next(&btree_scan)) != InvalidZSTid)
 	{
 		Assert(ZSTidGetBlockNumber(tid) == blockno);
 		scan->bmscan_tids[ntuples] = tid;
 		ntuples++;
 	}
-	zsbt_end_scan(&btree_scan);
+	zsbt_tid_end_scan(&btree_scan);
 
 	if (ntuples)
 	{
@@ -2405,13 +2413,12 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 			Datum	   *datums = scan->bmscan_datums[i];
 			bool	   *isnulls = scan->bmscan_isnulls[i];
 
-			zsbt_begin_scan(scan->rs_scan.rs_rd,
-							RelationGetDescr(scan->rs_scan.rs_rd),
-							natt,
-							ZSTidFromBlkOff(blockno, 1),
-							ZSTidFromBlkOff(blockno + 1, 1),
-							scan->rs_scan.rs_snapshot,
-							&btree_scan);
+			zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
+								 RelationGetDescr(scan->rs_scan.rs_rd),
+								 natt,
+								 ZSTidFromBlkOff(blockno, 1),
+								 ZSTidFromBlkOff(blockno + 1, 1),
+								 &btree_scan);
 			for (int n = 0; n < ntuples; n++)
 			{
 				zstid       tid = scan->bmscan_tids[n];
@@ -2433,7 +2440,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 				datums[n] = datum;
 				isnulls[n] = isnull;
 			}
-			zsbt_end_scan(&btree_scan);
+			zsbt_attr_end_scan(&btree_scan);
 		}
 	}
 
@@ -2663,14 +2670,13 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 	 * like in a sequential scan. I'm not sure which is better.
 	 */
 	ntuples = 0;
-	zsbt_begin_scan(scan->rs_scan.rs_rd, RelationGetDescr(scan->rs_scan.rs_rd),
-					ZS_META_ATTRIBUTE_NUM,
-					ZSTidFromBlkOff(tid_blkno, 1),
-					ZSTidFromBlkOff(tid_blkno + 1, 1),
-					scan->rs_scan.rs_snapshot,
-					&btree_scan);
+	zsbt_tid_begin_scan(scan->rs_scan.rs_rd,
+						ZSTidFromBlkOff(tid_blkno, 1),
+						ZSTidFromBlkOff(tid_blkno + 1, 1),
+						scan->rs_scan.rs_snapshot,
+						&btree_scan);
 	btree_scan.serializable = true;
-	while ((tid = zsbt_scan_next_tid(&btree_scan)) != InvalidZSTid)
+	while ((tid = zsbt_tid_scan_next(&btree_scan)) != InvalidZSTid)
 	{
 		ItemPointerData itemptr;
 
@@ -2711,7 +2717,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 		 */
 		PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot);
 	}
-	zsbt_end_scan(&btree_scan);
+	zsbt_tid_end_scan(&btree_scan);
 
 	if (ntuples)
 	{
@@ -2724,13 +2730,12 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 			Datum	   *datums = scan->bmscan_datums[i];
 			bool	   *isnulls = scan->bmscan_isnulls[i];
 
-			zsbt_begin_scan(scan->rs_scan.rs_rd,
-							RelationGetDescr(scan->rs_scan.rs_rd),
-							natt,
-							ZSTidFromBlkOff(tid_blkno, 1),
-							ZSTidFromBlkOff(tid_blkno + 1, 1),
-							scan->rs_scan.rs_snapshot,
-							&btree_scan);
+			zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
+								 RelationGetDescr(scan->rs_scan.rs_rd),
+								 natt,
+								 ZSTidFromBlkOff(tid_blkno, 1),
+								 ZSTidFromBlkOff(tid_blkno + 1, 1),
+								 &btree_scan);
 			for (int n = 0; n < ntuples; n++)
 			{
 				if (!zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, scan->bmscan_tids[n]))
@@ -2744,7 +2749,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 				datums[n] = datum;
 				isnulls[n] = isnull;
 			}
-			zsbt_end_scan(&btree_scan);
+			zsbt_attr_end_scan(&btree_scan);
 		}
 	}
 	scan->bmscan_nexttuple = 0;
@@ -2823,7 +2828,7 @@ zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstat
 		 * get the max tid once and store it, used to calculate max blocks to
 		 * scan either for SYSTEM or BERNOULLI sampling.
 		 */
-		scan->max_tid_to_scan = zsbt_get_last_tid(rel, ZS_META_ATTRIBUTE_NUM);
+		scan->max_tid_to_scan = zsbt_get_last_tid(rel);
 		/*
 		 * TODO: should get lowest tid instead of starting from 0
 		 */
@@ -2853,20 +2858,18 @@ zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstat
 	Assert(BlockNumberIsValid(blockno));
 
 	ntuples = 0;
-	zsbt_begin_scan(scan->rs_scan.rs_rd,
-					RelationGetDescr(scan->rs_scan.rs_rd),
-					ZS_META_ATTRIBUTE_NUM,
-					ZSTidFromBlkOff(blockno, 1),
-					ZSTidFromBlkOff(blockno + 1, 1),
-					scan->rs_scan.rs_snapshot,
-					&btree_scan);
-	while ((tid = zsbt_scan_next_tid(&btree_scan)) != InvalidZSTid)
+	zsbt_tid_begin_scan(scan->rs_scan.rs_rd,
+						ZSTidFromBlkOff(blockno, 1),
+						ZSTidFromBlkOff(blockno + 1, 1),
+						scan->rs_scan.rs_snapshot,
+						&btree_scan);
+	while ((tid = zsbt_tid_scan_next(&btree_scan)) != InvalidZSTid)
 	{
 		Assert(ZSTidGetBlockNumber(tid) == blockno);
 		scan->bmscan_tids[ntuples] = tid;
 		ntuples++;
 	}
-	zsbt_end_scan(&btree_scan);
+	zsbt_tid_end_scan(&btree_scan);
 
 	scan->bmscan_nexttuple = 0;
 	scan->bmscan_ntuples = ntuples;
@@ -2935,12 +2938,11 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 		Datum		datum;
 		bool        isnull;
 
-		zsbt_begin_scan(scan->rs_scan.rs_rd,
-						slot->tts_tupleDescriptor,
-						natt,
-						tid, tid + 1,
-						scan->rs_scan.rs_snapshot,
-						&btree_scan);
+		zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
+							 slot->tts_tupleDescriptor,
+							 natt,
+							 tid, tid + 1,
+							 &btree_scan);
 
 		attr = ZSBtreeScanGetAttInfo(&btree_scan);
 		if (zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, tid))
@@ -2962,7 +2964,7 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 		slot->tts_values[natt - 1] = datum;
 		slot->tts_isnull[natt - 1] = isnull;
 
-		zsbt_end_scan(&btree_scan);
+		zsbt_attr_end_scan(&btree_scan);
 	}
 	slot->tts_tid = ItemPointerFromZSTid(tid);
 	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
@@ -3069,7 +3071,7 @@ zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
 	ParallelZSScanDesc zpscan = (ParallelZSScanDesc) pscan;
 
 	zpscan->base.phs_relid = RelationGetRelid(rel);
-	zpscan->pzs_endtid = zsbt_get_last_tid(rel, ZS_META_ATTRIBUTE_NUM);
+	zpscan->pzs_endtid = zsbt_get_last_tid(rel);
 	pg_atomic_init_u64(&zpscan->pzs_allocatedtid_blk, 0);
 
 	return sizeof(ParallelZSScanDescData);

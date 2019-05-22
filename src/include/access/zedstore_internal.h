@@ -471,61 +471,52 @@ struct zs_split_stack
 	bool		recycle;	/* should the page be added to the FPM? */
 };
 
-/* prototypes for functions in zedstore_btree.c */
-extern void zsbt_multi_insert(Relation rel, AttrNumber attno,
-							  Datum *datums, bool *isnulls, zstid *tids, int ndatums,
+/* prototypes for functions in zedstore_tidpage.c */
+extern void zsbt_tid_begin_scan(Relation rel,
+								zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan);
+extern void zsbt_tid_reset_scan(ZSBtreeScan *scan, zstid starttid);
+extern void zsbt_tid_end_scan(ZSBtreeScan *scan);
+extern zstid zsbt_tid_scan_next(ZSBtreeScan *scan);
+
+extern void zsbt_tid_multi_insert(Relation rel,
+							  zstid *tids, int ndatums,
 							  TransactionId xid, CommandId cid, uint32 speculative_token, ZSUndoRecPtr prevundoptr);
-extern TM_Result zsbt_delete(Relation rel, AttrNumber attno, zstid tid,
-							 TransactionId xid, CommandId cid,
-							 Snapshot snapshot, Snapshot crosscheck, bool wait,
-							 TM_FailureData *hufd, bool changingPart);
-extern TM_Result zsbt_update(Relation rel, AttrNumber attno, zstid otid,
-							 Datum newdatum, bool newisnull, TransactionId xid,
-							 CommandId cid, bool key_update, Snapshot snapshot, Snapshot crosscheck,
-							 bool wait, TM_FailureData *hufd, zstid *newtid_p);
-extern void zsbt_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete);
-extern void zsbt_mark_item_dead(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr);
-extern void zsbt_remove_item(Relation rel, AttrNumber attno, zstid tid);
-extern TM_Result zsbt_lock_item(Relation rel, AttrNumber attno, zstid tid,
+extern TM_Result zsbt_tid_delete(Relation rel, zstid tid,
+								 TransactionId xid, CommandId cid,
+								 Snapshot snapshot, Snapshot crosscheck, bool wait,
+								 TM_FailureData *hufd, bool changingPart);
+extern TM_Result zsbt_tid_update(Relation rel, zstid otid,
+								 TransactionId xid,
+								 CommandId cid, bool key_update, Snapshot snapshot, Snapshot crosscheck,
+								 bool wait, TM_FailureData *hufd, zstid *newtid_p);
+extern void zsbt_tid_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete);
+extern void zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr undoptr);
+extern TM_Result zsbt_tid_lock(Relation rel, zstid tid,
 			   TransactionId xid, CommandId cid,
 								LockTupleMode lockmode, Snapshot snapshot, TM_FailureData *hufd, zstid *next_tid);
-extern void zsbt_undo_item_deletion(Relation rel, AttrNumber attno, zstid tid, ZSUndoRecPtr undoptr);
-extern void zsbt_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
-							zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan);
-extern bool zsbt_scan_next(ZSBtreeScan *scan);
-extern void zsbt_reset_scan(ZSBtreeScan *scan, zstid starttid);
-extern void zsbt_end_scan(ZSBtreeScan *scan);
-extern zstid zsbt_get_last_tid(Relation rel, AttrNumber attno);
+extern void zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr);
+extern zstid zsbt_get_last_tid(Relation rel);
 extern void zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot);
 
-/*
- * Return the next visible TID in a scan.
- *
- * This should be used only on the "meta" attribute. To get the the actualy
- * values of the row, use zsbt_scan_next_fetch()
- */
-static inline zstid
-zsbt_scan_next_tid(ZSBtreeScan *scan)
-{
-	if (!scan->active)
-		return InvalidZSTid;
+/* prototypes for functions in zedstore_attrpage.c */
+extern void zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
+								zstid starttid, zstid endtid, ZSBtreeScan *scan);
+extern void zsbt_attr_reset_scan(ZSBtreeScan *scan, zstid starttid);
+extern void zsbt_attr_end_scan(ZSBtreeScan *scan);
+extern bool zsbt_attr_scan_next(ZSBtreeScan *scan);
 
-	do
-	{
-		/* If we already have a value in scan->array_*, return that. */
-		if (scan->array_elements_left > 0)
-		{
-			zstid		tid;
+extern void zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
+							  Datum *datums, bool *isnulls, zstid *tids, int ndatums);
 
-			tid = scan->nexttid++;
-			scan->array_elements_left--;
-
-			return tid;
-		}
-	} while(zsbt_scan_next(scan));
-
-	return InvalidZSTid;
-}
+/* prototypes for functions in zedstore_btree.c */
+extern zs_split_stack *zsbt_newroot(Relation rel, AttrNumber attno, int level, List *downlinks);
+extern zs_split_stack *zsbt_insert_downlinks(Relation rel, AttrNumber attno,
+					  zstid leftlokey, BlockNumber leftblkno, int level,
+					  List *downlinks);
+extern void zsbt_attr_remove(Relation rel, AttrNumber attno, zstid tid);
+extern zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level);
+extern Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
+extern bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf);
 
 static inline void
 zsbt_scan_skip(ZSBtreeScan *scan, zstid tid)
@@ -588,7 +579,7 @@ zsbt_scan_next_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 			return true;
 		}
 		/* Advance the scan, and check again. */
-	} while (zsbt_scan_next(scan));
+	} while (zsbt_attr_scan_next(scan));
 
 	return false;
 }

@@ -154,17 +154,16 @@ tts_zedstore_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
 		recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 
 		/* Use the meta-data tree for the visibility information. */
-		zsbt_begin_scan(rel, slot->tts_tupleDescriptor, ZS_META_ATTRIBUTE_NUM, tid,
-						tid + 1, SnapshotAny, &btree_scan);
+		zsbt_tid_begin_scan(rel, tid, tid + 1, SnapshotAny, &btree_scan);
 
-		found = zsbt_scan_next_tid(&btree_scan) != InvalidZSTid;
+		found = zsbt_tid_scan_next(&btree_scan) != InvalidZSTid;
 		if (!found)
 			elog(ERROR, "could not find zedstore tuple (%u, %u)",
 				 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid));
 
 		zs_get_xmin_cmin(rel, recent_oldest_undo, tid, btree_scan.array_undoptr, &xmin, &cmin);
 
-		zsbt_end_scan(&btree_scan);
+		zsbt_tid_end_scan(&btree_scan);
 
 		table_close(rel, NoLock);
 

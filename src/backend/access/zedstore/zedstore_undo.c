@@ -429,14 +429,14 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 			 * from removing index entries for new items, too.
 			 */
 			for (int i = 0; i < trimstats->num_dead_tuples; i++)
-				zsbt_mark_item_dead(rel, ZS_META_ATTRIBUTE_NUM,
-									ZSTidFromItemPointer(trimstats->dead_tuples[i]),
-									reaped_upto);
+				zsbt_tid_mark_dead(rel,
+								   ZSTidFromItemPointer(trimstats->dead_tuples[i]),
+								   reaped_upto);
 
 			for (int attno = 1; attno <= RelationGetNumberOfAttributes(rel); attno++)
 			{
 				for (int i = 0; i < trimstats->num_dead_tuples; i++)
-					zsbt_remove_item(rel, attno, ZSTidFromItemPointer(trimstats->dead_tuples[i]));
+					zsbt_attr_remove(rel, attno, ZSTidFromItemPointer(trimstats->dead_tuples[i]));
 			}
 		}
 
@@ -738,7 +738,7 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 						if (trimstats->max_dead_tuples == 0)
 							trimstats->dead_tuples_overflowed = true;
 						else
-							zsbt_undo_item_deletion(rel, ZS_META_ATTRIBUTE_NUM, undorec->tid, undorec->undorecptr);
+							zsbt_tid_undo_deletion(rel, undorec->tid, undorec->undorecptr);
 					}
 					break;
 				case ZSUNDO_TYPE_UPDATE:
