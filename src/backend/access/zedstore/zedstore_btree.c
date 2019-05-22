@@ -1,22 +1,16 @@
 /*
  * zedstore_btree.c
- *		Routines for handling B-trees structures in ZedStore
+ *		Common routines for handling TID and attibute B-tree structures
  *
- * A Zedstore table consists of multiple B-trees, one for each attribute. The
- * functions in this file deal with one B-tree at a time, it is the caller's
- * responsibility to tie together the scans of each btree.
+ * A Zedstore table consists of multiple B-trees, one to store TIDs and
+ * visibility information of the rows, and one tree for each attribute,
+ * to hold the data. The TID and attribute trees differ at the leaf
+ * level, but the internal pages have the same layout. This file contains
+ * routines to deal with internal pages, and some other common
+ * functionality.
  *
- * Operations:
- *
- * - Sequential scan in TID order
- *  - must be efficient with scanning multiple trees in sync
- *
- * - random lookups, by TID (for index scan)
- *
- * - range scans by TID (for bitmap index scan)
- *
- * NOTES:
- * - Locking order: child before parent, left before right
+ * When dealing with the TID tree, pass ZS_META_ATTRIBUTE_NUM as the
+ * attribute number.
  *
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -26,16 +20,9 @@
  */
 #include "postgres.h"
 
-#include "access/tableam.h"
-#include "access/xact.h"
-#include "access/zedstore_compression.h"
 #include "access/zedstore_internal.h"
-#include "access/zedstore_undo.h"
-#include "miscadmin.h"
 #include "storage/bufmgr.h"
-#include "storage/predicate.h"
 #include "storage/procarray.h"
-#include "utils/datum.h"
 #include "utils/rel.h"
 
 /* prototypes for local functions */
@@ -45,13 +32,10 @@ static zs_split_stack *zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer l
 
 static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems);
 
-/* ----------------------------------------------------------------
- *						 Internal routines
- * ----------------------------------------------------------------
- */
-
 /*
- * Find the leaf page containing the given key TID.
+ * Find the page containing the given key TID at the given level.
+ *
+ * Level 0 means leaf. The returned buffer is exclusive-locked.
  */
 Buffer
 zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly)

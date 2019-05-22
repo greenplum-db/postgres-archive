@@ -26,16 +26,11 @@
  */
 #include "postgres.h"
 
-#include "access/tableam.h"
-#include "access/xact.h"
 #include "access/zedstore_compression.h"
 #include "access/zedstore_internal.h"
 #include "access/zedstore_undo.h"
-#include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
-#include "storage/procarray.h"
-#include "utils/datum.h"
 #include "utils/rel.h"
 
 /* prototypes for local functions */

@@ -26,15 +26,11 @@
  */
 #include "postgres.h"
 
-#include "access/tableam.h"
-#include "access/xact.h"
 #include "access/zedstore_compression.h"
 #include "access/zedstore_internal.h"
 #include "access/zedstore_undo.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
-#include "storage/predicate.h"
-#include "storage/procarray.h"
 #include "utils/datum.h"
 #include "utils/rel.h"
 
@@ -284,12 +280,11 @@ zsbt_attr_scan_next(ZSBtreeScan *scan)
 	OffsetNumber off;
 	OffsetNumber maxoff;
 	BlockNumber	next;
-	bool		visible;
 
 	Assert(scan->active);
 
 	/*
-	 * Process items, until we find something that is visible to the snapshot.
+	 * Advance to the next TID >= nexttid.
 	 *
 	 * This advances scan->nexttid as it goes.
 	 */
@@ -313,7 +308,6 @@ zsbt_attr_scan_next(ZSBtreeScan *scan)
 		{
 			zstid		lasttid;
 			ZSBtreeItem *uitem;
-			TransactionId obsoleting_xid;
 
 			uitem = zs_decompress_read_item(&scan->decompressor);
 
@@ -333,16 +327,6 @@ zsbt_attr_scan_next(ZSBtreeScan *scan)
 			if (uitem->t_tid >= scan->endtid)
 				break;
 
-			visible = zs_SatisfiesVisibility(scan, uitem, &obsoleting_xid, NULL);
-
-			if (scan->serializable && TransactionIdIsValid(obsoleting_xid))
-				CheckForSerializableConflictOut(scan->rel, obsoleting_xid, scan->snapshot);
-
-			if (!visible)
-			{
-				scan->nexttid = lasttid + 1;
-				continue;
-			}
 			if ((uitem->t_flags & ZSBT_ARRAY) != 0)
 			{
 				/* no need to make a copy, because the uncompressed buffer
@@ -466,18 +450,6 @@ zsbt_attr_scan_next(ZSBtreeScan *scan)
 			}
 			else
 			{
-				TransactionId obsoleting_xid;
-
-				visible = zs_SatisfiesVisibility(scan, item, &obsoleting_xid, NULL);
-
-				if (!visible)
-				{
-					if (scan->serializable && TransactionIdIsValid(obsoleting_xid))
-						CheckForSerializableConflictOut(scan->rel, obsoleting_xid, scan->snapshot);
-					scan->nexttid = lasttid + 1;
-					continue;
-				}
-
 				if ((item->t_flags & ZSBT_ARRAY) != 0)
 				{
 					/* copy the item, because we can't hold a lock on the page  */
