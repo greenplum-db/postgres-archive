@@ -349,6 +349,7 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 	int			nindexes;
 	IndexBulkDeleteResult **indstats;
 	BlockNumber	nblocks;
+	Form_pg_class pgcform;
 
 	nblocks = RelationGetNumberOfBlocks(rel);
 	if (nblocks == 0)
@@ -460,8 +461,27 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 
 	/* Done with indexes */
 	vac_close_indexes(nindexes, Irel, NoLock);
-}
 
+	/*
+	 * Update pg_class to reflect new info we know. The main thing we know for
+	 * sure here is relhasindex or not currently. Using OldestXmin as new
+	 * frozenxid. And since we don't now the new multixid passing it as
+	 * invalid to avoid update. Plus, using false for relallisvisible as don't
+	 * know that either.
+	 *
+	 * FIXME: pass correct numbers for relpages, reltuples and other
+	 * arguments.
+	 */
+	pgcform = RelationGetForm(rel);
+	vac_update_relstats(rel,
+						pgcform->relpages,
+						pgcform->reltuples,
+						false,
+						nindexes > 0,
+						OldestXmin,
+						InvalidMultiXactId,
+						false);
+}
 
 /*
  * lazy_space_alloc - space allocation decisions for lazy vacuum
