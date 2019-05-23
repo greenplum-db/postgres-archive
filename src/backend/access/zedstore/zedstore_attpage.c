@@ -28,7 +28,6 @@
 
 #include "access/zedstore_compression.h"
 #include "access/zedstore_internal.h"
-#include "access/zedstore_undo.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "utils/datum.h"
@@ -37,13 +36,13 @@
 /* prototypes for local functions */
 static void zsbt_attr_recompress_replace(Relation rel, AttrNumber attno,
 										 Buffer oldbuf, List *items);
-static ZSSingleBtreeItem *zsbt_attr_fetch(Relation rel, AttrNumber attno,
-		   zstid tid, Buffer *buf_p);
+static bool zsbt_attr_exists(Relation rel, AttrNumber attno,
+							 zstid tid, Buffer *buf_p);
 static void zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
-								   zstid oldtid, ZSBtreeItem *replacementitem,
+								   zstid oldtid, ZSAttributeItem *replacementitem,
 								   List *newitems);
 static Size zsbt_compute_data_size(Form_pg_attribute atti, Datum val, bool isnull);
-static ZSBtreeItem *zsbt_attr_create_item(Form_pg_attribute att, zstid tid,
+static ZSAttributeItem *zsbt_attr_create_item(Form_pg_attribute att, zstid tid,
 				 int nelements, Datum *datums,
 				 char *dataptr, Size datasz, bool isnull);
 
@@ -73,7 +72,7 @@ zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid star
 	scan->endtid = endtid;
 	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 	memset(&scan->array_undoptr, 0, sizeof(scan->array_undoptr));
-	scan->array_datums = palloc(sizeof(Datum));
+	scan->array_datums = MemoryContextAlloc(scan->context, sizeof(Datum));
 	scan->array_datums_allocated_size = 1;
 	scan->array_elements_left = 0;
 
@@ -133,11 +132,11 @@ zsbt_attr_end_scan(ZSBtreeScan *scan)
  * array item into the scan->array_* fields.
  */
 static void
-zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
+zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
 {
 	int			nelements = aitem->t_nelements;
 	zstid		tid = aitem->t_tid;
-	bool		isnull = (aitem->t_flags & ZSBT_NULL) != 0;
+	bool		isnull = (aitem->t_flags & ZSBT_ATTR_NULL) != 0;
 	char	   *p = aitem->t_payload;
 
 	/* skip over elements that we are not interested in */
@@ -153,7 +152,14 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 			else
 			{
 				p = (Pointer) att_align_pointer(p, attr->attalign, attr->attlen, p);
-				p = att_addlength_pointer(p, attr->attlen, p);
+
+				if (attr->attlen == -1 &&
+					VARATT_IS_EXTERNAL(p) && VARTAG_EXTERNAL(p) == VARTAG_ZEDSTORE)
+				{
+					p += sizeof(varatt_zs_toastptr);
+				}
+				else
+					p = att_addlength_pointer(p, attr->attlen, p);
 			}
 		}
 		tid++;
@@ -170,7 +176,7 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 	{
 		if (scan->array_datums)
 			pfree(scan->array_datums);
-		scan->array_datums = palloc(nelements * sizeof(Datum));
+		scan->array_datums = MemoryContextAlloc(scan->context, nelements * sizeof(Datum));
 		scan->array_datums_allocated_size = nelements;
 	}
 
@@ -244,9 +250,12 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 		{
 			for (int i = 0; i < nelements; i++)
 			{
-				p = (Pointer) att_align_pointer(p, attr->attalign, attr->attlen, p);
+				p = (Pointer) att_align_pointer(p, attr->attalign, attlen, p);
 				scan->array_datums[i] = PointerGetDatum(p);
-				p = att_addlength_pointer(p, attr->attlen, p);
+				if (VARATT_IS_EXTERNAL(p) && VARTAG_EXTERNAL(p) == VARTAG_ZEDSTORE)
+					p += sizeof(varatt_zs_toastptr);
+				else
+					p = att_addlength_pointer(p, attlen, p);
 			}
 		}
 		else
@@ -255,9 +264,10 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSArrayBtreeItem *aitem)
 			elog(ERROR, "cstrings not supported");
 		}
 	}
-	scan->array_undoptr = aitem->t_undo_ptr;
 	scan->array_next_datum = &scan->array_datums[0];
 	scan->array_elements_left = nelements;
+	if (scan->nexttid < tid)
+		scan->nexttid = tid;
 }
 
 /*
@@ -294,9 +304,7 @@ zsbt_attr_scan_next(ZSBtreeScan *scan)
 		 * If we are still processing an array item, return next element from it.
 		 */
 		if (scan->array_elements_left > 0)
-		{
 			return true;
-		}
 
 		/*
 		 * If we are still processing a compressed item, process the next item
@@ -307,7 +315,7 @@ zsbt_attr_scan_next(ZSBtreeScan *scan)
 		if (scan->has_decompressed)
 		{
 			zstid		lasttid;
-			ZSBtreeItem *uitem;
+			ZSAttributeItem *uitem;
 
 			uitem = zs_decompress_read_item(&scan->decompressor);
 
@@ -318,49 +326,24 @@ zsbt_attr_scan_next(ZSBtreeScan *scan)
 			}
 
 			/* a compressed item cannot contain nested compressed items */
-			Assert((uitem->t_flags & ZSBT_COMPRESSED) == 0);
+			Assert((uitem->t_flags & ZSBT_ATTR_COMPRESSED) == 0);
 
-			lasttid = zsbt_item_lasttid(uitem);
+			lasttid = zsbt_attr_item_lasttid(uitem);
 			if (lasttid < scan->nexttid)
 				continue;
 
 			if (uitem->t_tid >= scan->endtid)
 				break;
 
-			if ((uitem->t_flags & ZSBT_ARRAY) != 0)
-			{
-				/* no need to make a copy, because the uncompressed buffer
-				 * is already a copy */
-				ZSArrayBtreeItem *aitem = (ZSArrayBtreeItem *) uitem;
+			/* no need to make a copy, because the uncompressed buffer
+			 * is already a copy */
 
-				zsbt_attr_scan_extract_array(scan, aitem);
-				continue;
-			}
-			else
-			{
-				/* single item */
-				ZSSingleBtreeItem *sitem = (ZSSingleBtreeItem *) uitem;
-				Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
-
-				scan->nexttid = sitem->t_tid;
-				scan->array_undoptr = sitem->t_undo_ptr;
-				scan->array_elements_left = 1;
-				scan->array_next_datum = &scan->array_datums[0];
-				if (sitem->t_flags & ZSBT_NULL)
-					scan->array_isnull = true;
-				else
-				{
-					scan->array_isnull = false;
-					scan->array_datums[0] = fetch_att(sitem->t_payload, attr->attbyval, attr->attlen);
-					/* no need to copy, because the uncompression buffer is a copy already */
-					/* FIXME: do we need to copy anyway, to make sure it's aligned correctly? */
-				}
-
-				if (buf_is_locked)
-					LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
-				buf_is_locked = false;
-				return true;
-			}
+			/*
+			 * XXX: currently, there's only one kind of an item, but we'll probably get
+			 * different more or less compact formats in the future.
+			 */
+			zsbt_attr_scan_extract_array(scan, (ZSAttributeArrayItem *) uitem);
+			continue;
 		}
 
 		/*
@@ -422,10 +405,10 @@ zsbt_attr_scan_next(ZSBtreeScan *scan)
 		for (off = FirstOffsetNumber; off <= maxoff; off++)
 		{
 			ItemId		iid = PageGetItemId(page, off);
-			ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
+			ZSAttributeItem *item = (ZSAttributeItem *) PageGetItem(page, iid);
 			zstid		lasttid;
 
-			lasttid = zsbt_item_lasttid(item);
+			lasttid = zsbt_attr_item_lasttid(item);
 
 			if (scan->nexttid > lasttid)
 				continue;
@@ -436,9 +419,9 @@ zsbt_attr_scan_next(ZSBtreeScan *scan)
 				break;
 			}
 
-			if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+			if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
 			{
-				ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+				ZSAttributeCompressedItem *citem = (ZSAttributeCompressedItem *) item;
 				MemoryContext oldcxt = MemoryContextSwitchTo(scan->context);
 
 				zs_decompress_chunk(&scan->decompressor, citem);
@@ -450,44 +433,19 @@ zsbt_attr_scan_next(ZSBtreeScan *scan)
 			}
 			else
 			{
-				if ((item->t_flags & ZSBT_ARRAY) != 0)
+				/* copy the item, because we can't hold a lock on the page  */
+				ZSAttributeArrayItem *aitem;
+
+				aitem = MemoryContextAlloc(scan->context, item->t_size);
+				memcpy(aitem, item, item->t_size);
+
+				zsbt_attr_scan_extract_array(scan, aitem);
+
+				if (scan->array_elements_left > 0)
 				{
-					/* copy the item, because we can't hold a lock on the page  */
-					ZSArrayBtreeItem *aitem;
-
-					aitem = MemoryContextAlloc(scan->context, item->t_size);
-					memcpy(aitem, item, item->t_size);
-
-					zsbt_attr_scan_extract_array(scan, aitem);
-
-					if (scan->array_elements_left > 0)
-					{
-						LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
-						buf_is_locked = false;
-						break;
-					}
-				}
-				else
-				{
-					/* single item */
-					ZSSingleBtreeItem *sitem = (ZSSingleBtreeItem *) item;
-					Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
-
-					scan->nexttid = sitem->t_tid;
-					scan->array_undoptr = sitem->t_undo_ptr;
-					scan->array_elements_left = 1;
-					scan->array_next_datum = &scan->array_datums[0];
-					if (item->t_flags & ZSBT_NULL)
-						scan->array_isnull = true;
-					else
-					{
-						scan->array_isnull = false;
-						scan->array_datums[0] = fetch_att(sitem->t_payload, attr->attbyval, attr->attlen);
-						scan->array_datums[0] = zs_datumCopy(scan->array_datums[0], attr->attbyval, attr->attlen);
-					}
 					LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
 					buf_is_locked = false;
-					return true;
+					break;
 				}
 			}
 		}
@@ -557,7 +515,7 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 	{
 		Size		datasz;
 		int			j;
-		ZSBtreeItem *newitem;
+		ZSAttributeItem *newitem;
 
 		/*
 		 * Try to collapse as many items as possible into an Array item.
@@ -622,11 +580,11 @@ void
 zsbt_attr_remove(Relation rel, AttrNumber attno, zstid tid)
 {
 	Buffer		buf;
-	ZSSingleBtreeItem *item;
+	bool		found;
 
 	/* Find the item to delete. (It could be compressed) */
-	item = zsbt_attr_fetch(rel, attno, tid, &buf);
-	if (item == NULL)
+	found = zsbt_attr_exists(rel, attno, tid, &buf);
+	if (!found)
 	{
 		elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), attno);
@@ -646,16 +604,16 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, zstid tid)
  */
 
 /*
- * Fetch the item with given TID. The page containing the item is kept locked, and
+ * Check if an item with given TID exists. The page containing the item is kept locked, and
  * returned to the caller in *buf_p. This is used to locate a tuple for updating
  * or deleting it.
  */
-static ZSSingleBtreeItem *
-zsbt_attr_fetch(Relation rel, AttrNumber attno, zstid tid, Buffer *buf_p)
+static bool
+zsbt_attr_exists(Relation rel, AttrNumber attno, zstid tid, Buffer *buf_p)
 {
 	Buffer		buf;
 	Page		page;
-	ZSBtreeItem *item = NULL;
+	ZSAttributeItem *item = NULL;
 	bool		found = false;
 	OffsetNumber maxoff;
 	OffsetNumber off;
@@ -673,11 +631,11 @@ zsbt_attr_fetch(Relation rel, AttrNumber attno, zstid tid, Buffer *buf_p)
 	for (off = FirstOffsetNumber; off <= maxoff; off++)
 	{
 		ItemId		iid = PageGetItemId(page, off);
-		item = (ZSBtreeItem *) PageGetItem(page, iid);
+		item = (ZSAttributeItem *) PageGetItem(page, iid);
 
-		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+		if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
 		{
-			ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+			ZSAttributeCompressedItem *citem = (ZSAttributeCompressedItem *) item;
 			ZSDecompressContext decompressor;
 
 			zs_decompress_init(&decompressor);
@@ -685,7 +643,7 @@ zsbt_attr_fetch(Relation rel, AttrNumber attno, zstid tid, Buffer *buf_p)
 
 			while ((item = zs_decompress_read_item(&decompressor)) != NULL)
 			{
-				zstid		lasttid = zsbt_item_lasttid(item);
+				zstid		lasttid = zsbt_attr_item_lasttid(item);
 
 				if (item->t_tid <= tid && lasttid >= tid)
 				{
@@ -704,7 +662,7 @@ zsbt_attr_fetch(Relation rel, AttrNumber attno, zstid tid, Buffer *buf_p)
 		}
 		else
 		{
-			zstid		lasttid = zsbt_item_lasttid(item);
+			zstid		lasttid = zsbt_attr_item_lasttid(item);
 
 			if (item->t_tid <= tid && lasttid >= tid)
 			{
@@ -716,70 +674,13 @@ zsbt_attr_fetch(Relation rel, AttrNumber attno, zstid tid, Buffer *buf_p)
 
 	if (found)
 	{
-		ZSSingleBtreeItem *result;
+		/* Found an item that covers this TID. */
+		ZSAttributeArrayItem *aitem = (ZSAttributeArrayItem *) item;
 
-		if ((item->t_flags & ZSBT_ARRAY) != 0)
-		{
-			ZSArrayBtreeItem *aitem = (ZSArrayBtreeItem *) item;
-			int			elemno = tid - aitem->t_tid;
-			char	   *dataptr = NULL;
-			int			datasz;
-			int			resultsize;
-
-			Assert(elemno < aitem->t_nelements);
-
-			if ((item->t_flags & ZSBT_NULL) == 0)
-			{
-				/*
-				 * TODO: Currently, zsbt_fetch() is called from functions
-				 * which don't have Slot, and Relation object can be trusted
-				 * for attlen and attbyval. Ideally, we wish to not rely on
-				 * Relation object and see how to decouple it. Previously, we
-				 * stored these two values in meta-page and get these values
-				 * from it but just storing them for this purpose, seems
-				 * heavy. Ideally, catalog stores those values so shouldn't
-				 * need to duplicate storing the same.
-				 */
-				TupleDesc tdesc = RelationGetDescr(rel);
-				int attlen = tdesc->attrs[attno - 1].attlen;
-				bool attbyval = tdesc->attrs[attno - 1].attbyval;
-
-				if (attlen > 0)
-				{
-					dataptr = aitem->t_payload + elemno * attlen;
-					datasz = attlen;
-				}
-				else
-				{
-					dataptr = aitem->t_payload;
-					for (int i = 0; i < elemno; i++)
-					{
-						dataptr += zs_datumGetSize(PointerGetDatum(dataptr), attbyval, attlen);
-					}
-					datasz = zs_datumGetSize(PointerGetDatum(dataptr), attbyval, attlen);
-				}
-			}
-			else
-				datasz = 0;
-
-			resultsize = offsetof(ZSSingleBtreeItem, t_payload) + datasz;
-			result = palloc(resultsize);
-			memset(result, 0, offsetof(ZSSingleBtreeItem, t_payload)); /* zero padding */
-			result->t_tid = tid;
-			result->t_flags = item->t_flags & ~ZSBT_ARRAY;
-			result->t_size = resultsize;
-			result->t_undo_ptr = aitem->t_undo_ptr;
-			if (datasz > 0)
-				memcpy(result->t_payload, dataptr, datasz);
-		}
-		else
-		{
-			/* single item */
-			result = (ZSSingleBtreeItem *) item;
-		}
+		Assert(tid - aitem->t_tid < aitem->t_nelements);
 
 		*buf_p = buf;
-		return result;
+		return true;
 	}
 	else
 	{
@@ -893,62 +794,32 @@ zsbt_compute_data_size(Form_pg_attribute atti, Datum val, bool isnull)
 }
 
 /*
- * Form a ZSBtreeItem out of the given datums, or data that's already in on-disk
+ * Form a ZSAttributeItem out of the given datums, or data that's already in on-disk
  * array format, for insertion.
- *
- * If there's more than one element, an array item is created. Otherwise, a single
- * item.
  */
-static ZSBtreeItem *
+static ZSAttributeItem *
 zsbt_attr_create_item(Form_pg_attribute att, zstid tid,
 				 int nelements, Datum *datums,
 				 char *datasrc, Size datasz, bool isnull)
 {
-	ZSBtreeItem *result;
+	ZSAttributeArrayItem *newitem;
 	Size		itemsz;
 	char	   *databegin;
 
 	Assert(nelements > 0);
 
-	if (nelements > 1)
-	{
-		ZSArrayBtreeItem *newitem;
+	itemsz = offsetof(ZSAttributeArrayItem, t_payload) + datasz;
 
-		itemsz = offsetof(ZSArrayBtreeItem, t_payload) + datasz;
+	newitem = palloc(itemsz);
+	newitem->t_tid = tid;
+	newitem->t_size = itemsz;
+	newitem->t_flags = 0;
+	if (isnull)
+		newitem->t_flags |= ZSBT_ATTR_NULL;
+	newitem->t_nelements = nelements;
+	newitem->t_padding = 0; /* zero padding */
 
-		newitem = palloc(itemsz);
-		memset(newitem, 0, offsetof(ZSArrayBtreeItem, t_payload)); /* zero padding */
-		newitem->t_tid = tid;
-		newitem->t_size = itemsz;
-		newitem->t_flags = ZSBT_ARRAY;
-		if (isnull)
-			newitem->t_flags |= ZSBT_NULL;
-		newitem->t_nelements = nelements;
-		ZSUndoRecPtrInitialize(&newitem->t_undo_ptr);
-
-		databegin = newitem->t_payload;
-
-		result = (ZSBtreeItem *) newitem;
-	}
-	else
-	{
-		ZSSingleBtreeItem *newitem;
-
-		itemsz = offsetof(ZSSingleBtreeItem, t_payload) + datasz;
-
-		newitem = palloc(itemsz);
-		memset(newitem, 0, offsetof(ZSSingleBtreeItem, t_payload)); /* zero padding */
-		newitem->t_tid = tid;
-		newitem->t_flags = 0;
-		if (isnull)
-			newitem->t_flags |= ZSBT_NULL;
-		newitem->t_size = itemsz;
-		ZSUndoRecPtrInitialize(&newitem->t_undo_ptr);
-
-		databegin = newitem->t_payload;
-
-		result = (ZSBtreeItem *) newitem;
-	}
+	databegin = newitem->t_payload;
 
 	/*
 	 * Copy the data.
@@ -1059,7 +930,7 @@ zsbt_attr_create_item(Form_pg_attribute att, zstid tid,
 			memcpy(data, datasrc, datasz);
 	}
 
-	return result;
+	return (ZSAttributeItem *) newitem;
 }
 
 /*
@@ -1078,7 +949,7 @@ zsbt_attr_create_item(Form_pg_attribute att, zstid tid,
 static void
 zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 					   zstid oldtid,
-					   ZSBtreeItem *replacementitem,
+					   ZSAttributeItem *replacementitem,
 					   List       *newitems)
 {
 	Form_pg_attribute attr;
@@ -1094,18 +965,9 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 	bool		decompressor_used = false;
 	bool		decompressing;
 
-	if (attno == ZS_META_ATTRIBUTE_NUM)
-	{
-		attr = NULL;
-		attlen = 0;
-		attbyval = true;
-	}
-	else
-	{
-		attr = &rel->rd_att->attrs[attno - 1];
-		attlen = attr->attlen;
-		attbyval = attr->attbyval;
-	}
+	attr = &rel->rd_att->attrs[attno - 1];
+	attlen = attr->attlen;
+	attbyval = attr->attbyval;
 
 	if (replacementitem)
 		Assert(replacementitem->t_tid == oldtid);
@@ -1122,7 +984,7 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 	off = 1;
 	for (;;)
 	{
-		ZSBtreeItem *item;
+		ZSAttributeItem *item;
 
 		/*
 		 * Get the next item to process. If we're decompressing, get the next
@@ -1141,7 +1003,7 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 		{
 			ItemId		iid = PageGetItemId(page, off);
 
-			item = (ZSBtreeItem *) PageGetItem(page, iid);
+			item = (ZSAttributeItem *) PageGetItem(page, iid);
 			off++;
 
 		}
@@ -1153,9 +1015,9 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 
 		/* we now have an item to process, either straight from the page or from
 		 * the decompressor */
-		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+		if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
 		{
-			zstid		item_lasttid = zsbt_item_lasttid(item);
+			zstid		item_lasttid = zsbt_attr_item_lasttid(item);
 
 			/* there shouldn't nested compressed items */
 			if (decompressing)
@@ -1163,7 +1025,7 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 
 			if (oldtid != InvalidZSTid && item->t_tid <= oldtid && oldtid <= item_lasttid)
 			{
-				ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) item;
+				ZSAttributeCompressedItem *citem = (ZSAttributeCompressedItem *) item;
 
 				/* Found it, this compressed item covers the target or the new TID. */
 				/* We have to decompress it, and recompress */
@@ -1181,11 +1043,11 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 				items = lappend(items, item);
 			}
 		}
-		else if ((item->t_flags & ZSBT_ARRAY) != 0)
+		else
 		{
 			/* array item */
-			ZSArrayBtreeItem *aitem = (ZSArrayBtreeItem *) item;
-			zstid		item_lasttid = zsbt_item_lasttid(item);
+			ZSAttributeArrayItem *aitem = (ZSAttributeArrayItem *) item;
+			zstid		item_lasttid = zsbt_attr_item_lasttid(item);
 
 			if (oldtid != InvalidZSTid && item->t_tid <= oldtid && oldtid <= item_lasttid)
 			{
@@ -1196,7 +1058,7 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 				int			cutoff;
 				Size		olddatalen;
 				int			nelements = aitem->t_nelements;
-				bool		isnull = (aitem->t_flags & ZSBT_NULL) != 0;
+				bool		isnull = (aitem->t_flags & ZSBT_ATTR_NULL) != 0;
 				char	   *dataptr;
 
 				cutoff = oldtid - item->t_tid;
@@ -1205,7 +1067,7 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 				dataptr = aitem->t_payload;
 				if (cutoff > 0)
 				{
-					ZSBtreeItem *item1;
+					ZSAttributeItem *item1;
 					Size		datalen1;
 
 					datalen1 = zsbt_get_array_slice_len(attlen, attbyval, isnull,
@@ -1229,7 +1091,7 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 				/* Array slice after the target */
 				if (cutoff + 1 < nelements)
 				{
-					ZSBtreeItem *item2;
+					ZSAttributeItem *item2;
 					Size		datalen2;
 
 					datalen2 = zsbt_get_array_slice_len(attlen, attbyval, isnull,
@@ -1240,19 +1102,6 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 				}
 
 				found_old_item = true;
-			}
-			else
-				items = lappend(items, item);
-		}
-		else
-		{
-			/* single item */
-			if (oldtid != InvalidZSTid && item->t_tid == oldtid)
-			{
-				Assert(!found_old_item);
-				found_old_item = true;
-				if (replacementitem)
-					items = lappend(items, replacementitem);
 			}
 			else
 				items = lappend(items, item);
@@ -1360,7 +1209,7 @@ zsbt_attr_recompress_newpage(zsbt_attr_recompress_context *cxt, zstid nexttid, i
 }
 
 static void
-zsbt_attr_recompress_add_to_page(zsbt_attr_recompress_context *cxt, ZSBtreeItem *item)
+zsbt_attr_recompress_add_to_page(zsbt_attr_recompress_context *cxt, ZSAttributeItem *item)
 {
 	if (PageGetFreeSpace(cxt->currpage) < MAXALIGN(item->t_size))
 		zsbt_attr_recompress_newpage(cxt, item->t_tid, 0);
@@ -1375,7 +1224,7 @@ zsbt_attr_recompress_add_to_page(zsbt_attr_recompress_context *cxt, ZSBtreeItem 
 }
 
 static bool
-zsbt_attr_recompress_add_to_compressor(zsbt_attr_recompress_context *cxt, ZSBtreeItem *item)
+zsbt_attr_recompress_add_to_compressor(zsbt_attr_recompress_context *cxt, ZSAttributeItem *item)
 {
 	bool		result;
 
@@ -1396,7 +1245,7 @@ zsbt_attr_recompress_add_to_compressor(zsbt_attr_recompress_context *cxt, ZSBtre
 static void
 zsbt_attr_recompress_flush(zsbt_attr_recompress_context *cxt)
 {
-	ZSCompressedBtreeItem *citem;
+	ZSAttributeCompressedItem *citem;
 
 	if (cxt->compressed_items == 0)
 		return;
@@ -1404,7 +1253,7 @@ zsbt_attr_recompress_flush(zsbt_attr_recompress_context *cxt)
 	citem = zs_compress_finish(&cxt->compressor);
 
 	if (citem)
-		zsbt_attr_recompress_add_to_page(cxt, (ZSBtreeItem *) citem);
+		zsbt_attr_recompress_add_to_page(cxt, (ZSAttributeItem *) citem);
 	else
 	{
 		uint16 size = 0;
@@ -1417,10 +1266,10 @@ zsbt_attr_recompress_flush(zsbt_attr_recompress_context *cxt)
 		 */
 		for (int i = 0; i < cxt->compressor.nitems; i++)
 		{
-			citem = (ZSCompressedBtreeItem *) (cxt->compressor.uncompressedbuffer + size);
-			zsbt_attr_recompress_add_to_page(cxt, (ZSBtreeItem *) citem);
+			ZSAttributeItem *item = (ZSAttributeItem *) (cxt->compressor.uncompressedbuffer + size);
+			zsbt_attr_recompress_add_to_page(cxt, item);
 
-			size += MAXALIGN(citem->t_size);
+			size += MAXALIGN(item->t_size);
 		}
 	}
 
@@ -1451,12 +1300,13 @@ zsbt_attr_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List
 	ListCell   *lc;
 	zsbt_attr_recompress_context cxt;
 	ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(BufferGetPage(oldbuf));
-	ZSUndoRecPtr recent_oldest_undo = { 0 };
+	BlockNumber oldblock = BufferGetBlockNumber(oldbuf);
 	BlockNumber orignextblk;
 	zs_split_stack *stack;
 	List	   *downlinks = NIL;
 
 	orignextblk = oldopaque->zs_next;
+	Assert(orignextblk != oldblock);
 
 	cxt.currpage = NULL;
 	zs_compress_init(&cxt.compressor);
@@ -1473,21 +1323,9 @@ zsbt_attr_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List
 
 	foreach(lc, items)
 	{
-		ZSBtreeItem *item = (ZSBtreeItem *) lfirst(lc);
+		ZSAttributeItem *item = (ZSAttributeItem *) lfirst(lc);
 
-		/* We can leave out any old-enough DEAD items */
-		if ((item->t_flags & ZSBT_DEAD) != 0)
-		{
-			ZSBtreeItem *uitem = (ZSBtreeItem *) item;
-
-			if (recent_oldest_undo.counter == 0)
-				recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
-
-			if (zsbt_item_undoptr(uitem).counter <= recent_oldest_undo.counter)
-				continue;
-		}
-
-		if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+		if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
 		{
 			/* already compressed, add as it is. */
 			zsbt_attr_recompress_flush(&cxt);
@@ -1545,6 +1383,7 @@ zsbt_attr_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List
 
 		nextbuf = zspage_getnewbuf(rel, InvalidBuffer);
 		stack->next->buf = nextbuf;
+		Assert (BufferGetBlockNumber(nextbuf) != orignextblk);
 
 		thisopaque->zs_next = BufferGetBlockNumber(nextbuf);
 

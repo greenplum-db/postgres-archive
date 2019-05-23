@@ -144,8 +144,11 @@ zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buff
 		return false;
 
 	opaque = ZSBtreePageGetOpaque(page);
+
 	if (opaque->zs_page_id != ZS_BTREE_PAGE_ID)
 		return false;
+
+	Assert(opaque->zs_next != BufferGetBlockNumber(buf));
 
 	if (opaque->zs_attno != attno)
 		return false;

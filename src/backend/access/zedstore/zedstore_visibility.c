@@ -61,7 +61,8 @@ zs_tuplelock_compatible(LockTupleMode mode, LockTupleMode newmode)
  */
 TM_Result
 zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
-				   ZSUndoRecPtr recent_oldest_undo, ZSBtreeItem *item,
+				   ZSUndoRecPtr recent_oldest_undo,
+				   zstid item_tid, ZSUndoRecPtr item_undoptr,
 				   LockTupleMode mode,
 				   bool *undo_record_needed, TM_FailureData *tmfd, zstid *next_tid)
 {
@@ -69,11 +70,9 @@ zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 	ZSUndoRec  *undorec;
 	int			chain_depth = 0;
 
-	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
-
 	*undo_record_needed = true;
 
-	undo_ptr = zsbt_item_undoptr(item);
+	undo_ptr = item_undoptr;
 
 fetch_undo_record:
 	chain_depth++;
@@ -146,7 +145,7 @@ fetch_undo_record:
 		else if (!zs_tuplelock_compatible(lock_undorec->lockmode, mode) &&
 				 TransactionIdIsInProgress(undorec->xid))
 		{
-			tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
+			tmfd->ctid = ItemPointerFromZSTid(item_tid);
 			tmfd->xmax = undorec->xid;
 			tmfd->cmax = InvalidCommandId;
 			return TM_BeingModified;
@@ -170,7 +169,7 @@ fetch_undo_record:
 		{
 			if (undorec->cid >= snapshot->curcid)
 			{
-				tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
+				tmfd->ctid = ItemPointerFromZSTid(item_tid);
 				tmfd->xmax = undorec->xid;
 				tmfd->cmax = undorec->cid;
 				return TM_SelfModified;	/* deleted/updated after scan started */
@@ -181,7 +180,7 @@ fetch_undo_record:
 
 		if (TransactionIdIsInProgress(undorec->xid))
 		{
-			tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
+			tmfd->ctid = ItemPointerFromZSTid(item_tid);
 			tmfd->xmax = undorec->xid;
 			tmfd->cmax = InvalidCommandId;
 
@@ -207,7 +206,7 @@ fetch_undo_record:
 		}
 		else
 		{
-			tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
+			tmfd->ctid = ItemPointerFromZSTid(item_tid);
 			return TM_Deleted;
 		}
 	}
@@ -227,7 +226,7 @@ fetch_undo_record:
 
 			if (undorec->cid >= snapshot->curcid)
 			{
-				tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
+				tmfd->ctid = ItemPointerFromZSTid(item_tid);
 				tmfd->xmax = undorec->xid;
 				tmfd->cmax = undorec->cid;
 				return TM_SelfModified;	/* deleted/updated after scan started */
@@ -241,7 +240,7 @@ fetch_undo_record:
 			if (zs_tuplelock_compatible(old_lockmode, mode))
 				return TM_Ok;
 
-			tmfd->ctid = ItemPointerFromZSTid(item->t_tid);
+			tmfd->ctid = ItemPointerFromZSTid(item_tid);
 			tmfd->xmax = undorec->xid;
 			tmfd->cmax = InvalidCommandId;
 
@@ -274,7 +273,7 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesAny
  */
 static bool
-zs_SatisfiesAny(ZSBtreeScan *scan, ZSBtreeItem *item)
+zs_SatisfiesAny(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr)
 {
 	return true;
 }
@@ -312,7 +311,7 @@ xid_is_visible(Snapshot snapshot, TransactionId xid, CommandId cid, bool *aborte
  * Like HeapTupleSatisfiesMVCC
  */
 static bool
-zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item,
+zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr,
 				 TransactionId *obsoleting_xid, zstid *next_tid)
 {
 	Relation	rel = scan->rel;
@@ -322,10 +321,9 @@ zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSBtreeItem *item,
 	ZSUndoRec  *undorec;
 	bool		aborted;
 
-	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
 	Assert (snapshot->snapshot_type == SNAPSHOT_MVCC);
 
-	undo_ptr = zsbt_item_undoptr(item);
+	undo_ptr = item_undoptr;
 
 fetch_undo_record:
 	/* If this record is "old", then the record is visible. */
@@ -388,17 +386,16 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesSelf
  */
 static bool
-zs_SatisfiesSelf(ZSBtreeScan *scan, ZSBtreeItem *item, zstid *next_tid)
+zs_SatisfiesSelf(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr, zstid *next_tid)
 {
 	Relation	rel = scan->rel;
 	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
 	ZSUndoRec  *undorec;
 	ZSUndoRecPtr undo_ptr;
 
-	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
 	Assert (scan->snapshot->snapshot_type == SNAPSHOT_SELF);
 
-	undo_ptr = zsbt_item_undoptr(item);
+	undo_ptr = item_undoptr;
 
 fetch_undo_record:
 	if (undo_ptr.counter < recent_oldest_undo.counter)
@@ -469,7 +466,7 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesDirty
  */
 static bool
-zs_SatisfiesDirty(ZSBtreeScan *scan, ZSBtreeItem *item, zstid *next_tid)
+zs_SatisfiesDirty(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr, zstid *next_tid)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -477,13 +474,12 @@ zs_SatisfiesDirty(ZSBtreeScan *scan, ZSBtreeItem *item, zstid *next_tid)
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
 
-	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
 	Assert (snapshot->snapshot_type == SNAPSHOT_DIRTY);
 
 	snapshot->xmin = snapshot->xmax = InvalidTransactionId;
 	snapshot->speculativeToken = INVALID_SPECULATIVE_TOKEN;
 
-	undo_ptr = zsbt_item_undoptr(item);
+	undo_ptr = item_undoptr;
 
 fetch_undo_record:
 	if (undo_ptr.counter < recent_oldest_undo.counter)
@@ -565,7 +561,7 @@ fetch_undo_record:
  * surely dead to everyone, ie, vacuumable.
  */
 static bool
-zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSBtreeItem *item)
+zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr)
 {
 	Relation	rel = scan->rel;
 	TransactionId OldestXmin = scan->snapshot->xmin;
@@ -573,10 +569,10 @@ zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSBtreeItem *item)
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
 
-	Assert (scan->snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE);
+	Assert(scan->snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE);
 	Assert(TransactionIdIsValid(OldestXmin));
 
-	undo_ptr = zsbt_item_undoptr(item);
+	undo_ptr = item_undoptr;
 
 fetch_undo_record:
 
@@ -659,7 +655,7 @@ fetch_undo_record:
  * UPDATEd. *next_tid_p is set to the TID of the new row version.
  */
 bool
-zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item,
+zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr,
 					   TransactionId *obsoleting_xid, zstid *next_tid)
 {
 	ZSUndoRecPtr undo_ptr;
@@ -668,21 +664,10 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item,
 	if (next_tid)
 		*next_tid = InvalidZSTid;
 
-	/*
-	 * This works on a single or array item. Compressed items don't have
-	 * visibility information (the items inside the compressed container
-	 * do)
-	 */
-	Assert((item->t_flags & ZSBT_COMPRESSED) == 0);
-
 	/* The caller should've filled in the recent_oldest_undo pointer */
 	Assert(scan->recent_oldest_undo.counter != 0);
 
 	*obsoleting_xid = InvalidTransactionId;
-
-	/* dead items are never considered visible. */
-	if ((item->t_flags & ZSBT_DEAD) != 0)
-		return false;
 
 	/*
 	 * Items with invalid undo record are considered visible. Mostly META
@@ -694,34 +679,34 @@ zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item,
 	 * column can sometime also have items with invalid undo, see
 	 * zsbt_undo_item_deletion().
 	 */
-	undo_ptr = zsbt_item_undoptr(item);
+	undo_ptr = item_undoptr;
 	if (!IsZSUndoRecPtrValid(&undo_ptr))
 		return true;
 
 	switch (scan->snapshot->snapshot_type)
 	{
 		case SNAPSHOT_MVCC:
-			return zs_SatisfiesMVCC(scan, item, obsoleting_xid, next_tid);
+			return zs_SatisfiesMVCC(scan, item_undoptr, obsoleting_xid, next_tid);
 
 		case SNAPSHOT_SELF:
-			return zs_SatisfiesSelf(scan, item, next_tid);
+			return zs_SatisfiesSelf(scan, item_undoptr, next_tid);
 
 		case SNAPSHOT_ANY:
-			return zs_SatisfiesAny(scan, item);
+			return zs_SatisfiesAny(scan, item_undoptr);
 
 		case SNAPSHOT_TOAST:
 			elog(ERROR, "SnapshotToast not implemented in zedstore");
 			break;
 
 		case SNAPSHOT_DIRTY:
-			return zs_SatisfiesDirty(scan, item, next_tid);
+			return zs_SatisfiesDirty(scan, item_undoptr, next_tid);
 
 		case SNAPSHOT_HISTORIC_MVCC:
 			elog(ERROR, "SnapshotHistoricMVCC not implemented in zedstore yet");
 			break;
 
 		case SNAPSHOT_NON_VACUUMABLE:
-			return zs_SatisfiesNonVacuumable(scan, item);
+			return zs_SatisfiesNonVacuumable(scan, item_undoptr);
 	}
 
 	return false;				/* keep compiler quiet */

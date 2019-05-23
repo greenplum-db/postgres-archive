@@ -394,20 +394,33 @@ pg_zs_btree_pages(PG_FUNCTION_ARGS)
 			for (off = FirstOffsetNumber; off <= maxoff; off++)
 			{
 				ItemId		iid = PageGetItemId(page, off);
-				ZSBtreeItem	*item = (ZSBtreeItem *) PageGetItem(page, iid);
 
-				nitems++;
-				totalsz += item->t_size;
-
-				if ((item->t_flags & ZSBT_COMPRESSED) != 0)
+				if (opaque->zs_attno == ZS_META_ATTRIBUTE_NUM)
 				{
-					ZSCompressedBtreeItem *citem = (ZSCompressedBtreeItem *) PageGetItem(page, iid);
+					ZSTidItem	*item = (ZSTidItem *) PageGetItem(page, iid);
 
-					ncompressed++;
-					uncompressedsz += citem->t_uncompressedsize;
+					nitems++;
+					totalsz += item->t_size;
+
+					uncompressedsz += item->t_size;
 				}
 				else
-					uncompressedsz += item->t_size;
+				{
+					ZSAttributeItem	*item = (ZSAttributeItem *) PageGetItem(page, iid);
+
+					nitems++;
+					totalsz += item->t_size;
+
+					if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
+					{
+						ZSAttributeCompressedItem *citem = (ZSAttributeCompressedItem *) PageGetItem(page, iid);
+
+						ncompressed++;
+						uncompressedsz += citem->t_uncompressedsize;
+					}
+					else
+						uncompressedsz += item->t_size;
+				}
 			}
 		}
 		else

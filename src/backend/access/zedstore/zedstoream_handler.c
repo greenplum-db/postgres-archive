@@ -844,7 +844,7 @@ retry:
 							 xid, cid, key_update, snapshot, crosscheck,
 							 wait, hufd, &newtid);
 
-	*update_indexes = result == TM_Ok && key_update;
+	*update_indexes = (result == TM_Ok);
 	if (result == TM_Ok)
 	{
 		/*
@@ -1227,7 +1227,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 				Form_pg_attribute attr = ZSBtreeScanGetAttInfo(btscan);
 				int			natt;
 
-				if (!zsbt_scan_next_fetch(btscan, &datum, &isnull, this_tid))
+				if (!zsbt_attr_fetch(btscan, &datum, &isnull, this_tid))
 					zsbt_fill_missing_attribute_value(btscan, &datum, &isnull);
 
 				/*
@@ -1248,12 +1248,9 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 					Assert (VARATT_IS_1B(datum) || INTALIGN(datum) == datum);
 				}
 
-				if (natt != ZS_META_ATTRIBUTE_NUM)
-				{
-					Assert(natt > 0);
-					slot_values[natt - 1] = datum;
-					slot_isnull[natt - 1] = isnull;
-				}
+				Assert(natt > 0);
+				slot_values[natt - 1] = datum;
+				slot_isnull[natt - 1] = isnull;
 			}
 		}
 
@@ -1467,7 +1464,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 								 btscan);
 
 			attr = ZSBtreeScanGetAttInfo(btscan);
-			if (zsbt_scan_next_fetch(btscan, &datum, &isnull, tid))
+			if (zsbt_attr_fetch(btscan, &datum, &isnull, tid))
 			{
 				/*
 				 * flatten any ZS-TOASTed values, because the rest of the system
@@ -2335,7 +2332,7 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 					if (indexScan)
 						zsbt_attr_reset_scan(&attr_scans[attno], old_tid);
 
-					if (!zsbt_scan_next_fetch(&attr_scans[attno], &datum, &isnull, old_tid))
+					if (!zsbt_attr_fetch(&attr_scans[attno], &datum, &isnull, old_tid))
 						zsbt_fill_missing_attribute_value(&attr_scans[attno], &datum, &isnull);
 				}
 
@@ -2432,7 +2429,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 			for (int n = 0; n < ntuples; n++)
 			{
 				zstid       tid = scan->bmscan_tids[n];
-				if (zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, tid))
+				if (zsbt_attr_fetch(&btree_scan, &datum, &isnull, tid))
 				{
 					Assert(ZSTidGetBlockNumber(tid) == blockno);
 				}
@@ -2748,7 +2745,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 								 &btree_scan);
 			for (int n = 0; n < ntuples; n++)
 			{
-				if (!zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, scan->bmscan_tids[n]))
+				if (!zsbt_attr_fetch(&btree_scan, &datum, &isnull, scan->bmscan_tids[n]))
 					zsbt_fill_missing_attribute_value(&btree_scan, &datum, &isnull);
 
 				/* have to make a copy because we close the scan immediately. */
@@ -2955,7 +2952,7 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 							 &btree_scan);
 
 		attr = ZSBtreeScanGetAttInfo(&btree_scan);
-		if (zsbt_scan_next_fetch(&btree_scan, &datum, &isnull, tid))
+		if (zsbt_attr_fetch(&btree_scan, &datum, &isnull, tid))
 		{
 			Assert(ZSTidGetBlockNumber(tid) == blockno);
 		}

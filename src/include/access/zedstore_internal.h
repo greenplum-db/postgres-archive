@@ -150,6 +150,90 @@ ZSBtreeInternalPageIsFull(Page page)
 /*
  * Leaf B-tree page layout
  *
+ * FIXME
+ * Leaf pages are packed with ZSAttributeItems. There are three kinds of items:
+ *
+ * 1. Single item, holds one tuple (or rather, one datum).
+ *
+ * 2. "Array item", holds multiple datums, with consecutive TIDs and the same
+ *    visibility information. An array item saves space compared to multiple
+ *    single items, by leaving out repetitive UNDO and TID fields. An array
+ *    item cannot mix NULLs and non-NULLs, so the ZSBT_NULL flag applies to
+ *    all elements.
+ *
+ * 3. "Compressed item", which can hold multiple single or array items.
+ *
+ * A single or array item can furthermore be marked as DEAD. A dead item
+ * prevents the TID (or TID range, for an array item) from being reused. It's
+ * used during VACUUM, to mark items for which there are no index pointers
+ * anymore. But it cannot be removed until the undo record has been trimmed
+ * away, because if the TID was reused for a new record, vacuum might remove
+ * the new tuple version instead. After t_undo_ptr becomes older than "oldest
+ * undo ptr", the item can be removed and the TID recycled.
+ *
+ * TODO: squeeze harder: eliminate padding, use high bits of t_tid for flags or size
+ */
+typedef struct ZSAttributeItem
+{
+	zstid		t_tid;
+	uint16		t_size;
+	uint16		t_flags;
+} ZSAttributeItem;
+
+typedef struct ZSAttributeArrayItem
+{
+	/* these fields must match ZSAttributeItem */
+	zstid		t_tid;
+	uint16		t_size;
+	uint16		t_flags;
+
+	uint16		t_nelements;
+
+	uint16		t_padding; /* to make t_payload MAXALIGNed */
+	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
+} ZSAttributeArrayItem;
+
+typedef struct ZSAttributeCompressedItem
+{
+	/* these fields must match ZSAttributeItem */
+	zstid		t_tid;
+	uint16		t_size;
+	uint16		t_flags;
+
+	uint16		t_uncompressedsize;
+	zstid		t_lasttid;	/* inclusive */
+
+	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
+} ZSAttributeCompressedItem;
+
+#define ZSBT_ATTR_COMPRESSED		0x0001
+#define ZSBT_ATTR_NULL			0x0010
+
+/*
+ * Get the last TID that the given item spans.
+ *
+ * For an uncompressed array item, it's the TID of the last element. For
+ * a compressed item, it's the last TID of the last item it contains (which
+ * is stored explicitly in the item header).
+ */
+static inline zstid
+zsbt_attr_item_lasttid(ZSAttributeItem *item)
+{
+	if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
+		return ((ZSAttributeCompressedItem *) item)->t_lasttid;
+	else
+	{
+		ZSAttributeArrayItem *aitem = (ZSAttributeArrayItem *) item;
+		return aitem->t_tid + aitem->t_nelements - 1;
+	}
+}
+
+
+
+/*
+ * Leaf B-tree page layout
+ *
+ * FIXME
  * Leaf pages are packed with ZSBtreeItems. There are three kinds of items:
  *
  * 1. Single item, holds one tuple (or rather, one datum).
@@ -172,92 +256,42 @@ ZSBtreeInternalPageIsFull(Page page)
  *
  * TODO: squeeze harder: eliminate padding, use high bits of t_tid for flags or size
  */
-typedef struct ZSBtreeItem
+typedef struct
 {
 	zstid		t_tid;
 	uint16		t_size;
 	uint16		t_flags;
-} ZSBtreeItem;
+} ZSTidItem;
 
-typedef struct ZSSingleBtreeItem
+typedef struct
 {
-	/* these fields must match ZSBtreeItem */
+	/* these fields must match ZSTidItem */
 	zstid		t_tid;
 	uint16		t_size;
 	uint16		t_flags;
 
 	ZSUndoRecPtr t_undo_ptr;
-
-	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
-} ZSSingleBtreeItem;
-
-typedef struct ZSArrayBtreeItem
-{
-	/* these fields must match ZSBtreeItem */
-	zstid		t_tid;
-	uint16		t_size;
-	uint16		t_flags;
 
 	uint16		t_nelements;
-	ZSUndoRecPtr t_undo_ptr;
+} ZSTidArrayItem;
 
-	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
-} ZSArrayBtreeItem;
-
-typedef struct ZSCompressedBtreeItem
-{
-	/* these fields must match ZSBtreeItem */
-	zstid		t_tid;
-	uint16		t_size;
-	uint16		t_flags;
-
-	uint16		t_uncompressedsize;
-	zstid		t_lasttid;	/* inclusive */
-
-	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
-} ZSCompressedBtreeItem;
-
-#define ZSBT_COMPRESSED		0x0001
-#define ZSBT_ARRAY			0x0002
-#define ZSBT_NULL			0x0010
-#define ZSBT_DEAD			0x0020
+#define ZSBT_TID_DEAD			0x0001
 
 /*
  * Get the last TID that the given item spans.
- *
- * For a single item, it's the TID of the item. For an array item, it's the
- * TID of the last element. For a compressed item, it's the last TID of the
- * last item it contains (which is stored explicitly in the item header).
- */
+x */
 static inline zstid
-zsbt_item_lasttid(ZSBtreeItem *item)
+zsbt_tid_item_lasttid(ZSTidItem *item)
 {
-	if ((item->t_flags & ZSBT_COMPRESSED) != 0)
-		return ((ZSCompressedBtreeItem *) item)->t_lasttid;
-	else if ((item->t_flags & ZSBT_ARRAY) != 0)
-	{
-		ZSArrayBtreeItem *aitem = (ZSArrayBtreeItem *) item;
-		return aitem->t_tid + aitem->t_nelements - 1;
-	}
-	else
-		return item->t_tid;
+	ZSTidArrayItem *aitem = (ZSTidArrayItem *) item;
+	return aitem->t_tid + aitem->t_nelements - 1;
 }
 
 static inline ZSUndoRecPtr
-zsbt_item_undoptr(ZSBtreeItem *item)
+zsbt_item_undoptr(ZSTidItem *item)
 {
-	if ((item->t_flags & ZSBT_COMPRESSED) != 0)
-		elog(ERROR, "cannot get undo pointer from compressed item");
-	else if ((item->t_flags & ZSBT_ARRAY) != 0)
-	{
-		ZSArrayBtreeItem *aitem = (ZSArrayBtreeItem *) item;
-		return aitem->t_undo_ptr;
-	}
-	else
-	{
-		ZSSingleBtreeItem *sitem = (ZSSingleBtreeItem *) item;
-		return sitem->t_undo_ptr;
-	}
+	ZSTidArrayItem *aitem = (ZSTidArrayItem *) item;
+	return aitem->t_undo_ptr;
 }
 
 /*
@@ -550,7 +584,7 @@ zsbt_scan_skip(ZSBtreeScan *scan, zstid tid)
  * a false return, it's OK to call this again with another greater TID.
  */
 static inline bool
-zsbt_scan_next_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
+zsbt_attr_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 {
 	if (!scan->active)
 		return false;
@@ -594,11 +628,12 @@ extern void zsmeta_add_root_for_new_attributes(Relation rel, Page page);
 
 /* prototypes for functions in zedstore_visibility.c */
 extern TM_Result zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
-									ZSUndoRecPtr recent_oldest_undo, ZSBtreeItem *item,
+									ZSUndoRecPtr recent_oldest_undo,
+									zstid item_tid, ZSUndoRecPtr item_undoptr,
 									LockTupleMode mode,
 									bool *undo_record_needed,
 									TM_FailureData *tmfd, zstid *next_tid);
-extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSBtreeItem *item,
+extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr,
 								   TransactionId *obsoleting_xid, zstid *next_tid);
 
 /* prototypes for functions in zedstore_toast.c */
