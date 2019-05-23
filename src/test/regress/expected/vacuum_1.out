@@ -1,0 +1,304 @@
+--
+-- VACUUM
+--
+CREATE TABLE vactst (i INT);
+INSERT INTO vactst VALUES (1);
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst VALUES (0);
+SELECT count(*) FROM vactst;
+ count 
+-------
+  2049
+(1 row)
+
+DELETE FROM vactst WHERE i != 0;
+SELECT * FROM vactst;
+ i 
+---
+ 0
+(1 row)
+
+VACUUM FULL vactst;
+UPDATE vactst SET i = i + 1;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst SELECT * FROM vactst;
+INSERT INTO vactst VALUES (0);
+SELECT count(*) FROM vactst;
+ count 
+-------
+  2049
+(1 row)
+
+DELETE FROM vactst WHERE i != 0;
+VACUUM (FULL) vactst;
+DELETE FROM vactst;
+SELECT * FROM vactst;
+ i 
+---
+(0 rows)
+
+VACUUM (FULL, FREEZE) vactst;
+VACUUM (ANALYZE, FULL) vactst;
+CREATE TABLE vaccluster (i INT PRIMARY KEY);
+ALTER TABLE vaccluster CLUSTER ON vaccluster_pkey;
+CLUSTER vaccluster;
+CREATE FUNCTION do_analyze() RETURNS VOID VOLATILE LANGUAGE SQL
+	AS 'ANALYZE pg_am';
+CREATE FUNCTION wrap_do_analyze(c INT) RETURNS INT IMMUTABLE LANGUAGE SQL
+	AS 'SELECT $1 FROM do_analyze()';
+CREATE INDEX ON vaccluster(wrap_do_analyze(i));
+INSERT INTO vaccluster VALUES (1), (2);
+ANALYZE vaccluster;
+ERROR:  ANALYZE cannot be executed from VACUUM or ANALYZE
+CONTEXT:  SQL function "do_analyze" statement 1
+SQL function "wrap_do_analyze" statement 1
+VACUUM FULL pg_am;
+VACUUM FULL pg_class;
+VACUUM FULL pg_database;
+VACUUM FULL vaccluster;
+ERROR:  ANALYZE cannot be executed from VACUUM or ANALYZE
+CONTEXT:  SQL function "do_analyze" statement 1
+SQL function "wrap_do_analyze" statement 1
+VACUUM FULL vactst;
+VACUUM (DISABLE_PAGE_SKIPPING) vaccluster;
+-- INDEX_CLEANUP option
+CREATE TABLE no_index_cleanup (i INT PRIMARY KEY) WITH (vacuum_index_cleanup = false);
+VACUUM (INDEX_CLEANUP FALSE) vaccluster;
+VACUUM (INDEX_CLEANUP FALSE) vactst; -- index cleanup option is ignored if no indexes
+VACUUM (INDEX_CLEANUP FALSE, FREEZE TRUE) vaccluster;
+-- index cleanup option is ignored if VACUUM FULL
+VACUUM (INDEX_CLEANUP TRUE, FULL TRUE) no_index_cleanup;
+VACUUM (FULL TRUE) no_index_cleanup;
+-- TRUNCATE option
+CREATE TABLE vac_truncate_test(i INT NOT NULL, j text)
+	WITH (vacuum_truncate=true, autovacuum_enabled=false);
+INSERT INTO vac_truncate_test VALUES (1, NULL), (NULL, NULL);
+ERROR:  null value in column "i" violates not-null constraint
+DETAIL:  Failing row contains (null, null).
+VACUUM (TRUNCATE FALSE) vac_truncate_test;
+SELECT pg_relation_size('vac_truncate_test') > 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+VACUUM vac_truncate_test;
+SELECT pg_relation_size('vac_truncate_test') = 0;
+ ?column? 
+----------
+ f
+(1 row)
+
+VACUUM (TRUNCATE FALSE, FULL TRUE) vac_truncate_test;
+DROP TABLE vac_truncate_test;
+-- partitioned table
+CREATE TABLE vacparted (a int, b char) PARTITION BY LIST (a);
+CREATE TABLE vacparted1 PARTITION OF vacparted FOR VALUES IN (1);
+INSERT INTO vacparted VALUES (1, 'a');
+UPDATE vacparted SET b = 'b';
+VACUUM (ANALYZE) vacparted;
+VACUUM (FULL) vacparted;
+VACUUM (FREEZE) vacparted;
+-- check behavior with duplicate column mentions
+VACUUM ANALYZE vacparted(a,b,a);
+ERROR:  column "a" of relation "vacparted" appears more than once
+ANALYZE vacparted(a,b,b);
+ERROR:  column "b" of relation "vacparted" appears more than once
+-- multiple tables specified
+VACUUM vaccluster, vactst;
+VACUUM vacparted, does_not_exist;
+ERROR:  relation "does_not_exist" does not exist
+VACUUM (FREEZE) vacparted, vaccluster, vactst;
+VACUUM (FREEZE) does_not_exist, vaccluster;
+ERROR:  relation "does_not_exist" does not exist
+VACUUM ANALYZE vactst, vacparted (a);
+VACUUM ANALYZE vactst (does_not_exist), vacparted (b);
+ERROR:  column "does_not_exist" of relation "vactst" does not exist
+VACUUM FULL vacparted, vactst;
+VACUUM FULL vactst, vacparted (a, b), vaccluster (i);
+ERROR:  ANALYZE option must be specified when a column list is provided
+ANALYZE vactst, vacparted;
+ANALYZE vacparted (b), vactst;
+ANALYZE vactst, does_not_exist, vacparted;
+ERROR:  relation "does_not_exist" does not exist
+ANALYZE vactst (i), vacparted (does_not_exist);
+ERROR:  column "does_not_exist" of relation "vacparted" does not exist
+-- parenthesized syntax for ANALYZE
+ANALYZE (VERBOSE) does_not_exist;
+ERROR:  relation "does_not_exist" does not exist
+ANALYZE (nonexistent-arg) does_not_exist;
+ERROR:  syntax error at or near "arg"
+LINE 1: ANALYZE (nonexistent-arg) does_not_exist;
+                             ^
+ANALYZE (nonexistentarg) does_not_exit;
+ERROR:  unrecognized ANALYZE option "nonexistentarg"
+LINE 1: ANALYZE (nonexistentarg) does_not_exit;
+                 ^
+-- ensure argument order independence, and that SKIP_LOCKED on non-existing
+-- relation still errors out.
+ANALYZE (SKIP_LOCKED, VERBOSE) does_not_exist;
+ERROR:  relation "does_not_exist" does not exist
+ANALYZE (VERBOSE, SKIP_LOCKED) does_not_exist;
+ERROR:  relation "does_not_exist" does not exist
+-- SKIP_LOCKED option
+VACUUM (SKIP_LOCKED) vactst;
+VACUUM (SKIP_LOCKED, FULL) vactst;
+ANALYZE (SKIP_LOCKED) vactst;
+-- ensure VACUUM and ANALYZE don't have a problem with serializable
+SET default_transaction_isolation = serializable;
+VACUUM vactst;
+ANALYZE vactst;
+RESET default_transaction_isolation;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+ANALYZE vactst;
+COMMIT;
+DROP TABLE vaccluster;
+DROP TABLE vactst;
+DROP TABLE vacparted;
+DROP TABLE no_index_cleanup;
+-- relation ownership, WARNING logs generated as all are skipped.
+CREATE TABLE vacowned (a int);
+CREATE TABLE vacowned_parted (a int) PARTITION BY LIST (a);
+CREATE TABLE vacowned_part1 PARTITION OF vacowned_parted FOR VALUES IN (1);
+CREATE TABLE vacowned_part2 PARTITION OF vacowned_parted FOR VALUES IN (2);
+CREATE ROLE regress_vacuum;
+SET ROLE regress_vacuum;
+-- Simple table
+VACUUM vacowned;
+WARNING:  skipping "vacowned" --- only table or database owner can vacuum it
+ANALYZE vacowned;
+WARNING:  skipping "vacowned" --- only table or database owner can analyze it
+VACUUM (ANALYZE) vacowned;
+WARNING:  skipping "vacowned" --- only table or database owner can vacuum it
+-- Catalog
+VACUUM pg_catalog.pg_class;
+WARNING:  skipping "pg_class" --- only superuser or database owner can vacuum it
+ANALYZE pg_catalog.pg_class;
+WARNING:  skipping "pg_class" --- only superuser or database owner can analyze it
+VACUUM (ANALYZE) pg_catalog.pg_class;
+WARNING:  skipping "pg_class" --- only superuser or database owner can vacuum it
+-- Shared catalog
+VACUUM pg_catalog.pg_authid;
+WARNING:  skipping "pg_authid" --- only superuser can vacuum it
+ANALYZE pg_catalog.pg_authid;
+WARNING:  skipping "pg_authid" --- only superuser can analyze it
+VACUUM (ANALYZE) pg_catalog.pg_authid;
+WARNING:  skipping "pg_authid" --- only superuser can vacuum it
+-- Partitioned table and its partitions, nothing owned by other user.
+-- Relations are not listed in a single command to test ownership
+-- independently.
+VACUUM vacowned_parted;
+WARNING:  skipping "vacowned_parted" --- only table or database owner can vacuum it
+WARNING:  skipping "vacowned_part1" --- only table or database owner can vacuum it
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+VACUUM vacowned_part1;
+WARNING:  skipping "vacowned_part1" --- only table or database owner can vacuum it
+VACUUM vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+ANALYZE vacowned_parted;
+WARNING:  skipping "vacowned_parted" --- only table or database owner can analyze it
+WARNING:  skipping "vacowned_part1" --- only table or database owner can analyze it
+WARNING:  skipping "vacowned_part2" --- only table or database owner can analyze it
+ANALYZE vacowned_part1;
+WARNING:  skipping "vacowned_part1" --- only table or database owner can analyze it
+ANALYZE vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can analyze it
+VACUUM (ANALYZE) vacowned_parted;
+WARNING:  skipping "vacowned_parted" --- only table or database owner can vacuum it
+WARNING:  skipping "vacowned_part1" --- only table or database owner can vacuum it
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+VACUUM (ANALYZE) vacowned_part1;
+WARNING:  skipping "vacowned_part1" --- only table or database owner can vacuum it
+VACUUM (ANALYZE) vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+RESET ROLE;
+-- Partitioned table and one partition owned by other user.
+ALTER TABLE vacowned_parted OWNER TO regress_vacuum;
+ALTER TABLE vacowned_part1 OWNER TO regress_vacuum;
+SET ROLE regress_vacuum;
+VACUUM vacowned_parted;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+VACUUM vacowned_part1;
+VACUUM vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+ANALYZE vacowned_parted;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can analyze it
+ANALYZE vacowned_part1;
+ANALYZE vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can analyze it
+VACUUM (ANALYZE) vacowned_parted;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+VACUUM (ANALYZE) vacowned_part1;
+VACUUM (ANALYZE) vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+RESET ROLE;
+-- Only one partition owned by other user.
+ALTER TABLE vacowned_parted OWNER TO CURRENT_USER;
+SET ROLE regress_vacuum;
+VACUUM vacowned_parted;
+WARNING:  skipping "vacowned_parted" --- only table or database owner can vacuum it
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+VACUUM vacowned_part1;
+VACUUM vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+ANALYZE vacowned_parted;
+WARNING:  skipping "vacowned_parted" --- only table or database owner can analyze it
+WARNING:  skipping "vacowned_part2" --- only table or database owner can analyze it
+ANALYZE vacowned_part1;
+ANALYZE vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can analyze it
+VACUUM (ANALYZE) vacowned_parted;
+WARNING:  skipping "vacowned_parted" --- only table or database owner can vacuum it
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+VACUUM (ANALYZE) vacowned_part1;
+VACUUM (ANALYZE) vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+RESET ROLE;
+-- Only partitioned table owned by other user.
+ALTER TABLE vacowned_parted OWNER TO regress_vacuum;
+ALTER TABLE vacowned_part1 OWNER TO CURRENT_USER;
+SET ROLE regress_vacuum;
+VACUUM vacowned_parted;
+WARNING:  skipping "vacowned_part1" --- only table or database owner can vacuum it
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+VACUUM vacowned_part1;
+WARNING:  skipping "vacowned_part1" --- only table or database owner can vacuum it
+VACUUM vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+ANALYZE vacowned_parted;
+WARNING:  skipping "vacowned_part1" --- only table or database owner can analyze it
+WARNING:  skipping "vacowned_part2" --- only table or database owner can analyze it
+ANALYZE vacowned_part1;
+WARNING:  skipping "vacowned_part1" --- only table or database owner can analyze it
+ANALYZE vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can analyze it
+VACUUM (ANALYZE) vacowned_parted;
+WARNING:  skipping "vacowned_part1" --- only table or database owner can vacuum it
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+VACUUM (ANALYZE) vacowned_part1;
+WARNING:  skipping "vacowned_part1" --- only table or database owner can vacuum it
+VACUUM (ANALYZE) vacowned_part2;
+WARNING:  skipping "vacowned_part2" --- only table or database owner can vacuum it
+RESET ROLE;
+DROP TABLE vacowned;
+DROP TABLE vacowned_parted;
+DROP ROLE regress_vacuum;
