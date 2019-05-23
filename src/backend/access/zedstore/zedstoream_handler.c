@@ -246,14 +246,24 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 								bool succeeded)
 {
 	zstid tid;
+	ZSUndoRecPtr zsUndoRecPtr;
 
+	ZSUndoRecPtrInitialize(&zsUndoRecPtr);
 	tid = ZSTidFromItemPointer(slot->tts_tid);
 	zsbt_tid_clear_speculative_token(relation, tid, spekToken, true /* for complete */);
 	/*
 	 * there is a conflict
 	 */
 	if (!succeeded)
-		elog(ERROR, "zedstoream_complete_speculative abort is not handled");
+	{
+		/*
+		 * XXX: these are the same two steps that zsundo_vacuum() must do
+		 * 		maybe abstract into a function (wouldn't save much code now)
+		 */
+		zsbt_tid_mark_dead(relation, tid, zsUndoRecPtr);
+		for (int attno = 1; attno <= RelationGetNumberOfAttributes(relation); attno++)
+			zsbt_attr_remove(relation, attno, tid);
+	}
 }
 
 static void
@@ -800,8 +810,6 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 
 	ZSUndoRecPtrInitialize(&prevundoptr);
 
-	*update_indexes = true;
-
 	slot_getallattrs(slot);
 	d = slot->tts_values;
 	isnulls = slot->tts_isnull;
@@ -836,6 +844,7 @@ retry:
 							 xid, cid, key_update, snapshot, crosscheck,
 							 wait, hufd, &newtid);
 
+	*update_indexes = result == TM_Ok && key_update;
 	if (result == TM_Ok)
 	{
 		/*
