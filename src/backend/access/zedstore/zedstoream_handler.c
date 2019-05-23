@@ -876,6 +876,7 @@ retry:
 				zedstore_toast_finish(relation, attno, toastptr, newtid);
 		}
 
+		slot->tts_tableOid = RelationGetRelid(relation);
 		slot->tts_tid = ItemPointerFromZSTid(newtid);
 
 		pgstat_count_heap_update(relation, false);
@@ -1263,6 +1264,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		else
 		{
 			Assert(scan->state == ZSSCAN_STATE_SCANNING);
+			slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
 			slot->tts_tid = ItemPointerFromZSTid(this_tid);
 			slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
 			slot->tts_flags &= ~TTS_FLAG_EMPTY;
@@ -1486,6 +1488,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 
 	if (found)
 	{
+		slot->tts_tableOid = RelationGetRelid(rel);
 		slot->tts_tid = ItemPointerFromZSTid(tid);
 		slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
 		slot->tts_flags &= ~TTS_FLAG_EMPTY;
@@ -2497,6 +2500,7 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin
 		slot->tts_values[natt - 1] = datum;
 		slot->tts_isnull[natt - 1] = isnull;
 	}
+	slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
 	slot->tts_tid = ItemPointerFromZSTid(tid);
 	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
 	slot->tts_flags &= ~TTS_FLAG_EMPTY;
@@ -2804,6 +2808,7 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 		slot->tts_values[natt - 1] = datum;
 		slot->tts_isnull[natt - 1] = isnull;
 	}
+	slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
 	slot->tts_tid = ItemPointerFromZSTid(tid);
 	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
 	slot->tts_flags &= ~TTS_FLAG_EMPTY;
@@ -2973,6 +2978,7 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 
 		zsbt_attr_end_scan(&btree_scan);
 	}
+	slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
 	slot->tts_tid = ItemPointerFromZSTid(tid);
 	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
 	slot->tts_flags &= ~TTS_FLAG_EMPTY;
