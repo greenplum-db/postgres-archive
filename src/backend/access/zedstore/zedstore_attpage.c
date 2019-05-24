@@ -680,9 +680,7 @@ zsbt_attr_exists(Relation rel, AttrNumber attno, zstid tid, Buffer *buf_p)
 	if (found)
 	{
 		/* Found an item that covers this TID. */
-		ZSAttributeArrayItem *aitem = (ZSAttributeArrayItem *) item;
-
-		Assert(tid - aitem->t_tid < aitem->t_nelements);
+		Assert(tid - item->t_tid < ((ZSAttributeArrayItem *) item)->t_nelements);
 
 		*buf_p = buf;
 		return true;
@@ -1330,7 +1328,7 @@ zsbt_attr_split_item(Form_pg_attribute atti,
 			char	   *dst;
 
 			allocsz = olditem->t_size - (src - olditem->t_payload) + MAXIMUM_ALIGNOF;
-			item = (ZSAttributeArrayItem *) palloc(olditem->t_size);
+			item = (ZSAttributeArrayItem *) palloc(allocsz);
 			item->t_tid = removetid + 1;
 			/* item->t_size is filled in later */
 			item->t_flags = 0;
@@ -1692,13 +1690,12 @@ zsbt_attr_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List
 	ListCell   *lc;
 	zsbt_attr_recompress_context cxt;
 	ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(BufferGetPage(oldbuf));
-	BlockNumber oldblock = BufferGetBlockNumber(oldbuf);
 	BlockNumber orignextblk;
 	zs_split_stack *stack;
 	List	   *downlinks = NIL;
 
 	orignextblk = oldopaque->zs_next;
-	Assert(orignextblk != oldblock);
+	Assert(orignextblk != BufferGetBlockNumber(oldbuf));
 
 	cxt.currpage = NULL;
 	cxt.compressor = NULL;
