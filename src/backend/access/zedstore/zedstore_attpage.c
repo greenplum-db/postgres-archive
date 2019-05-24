@@ -38,9 +38,10 @@ static void zsbt_attr_recompress_replace(Relation rel, AttrNumber attno,
 										 Buffer oldbuf, List *items);
 static bool zsbt_attr_exists(Relation rel, AttrNumber attno,
 							 zstid tid, Buffer *buf_p);
-static void zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
-								   zstid oldtid, ZSAttributeItem *replacementitem,
-								   List *newitems);
+static void zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf,
+								List *newitems);
+static void zsbt_attr_remove_item(Relation rel, AttrNumber attno, Buffer buf,
+								  zstid oldtid);
 static Size zsbt_compute_data_size(Form_pg_attribute atti, Datum val, bool isnull);
 static ZSAttributeItem *zsbt_attr_create_item(Form_pg_attribute att, zstid tid,
 				 int nelements, Datum *datums,
@@ -502,7 +503,7 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 	attr = &rel->rd_att->attrs[attno - 1];
 
 	/*
-	 * Find the right place for the given TID. 
+	 * Find the right place for the given TID.
 	 */
 	insert_target_key = tid;
 
@@ -569,10 +570,9 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 	}
 
 	/* recompress and possibly split the page */
-	zsbt_attr_replace_item(rel, attno, buf,
-						   InvalidZSTid, NULL,
-						   newitems);
-	/* zsbt_replace_item unlocked 'buf' */
+	zsbt_attr_add_items(rel, attno, buf, newitems);
+
+	/* zsbt_attr_add_items unlocked 'buf' */
 	ReleaseBuffer(buf);
 }
 
@@ -592,10 +592,9 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, zstid tid)
 	}
 
 	/* remove it */
-	zsbt_attr_replace_item(rel, attno, buf,
-						   tid, NULL,
-						   NIL);
-	ReleaseBuffer(buf); 	/* zsbt_replace_item released */
+	zsbt_attr_remove_item(rel, attno, buf, tid);
+
+	ReleaseBuffer(buf); 	/* zsbt_attr_remove_item unlocke 'buf' */
 }
 
 /* ----------------------------------------------------------------
@@ -933,24 +932,204 @@ zsbt_attr_create_item(Form_pg_attribute att, zstid tid,
 	return (ZSAttributeItem *) newitem;
 }
 
+static ZSAttributeItem *
+zsbt_attr_merge_items(ZSAttributeItem *aitem, ZSAttributeItem *bitem)
+{
+	ZSAttributeArrayItem *newitem;
+	Size		adatasz;
+	Size		bdatasz;
+	Size		newitemsz;
+	bool		isnull;
+	ZSAttributeArrayItem *a_arr_item;
+	ZSAttributeArrayItem *b_arr_item;
+
+	/* don't bother trying to merge compressed items */
+	if ((aitem->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
+		return NULL;
+	if ((bitem->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
+		return NULL;
+
+	a_arr_item = (ZSAttributeArrayItem *) aitem;
+	b_arr_item = (ZSAttributeArrayItem *) bitem;
+
+	/* The arrays must have consecutive TIDs */
+	if (b_arr_item->t_tid != a_arr_item->t_tid + a_arr_item->t_nelements)
+		return NULL;
+
+	/* And they must have compatible NULL flag */
+	if ((aitem->t_flags & ZSBT_ATTR_NULL) != (bitem->t_flags & ZSBT_ATTR_NULL))
+		return NULL;
+	isnull = (aitem->t_flags & ZSBT_ATTR_NULL);
+
+	/* Create a new item that covers both. */
+	adatasz = aitem->t_size - offsetof(ZSAttributeArrayItem, t_payload);
+	bdatasz = bitem->t_size - offsetof(ZSAttributeArrayItem, t_payload);
+
+	/* Like in zsbt_attr_multi_insert(), enforce a practical limit on the
+	 * size of the array tuple. */
+	if (adatasz + bdatasz >= MaxZedStoreDatumSize / 4)
+		return NULL;
+
+	newitemsz = offsetof(ZSAttributeArrayItem, t_payload) + adatasz + bdatasz;
+
+	newitem = palloc(newitemsz);
+	newitem->t_tid = aitem->t_tid;
+	newitem->t_size = newitemsz;
+	newitem->t_flags = 0;
+	if (isnull)
+		newitem->t_flags |= ZSBT_ATTR_NULL;
+	newitem->t_nelements = a_arr_item->t_nelements + b_arr_item->t_nelements;
+	newitem->t_padding = 0; /* zero padding */
+
+	if (!isnull)
+	{
+		memcpy(newitem->t_payload, a_arr_item->t_payload, adatasz);
+		memcpy(newitem->t_payload + adatasz, b_arr_item->t_payload, bdatasz);
+	}
+
+	return (ZSAttributeItem *) newitem;
+}
+
 /*
  * This helper function is used to implement INSERT, UPDATE and DELETE.
  *
- * If 'olditem' is not NULL, then 'olditem' on the page is replaced with
- * 'replacementitem'. 'replacementitem' can be NULL, to remove an old item.
+ * The items in the 'newitems' list are added to the page, to the correct position.
  *
- * If 'newitems' is not empty, the items in the list are added to the page,
- * to the correct position. FIXME: Actually, they're always just added to
- * the end of the page, and that better be the correct position.
+ * FIXME: Actually, they're always just added to the end of the page, and that
+ * better be the correct position.
  *
  * This function handles decompressing and recompressing items, and splitting
  * the page if needed.
  */
 static void
-zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
-					   zstid oldtid,
-					   ZSAttributeItem *replacementitem,
-					   List       *newitems)
+zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
+{
+	Page		page = BufferGetPage(buf);
+	OffsetNumber off;
+	OffsetNumber maxoff;
+	List	   *items;
+	ZSAttributeItem *mergeditem = NULL;
+	Size		last_item_size = 0;
+	Size		growth;
+	ListCell   *lc;
+
+	Assert(newitems != NIL);
+
+	maxoff = PageGetMaxOffsetNumber(page);
+
+	/*
+	 * Add any new items to the end.
+	 *
+	 * As a quick but very effective optimization, check if the last existing
+	 * item on the page happens to be an array item, such that we could merge
+	 * the new item with it. That makes single row INSERTs much more efficient.
+	 */
+	if (maxoff >= 1)
+	{
+		ItemId		last_iid = PageGetItemId(page, maxoff);
+		ZSAttributeItem *last_old_item = (ZSAttributeItem *) PageGetItem(page, last_iid);
+		ZSAttributeItem *first_new_item = (ZSAttributeItem *) linitial(newitems);
+
+		mergeditem = zsbt_attr_merge_items(last_old_item, first_new_item);
+		if (mergeditem)
+		{
+			/*
+			 * Yes, we could append to the last array item. 'mergeditem' is now
+			 * the item that will replace the old last item on the page. The
+			 * values of the first new item are now included in 'mergeditem',
+			 * so remove it from the list of new items.
+			 */
+			newitems = list_delete_first(newitems);
+		}
+
+		last_item_size = last_old_item->t_size;
+	}
+
+	/* Can we make the new items fit without splitting the page? */
+	growth = 0;
+	if (mergeditem)
+		growth += mergeditem->t_size - last_item_size;
+	foreach (lc, newitems)
+	{
+		ZSAttributeItem *item = (ZSAttributeItem *) lfirst(lc);
+
+		growth += MAXALIGN(item->t_size) + sizeof(ItemId);
+	}
+
+	if (growth <= PageGetExactFreeSpace(page))
+	{
+		/* The new items fit on the page. Add them. */
+		START_CRIT_SECTION();
+
+		if (mergeditem)
+		{
+			PageIndexTupleDelete(page, maxoff);
+			if (PageAddItemExtended(page,
+									(Item) mergeditem, mergeditem->t_size,
+									maxoff,
+									PAI_OVERWRITE) == InvalidOffsetNumber)
+				elog(ERROR, "could not add item to TID page");
+		}
+
+		foreach(lc, newitems)
+		{
+			ZSTidItem *item = (ZSTidItem *) lfirst(lc);
+
+			if (PageAddItemExtended(page,
+									(Item) item, item->t_size,
+									PageGetMaxOffsetNumber(page) + 1,
+									PAI_OVERWRITE) == InvalidOffsetNumber)
+				elog(ERROR, "could not add item to TID page");
+		}
+
+		MarkBufferDirty(buf);
+
+		/* TODO: WAL-log */
+
+		END_CRIT_SECTION();
+
+		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+	}
+	else
+	{
+		/* need to split */
+
+		/* Loop through all old items on the page */
+		items = NIL;
+		for (off = 1; off <= maxoff; off++)
+		{
+			ZSAttributeItem *item;
+
+			if (off == maxoff && mergeditem)
+				item = mergeditem;
+			else
+			{
+				ItemId		iid = PageGetItemId(page, off);
+				item = (ZSAttributeItem *) PageGetItem(page, iid);
+			}
+
+			items = lappend(items, item);
+		}
+		items = list_concat(items, newitems);
+
+		/* Now pass the list to the recompressor. */
+		IncrBufferRefCount(buf);
+
+		zsbt_attr_recompress_replace(rel, attno, buf, items);
+
+		list_free(items);
+	}
+}
+
+/*
+ * This helper function is used to implement vacuum cleanup after a DELETE,
+ * to delete attribute data belonging to dead tuples.
+ *
+ * This function handles decompressing and recompressing items, and splitting
+ * the page if needed.
+ */
+static void
+zsbt_attr_remove_item(Relation rel, AttrNumber attno, Buffer buf, zstid oldtid)
 {
 	Form_pg_attribute attr;
 	int16		attlen;
@@ -968,9 +1147,6 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 	attr = &rel->rd_att->attrs[attno - 1];
 	attlen = attr->attlen;
 	attbyval = attr->attbyval;
-
-	if (replacementitem)
-		Assert(replacementitem->t_tid == oldtid);
 
 	/*
 	 * TODO: It would be good to have a fast path, for the common case that we're
@@ -1085,8 +1261,6 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 				olddatalen = zsbt_get_array_slice_len(attlen, attbyval, isnull,
 													  dataptr, 1);
 				dataptr += olddatalen;
-				if (replacementitem)
-					items = lappend(items, replacementitem);
 
 				/* Array slice after the target */
 				if (cutoff + 1 < nelements)
@@ -1110,10 +1284,6 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 
 	if (oldtid != InvalidZSTid && !found_old_item)
 		elog(ERROR, "could not find old item to replace");
-
-	/* Add any new items to the end */
-	if (newitems)
-		items = list_concat(items, newitems);
 
 	/* Now pass the list to the recompressor. */
 	IncrBufferRefCount(buf);
@@ -1155,7 +1325,7 @@ zsbt_attr_replace_item(Relation rel, AttrNumber attno, Buffer buf,
 typedef struct
 {
 	Page		currpage;
-	ZSCompressContext compressor;
+	ZSCompressContext *compressor;
 	int			compressed_items;
 
 	/* first page writes over the old buffer, subsequent pages get newly-allocated buffers */
@@ -1229,9 +1399,16 @@ zsbt_attr_recompress_add_to_compressor(zsbt_attr_recompress_context *cxt, ZSAttr
 	bool		result;
 
 	if (cxt->compressed_items == 0)
-		zs_compress_begin(&cxt->compressor, PageGetFreeSpace(cxt->currpage));
+	{
+		if (!cxt->compressor)
+		{
+			cxt->compressor = palloc(sizeof(ZSCompressContext));
+			zs_compress_init(cxt->compressor);
+		}
+		zs_compress_begin(cxt->compressor, PageGetFreeSpace(cxt->currpage));
+	}
 
-	result = zs_compress_add(&cxt->compressor, item);
+	result = zs_compress_add(cxt->compressor, item);
 	if (result)
 	{
 		cxt->compressed_items++;
@@ -1243,14 +1420,23 @@ zsbt_attr_recompress_add_to_compressor(zsbt_attr_recompress_context *cxt, ZSAttr
 }
 
 static void
-zsbt_attr_recompress_flush(zsbt_attr_recompress_context *cxt)
+zsbt_attr_recompress_flush(zsbt_attr_recompress_context *cxt, bool last)
 {
 	ZSAttributeCompressedItem *citem;
 
 	if (cxt->compressed_items == 0)
 		return;
 
-	citem = zs_compress_finish(&cxt->compressor);
+	/*
+	 * If we've seen all the entries, and the last batch fits on the page without
+	 * compression, then just store it. Compression doesn't really buy us
+	 * anything, if the data would fit without it. This also gives the next insert
+	 * a chance to merge the new item into the last array item.
+	 */
+	if (last && cxt->compressor->rawsize <= PageGetFreeSpace(cxt->currpage))
+		citem = NULL;
+	else
+		citem = zs_compress_finish(cxt->compressor);
 
 	if (citem)
 		zsbt_attr_recompress_add_to_page(cxt, (ZSAttributeItem *) citem);
@@ -1264,9 +1450,10 @@ zsbt_attr_recompress_flush(zsbt_attr_recompress_context *cxt)
 		 * future items may compress. So, better avoid recording such info and
 		 * try compression again later if required.
 		 */
-		for (int i = 0; i < cxt->compressor.nitems; i++)
+		for (int i = 0; i < cxt->compressor->nitems; i++)
 		{
-			ZSAttributeItem *item = (ZSAttributeItem *) (cxt->compressor.uncompressedbuffer + size);
+			ZSAttributeItem *item = (ZSAttributeItem *) (cxt->compressor->uncompressedbuffer + size);
+
 			zsbt_attr_recompress_add_to_page(cxt, item);
 
 			size += MAXALIGN(item->t_size);
@@ -1309,7 +1496,7 @@ zsbt_attr_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List
 	Assert(orignextblk != oldblock);
 
 	cxt.currpage = NULL;
-	zs_compress_init(&cxt.compressor);
+	cxt.compressor = NULL;
 	cxt.compressed_items = 0;
 	cxt.stack_head = cxt.stack_tail = NULL;
 	cxt.attno = attno;
@@ -1328,7 +1515,7 @@ zsbt_attr_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List
 		if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
 		{
 			/* already compressed, add as it is. */
-			zsbt_attr_recompress_flush(&cxt);
+			zsbt_attr_recompress_flush(&cxt, false);
 			cxt.total_already_compressed_items++;
 			zsbt_attr_recompress_add_to_page(&cxt, item);
 		}
@@ -1340,7 +1527,7 @@ zsbt_attr_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List
 				if (cxt.compressed_items > 0)
 				{
 					/* flush, and retry */
-					zsbt_attr_recompress_flush(&cxt);
+					zsbt_attr_recompress_flush(&cxt, false);
 
 					if (!zsbt_attr_recompress_add_to_compressor(&cxt, item))
 					{
@@ -1358,9 +1545,10 @@ zsbt_attr_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List
 	}
 
 	/* flush the last one, if any */
-	zsbt_attr_recompress_flush(&cxt);
+	zsbt_attr_recompress_flush(&cxt, true);
 
-	zs_compress_free(&cxt.compressor);
+	if (cxt.compressor)
+		zs_compress_free(cxt.compressor);
 
 	/*
 	 * Ok, we now have a list of pages, to replace the original page, as private

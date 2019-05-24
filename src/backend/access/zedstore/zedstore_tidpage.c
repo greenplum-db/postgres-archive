@@ -28,6 +28,7 @@
 
 #include "access/zedstore_internal.h"
 #include "access/zedstore_undo.h"
+#include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
 #include "utils/rel.h"
@@ -36,9 +37,9 @@
 static void zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items);
 static bool zsbt_tid_fetch(Relation rel, zstid tid,
 						   Buffer *buf_p, ZSUndoRecPtr *undo_ptr_p, bool *isdead_p);
+static void zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems);
 static void zsbt_tid_replace_item(Relation rel, Buffer buf,
-								  zstid oldtid, ZSTidItem *replacementitem,
-								  List *newitems);
+								  zstid oldtid, ZSTidItem *replacementitem);
 static ZSTidItem *zsbt_tid_create_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements);
 
 static TM_Result zsbt_tid_update_lock_old(Relation rel, zstid otid,
@@ -419,7 +420,7 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	/*
 	 * Look at the last item, for its tid.
 	 *
-	 * assign TIDS for each item, if needed.
+	 * assign TIDS for each item.
 	 */
 	 if (maxoff >= FirstOffsetNumber)
 	 {
@@ -461,17 +462,13 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	newitems = list_make1(newitem);
 
 	/* recompress and possibly split the page */
-	zsbt_tid_replace_item(rel, buf,
-						  InvalidZSTid, NULL,
-						  newitems);
-	/* zsbt_replace_item unlocked 'buf' */
+	zsbt_tid_add_items(rel, buf, newitems);
+	/* zsbt_tid_replace_item unlocked 'buf' */
 	ReleaseBuffer(buf);
 
 	/* Return the TIDs to the caller */
 	for (int i = 0; i < nitems; i++)
-	{
 		tids[i] = tid + i;
-	}
 }
 
 TM_Result
@@ -563,10 +560,8 @@ zsbt_tid_delete(Relation rel, zstid tid,
 	/* Replace the ZSBreeItem with one with the new UNDO pointer. */
 	deleteditem = zsbt_tid_create_item(tid, undorecptr, 1);
 
-	zsbt_tid_replace_item(rel, buf,
-						  tid, deleteditem,
-						  NIL);
-	ReleaseBuffer(buf);	/* zsbt_replace_item unlocked */
+	zsbt_tid_replace_item(rel, buf, tid, deleteditem);
+	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 
 	pfree(deleteditem);
 
@@ -818,9 +813,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	/* Replace the ZSBreeItem with one with the updated undo pointer. */
 	deleteditem = zsbt_tid_create_item(otid, undorecptr, 1);
 
-	zsbt_tid_replace_item(rel, buf,
-						  otid, (ZSTidItem *) deleteditem,
-						  NIL);
+	zsbt_tid_replace_item(rel, buf, otid, (ZSTidItem *) deleteditem);
 	ReleaseBuffer(buf);		/* zsbt_recompress_replace released */
 
 	pfree(deleteditem);
@@ -885,10 +878,8 @@ zsbt_tid_lock(Relation rel, zstid tid,
 	/* Replace the item with an identical one, but with updated undo pointer. */
 	newitem = zsbt_tid_create_item(tid, undorecptr, 1);
 
-	zsbt_tid_replace_item(rel, buf,
-						  tid, newitem,
-						  NIL);
-	ReleaseBuffer(buf);		/* zsbt_replace_item unlocked */
+	zsbt_tid_replace_item(rel, buf, tid, newitem);
+	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 
 	pfree(newitem);
 
@@ -932,10 +923,8 @@ zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr undoptr)
 	deaditem.t_undo_ptr = undoptr;
 	deaditem.t_nelements = 1;
 
-	zsbt_tid_replace_item(rel, buf,
-						  tid, (ZSTidItem *) &deaditem,
-						  NIL);
-	ReleaseBuffer(buf); 	/* zsbt_replace_item released */
+	zsbt_tid_replace_item(rel, buf, tid, (ZSTidItem *) &deaditem);
+	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 }
 
 /*
@@ -966,10 +955,8 @@ zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr)
 
 		ZSUndoRecPtrInitialize(&new_undoptr);
 		copy = zsbt_tid_create_item(tid, new_undoptr, 1);
-		zsbt_tid_replace_item(rel, buf,
-							  tid, copy,
-							  NIL);
-		ReleaseBuffer(buf); 	/* zsbt_replace_item unlocked */
+		zsbt_tid_replace_item(rel, buf, tid, copy);
+		ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 	}
 	else
 	{
@@ -1083,6 +1070,126 @@ zsbt_tid_create_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements)
 }
 
 /*
+ * This helper function is used to implement INSERT.
+ *
+ * The items in 'newitems' are added to the page, to the correct position.
+ * FIXME: Actually, they're always just added to the end of the page, and that
+ * better be the correct position.
+ *
+ * This function handles splitting the page if needed.
+ */
+static void
+zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
+{
+	Page		page = BufferGetPage(buf);
+	Size		newitemsize;
+	ListCell   *lc;
+
+	/*
+	 * TODO: It would be good to have a fast path, for the common case that we're
+	 * just adding items to the end.
+	 */
+	newitemsize = 0;
+	foreach(lc, newitems)
+	{
+		ZSTidItem *item = (ZSTidItem *) lfirst(lc);
+
+		newitemsize += MAXALIGN(item->t_size);
+		newitemsize += sizeof(ItemIdData);	/* line pointer */
+	}
+
+	if (newitemsize <= PageGetExactFreeSpace(page))
+	{
+		/* The new items fit on the page. Add them. */
+		START_CRIT_SECTION();
+
+		foreach(lc, newitems)
+		{
+			ZSTidItem *item = (ZSTidItem *) lfirst(lc);
+
+			if (PageAddItemExtended(page,
+									(Item) item, item->t_size,
+									PageGetMaxOffsetNumber(page) + 1,
+									PAI_OVERWRITE) == InvalidOffsetNumber)
+				elog(ERROR, "could not add item to TID page");
+		}
+
+		MarkBufferDirty(buf);
+
+		/* TODO: WAL-log */
+
+		END_CRIT_SECTION();
+
+		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+	}
+	else
+	{
+		OffsetNumber off;
+		OffsetNumber maxoff;
+		List	   *items;
+
+		/* Loop through all old items on the page */
+		items = NIL;
+		maxoff = PageGetMaxOffsetNumber(page);
+		off = 1;
+		for (;;)
+		{
+			ZSTidItem *item;
+
+			/*
+			 * Get the next item to process from the page.
+			 */
+			if (off <= maxoff)
+			{
+				ItemId		iid = PageGetItemId(page, off);
+
+				item = (ZSTidItem *) PageGetItem(page, iid);
+				off++;
+
+			}
+			else
+			{
+				/* out of items */
+				break;
+			}
+
+			items = lappend(items, item);
+		}
+
+		/* Add any new items to the end */
+		if (newitems)
+			items = list_concat(items, newitems);
+
+		/* Now pass the list to the recompressor. */
+		IncrBufferRefCount(buf);
+		if (items)
+		{
+			zsbt_tid_recompress_replace(rel, buf, items);
+		}
+		else
+		{
+			zs_split_stack *stack;
+
+			stack = zsbt_unlink_page(rel, ZS_META_ATTRIBUTE_NUM, buf, 0);
+
+			if (!stack)
+			{
+				/* failed. */
+				Page		newpage = PageGetTempPageCopySpecial(BufferGetPage(buf));
+
+				stack = zs_new_split_stack_entry(buf, newpage);
+			}
+
+			/* apply the changes */
+			zs_apply_split_changes(rel, stack);
+		}
+
+		list_free(items);
+	}
+}
+
+
+/*
  * This helper function is used to implement INSERT, UPDATE and DELETE.
  *
  * If 'olditem' is not NULL, then 'olditem' on the page is replaced with
@@ -1096,10 +1203,7 @@ zsbt_tid_create_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements)
  * the page if needed.
  */
 static void
-zsbt_tid_replace_item(Relation rel, Buffer buf,
-					  zstid oldtid,
-					  ZSTidItem *replacementitem,
-					  List       *newitems)
+zsbt_tid_replace_item(Relation rel, Buffer buf, zstid oldtid, ZSTidItem *replacementitem)
 {
 	Page		page = BufferGetPage(buf);
 	OffsetNumber off;
@@ -1195,10 +1299,6 @@ zsbt_tid_replace_item(Relation rel, Buffer buf,
 
 	if (oldtid != InvalidZSTid && !found_old_item)
 		elog(ERROR, "could not find old item to replace");
-
-	/* Add any new items to the end */
-	if (newitems)
-		items = list_concat(items, newitems);
 
 	/* Now pass the list to the recompressor. */
 	IncrBufferRefCount(buf);
