@@ -43,9 +43,11 @@ static void zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf,
 static void zsbt_attr_remove_item(Relation rel, AttrNumber attno, Buffer buf,
 								  zstid oldtid);
 static Size zsbt_compute_data_size(Form_pg_attribute atti, Datum val, bool isnull);
-static ZSAttributeItem *zsbt_attr_create_item(Form_pg_attribute att, zstid tid,
-				 int nelements, Datum *datums,
-				 char *dataptr, Size datasz, bool isnull);
+static ZSAttributeItem *zsbt_attr_create_item_from_data(Form_pg_attribute att, zstid tid, bool isnull,
+														int nelements, char *datasrc, Size datasz);
+static ZSAttributeItem *zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid, bool isnull,
+														  int nelements, Datum *datums,
+														  Size datasz);
 
 /* ----------------------------------------------------------------
  *						 Public interface
@@ -548,11 +550,15 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 			{
 				Datum		val = datums[j];
 				Size		datum_sz;
+				Size		newdatasz;
 
 				datum_sz = zsbt_compute_data_size(attr, val, false);
-				if (datasz + datum_sz < MaxZedStoreDatumSize / 4)
+
+				newdatasz = att_align_datum(newdatasz, attr->attalign, attr->attlen, val) + datum_sz;
+
+				if (newdatasz > MaxZedStoreDatumSize / 4)
 					break;
-				datasz += datum_sz;
+				datasz = newdatasz;
 			}
 		}
 
@@ -562,8 +568,8 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 		 * element and zsbt_create_item() will create a 'single' item rather
 		 * than an array.
 		 */
-		newitem = zsbt_attr_create_item(attr, tids[i],
-										j - i, &datums[i], NULL, datasz, isnulls[i]);
+		newitem = zsbt_attr_create_item_from_datums(attr, tids[i], isnulls[i],
+													j - i, &datums[i], datasz);
 
 		newitems = lappend(newitems, newitem);
 		i = j;
@@ -689,56 +695,6 @@ zsbt_attr_exists(Relation rel, AttrNumber attno, zstid tid, Buffer *buf_p)
 	}
 }
 
-/*
- * Compute the size of a slice of an array, from an array item. 'dataptr'
- * points to the packed on-disk representation of the array item's data.
- * The elements are stored one after each other.
- */
-static Size
-zsbt_get_array_slice_len(int16 attlen, bool attbyval, bool isnull,
-						 char *dataptr, int nelements)
-{
-	Size		datasz;
-
-	if (isnull)
-		datasz = 0;
-	else
-	{
-		/*
-		 * For a fixed-width type, we can just multiply. For variable-length,
-		 * we have to walk through the elements, looking at the length of each
-		 * element.
-		 */
-		if (attlen > 0)
-		{
-			datasz = attlen * nelements;
-		}
-		else
-		{
-			char	   *p = dataptr;
-
-			datasz = 0;
-			for (int i = 0; i < nelements; i++)
-			{
-				Size		datumsz;
-
-				datumsz = zs_datumGetSize(PointerGetDatum(p), attbyval, attlen);
-
-				/*
-				 * The array should already use short varlen representation whenever
-				 * possible.
-				 */
-				Assert(!VARATT_CAN_MAKE_SHORT(DatumGetPointer(p)));
-
-				datasz += datumsz;
-				p += datumsz;
-			}
-		}
-	}
-	return datasz;
-}
-
-
 /* Does att's datatype allow packing into the 1-byte-header varlena format? */
 #define ATT_IS_PACKABLE(att) \
 	((att)->attlen == -1 && (att)->attstorage != 'p')
@@ -755,7 +711,7 @@ zsbt_compute_data_size(Form_pg_attribute atti, Datum val, bool isnull)
 	Size		data_length = 0;
 
 	if (isnull)
-		return 0;
+		return data_length;
 
 	if (ATT_IS_PACKABLE(atti) &&
 		VARATT_CAN_MAKE_SHORT(DatumGetPointer(val)))
@@ -793,13 +749,49 @@ zsbt_compute_data_size(Form_pg_attribute atti, Datum val, bool isnull)
 }
 
 /*
- * Form a ZSAttributeItem out of the given datums, or data that's already in on-disk
- * array format, for insertion.
+ * Form a ZSAttributeItem out of data that's already in on-disk array format.
  */
 static ZSAttributeItem *
-zsbt_attr_create_item(Form_pg_attribute att, zstid tid,
-				 int nelements, Datum *datums,
-				 char *datasrc, Size datasz, bool isnull)
+zsbt_attr_create_item_from_data(Form_pg_attribute att, zstid tid, bool isnull,
+								int nelements, char *datasrc, Size datasz)
+{
+	ZSAttributeArrayItem *newitem;
+	Size		itemsz;
+	char	   *databegin;
+
+	Assert(nelements > 0);
+
+	itemsz = offsetof(ZSAttributeArrayItem, t_payload) + datasz;
+
+	newitem = palloc(itemsz);
+	newitem->t_tid = tid;
+	newitem->t_size = itemsz;
+	newitem->t_flags = 0;
+	if (isnull)
+		newitem->t_flags |= ZSBT_ATTR_NULL;
+	newitem->t_nelements = nelements;
+	newitem->t_padding = 0; /* zero padding */
+
+	databegin = newitem->t_payload;
+
+	/*
+	 * Copy the data.
+	 *
+	 * This is largely copied from heaptuple.c's fill_val().
+	 */
+	if (!isnull)
+		memcpy(databegin, datasrc, datasz);
+
+	return (ZSAttributeItem *) newitem;
+}
+
+/*
+ * Form a ZSAttributeItem out of the given datums.
+ */
+static ZSAttributeItem *
+zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid, bool isnull,
+								  int nelements, Datum *datums,
+								  Size datasz)
 {
 	ZSAttributeArrayItem *newitem;
 	Size		itemsz;
@@ -829,119 +821,116 @@ zsbt_attr_create_item(Form_pg_attribute att, zstid tid,
 	{
 		char	   *data = databegin;
 
-		if (datums)
+		for (int i = 0; i < nelements; i++)
 		{
-			for (int i = 0; i < nelements; i++)
+			Datum		datum = datums[i];
+			Size		data_length;
+
+			/*
+			 * XXX we use the att_align macros on the pointer value itself, not on an
+			 * offset.  This is a bit of a hack.
+			 */
+			if (att->attbyval)
 			{
-				Datum		datum = datums[i];
-				Size		data_length;
+				/* pass-by-value */
+				data = (char *) att_align_nominal(data, att->attalign);
+				store_att_byval(data, datum, att->attlen);
+				data_length = att->attlen;
+			}
+			else if (att->attlen == -1)
+			{
+				/* varlena */
+				Pointer		val = DatumGetPointer(datum);
 
-				/*
-				 * XXX we use the att_align macros on the pointer value itself, not on an
-				 * offset.  This is a bit of a hack.
-				 */
-				if (att->attbyval)
+				if (VARATT_IS_EXTERNAL(val))
 				{
-					/* pass-by-value */
-					data = (char *) att_align_nominal(data, att->attalign);
-					store_att_byval(data, datum, att->attlen);
-					data_length = att->attlen;
-				}
-				else if (att->attlen == -1)
-				{
-					/* varlena */
-					Pointer		val = DatumGetPointer(datum);
-
-					if (VARATT_IS_EXTERNAL(val))
+					if (VARATT_IS_EXTERNAL_EXPANDED(val))
 					{
-						if (VARATT_IS_EXTERNAL_EXPANDED(val))
-						{
-							/*
-							 * we want to flatten the expanded value so that the
-							 * constructed tuple doesn't depend on it
-							 */
-							/* FIXME: This should happen earlier, because if the
-							 * datum is very large, it should be toasted, and
-							 * that should happen earlier.
-							 */
-							ExpandedObjectHeader *eoh = DatumGetEOHP(datum);
+						/*
+						 * we want to flatten the expanded value so that the
+						 * constructed tuple doesn't depend on it
+						 */
+						/* FIXME: This should happen earlier, because if the
+						 * datum is very large, it should be toasted, and
+						 * that should happen earlier.
+						 */
+						ExpandedObjectHeader *eoh = DatumGetEOHP(datum);
 
-							data = (char *) att_align_nominal(data,
-															  att->attalign);
-							data_length = EOH_get_flat_size(eoh);
-							EOH_flatten_into(eoh, data, data_length);
-						}
-						else if (VARATT_IS_EXTERNAL(val) && VARTAG_EXTERNAL(val) == VARTAG_ZEDSTORE)
-						{
-							data_length = sizeof(varatt_zs_toastptr);
-							memcpy(data, val, data_length);
-						}
-						else
-						{
-							/* no alignment, since it's short by definition */
-							data_length = VARSIZE_EXTERNAL(val);
-							memcpy(data, val, data_length);
-						}
+						data = (char *) att_align_nominal(data,
+														  att->attalign);
+						data_length = EOH_get_flat_size(eoh);
+						EOH_flatten_into(eoh, data, data_length);
 					}
-					else if (VARATT_IS_SHORT(val))
+					else if (VARATT_IS_EXTERNAL(val) && VARTAG_EXTERNAL(val) == VARTAG_ZEDSTORE)
 					{
-						/* no alignment for short varlenas */
-						data_length = VARSIZE_SHORT(val);
+						data_length = sizeof(varatt_zs_toastptr);
 						memcpy(data, val, data_length);
-					}
-					else if (VARLENA_ATT_IS_PACKABLE(att) &&
-							 VARATT_CAN_MAKE_SHORT(val))
-					{
-						/* convert to short varlena -- no alignment */
-						data_length = VARATT_CONVERTED_SHORT_SIZE(val);
-						SET_VARSIZE_SHORT(data, data_length);
-						memcpy(data + 1, VARDATA(val), data_length - 1);
 					}
 					else
 					{
-						/* full 4-byte header varlena */
-						data = (char *) att_align_nominal(data,
-														  att->attalign);
-						data_length = VARSIZE(val);
+						/* no alignment, since it's short by definition */
+						data_length = VARSIZE_EXTERNAL(val);
 						memcpy(data, val, data_length);
 					}
 				}
-				else if (att->attlen == -2)
+				else if (VARATT_IS_SHORT(val))
 				{
-					/* cstring ... never needs alignment */
-					Assert(att->attalign == 'c');
-					data_length = strlen(DatumGetCString(datum)) + 1;
-					memcpy(data, DatumGetPointer(datum), data_length);
+					/* no alignment for short varlenas */
+					data_length = VARSIZE_SHORT(val);
+					memcpy(data, val, data_length);
+				}
+				else if (VARLENA_ATT_IS_PACKABLE(att) &&
+						 VARATT_CAN_MAKE_SHORT(val))
+				{
+					/* convert to short varlena -- no alignment */
+					data_length = VARATT_CONVERTED_SHORT_SIZE(val);
+					SET_VARSIZE_SHORT(data, data_length);
+					memcpy(data + 1, VARDATA(val), data_length - 1);
 				}
 				else
 				{
-					/* fixed-length pass-by-reference */
-					data = (char *) att_align_nominal(data, att->attalign);
-					Assert(att->attlen > 0);
-					data_length = att->attlen;
-					memcpy(data, DatumGetPointer(datum), data_length);
+					/* full 4-byte header varlena */
+					data = (char *) att_align_nominal(data,
+													  att->attalign);
+					data_length = VARSIZE(val);
+					memcpy(data, val, data_length);
 				}
-				data += data_length;
 			}
-			Assert(data - databegin == datasz);
+			else if (att->attlen == -2)
+			{
+				/* cstring ... never needs alignment */
+				Assert(att->attalign == 'c');
+				data_length = strlen(DatumGetCString(datum)) + 1;
+				memcpy(data, DatumGetPointer(datum), data_length);
+			}
+			else
+			{
+				/* fixed-length pass-by-reference */
+				data = (char *) att_align_nominal(data, att->attalign);
+				Assert(att->attlen > 0);
+				data_length = att->attlen;
+				memcpy(data, DatumGetPointer(datum), data_length);
+			}
+			data += data_length;
 		}
-		else
-			memcpy(data, datasrc, datasz);
+		Assert(data - databegin == datasz);
 	}
 
 	return (ZSAttributeItem *) newitem;
 }
 
 static ZSAttributeItem *
-zsbt_attr_merge_items(ZSAttributeItem *aitem, ZSAttributeItem *bitem)
+zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttributeItem *bitem)
 {
 	ZSAttributeArrayItem *newitem;
 	Size		adatasz;
 	Size		bdatasz;
+	Size		totaldatasz;
 	Size		newitemsz;
 	bool		isnull;
 	ZSAttributeArrayItem *a_arr_item;
 	ZSAttributeArrayItem *b_arr_item;
+	Size		paddingsz = 0;
 
 	/* don't bother trying to merge compressed items */
 	if ((aitem->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
@@ -963,14 +952,69 @@ zsbt_attr_merge_items(ZSAttributeItem *aitem, ZSAttributeItem *bitem)
 
 	/* Create a new item that covers both. */
 	adatasz = aitem->t_size - offsetof(ZSAttributeArrayItem, t_payload);
-	bdatasz = bitem->t_size - offsetof(ZSAttributeArrayItem, t_payload);
+
+	if (attr->attlen > 0)
+	{
+		Size	alignedsz = att_align_nominal(adatasz, attr->attalign);
+
+		bdatasz = bitem->t_size - offsetof(ZSAttributeArrayItem, t_payload);
+		paddingsz = alignedsz - adatasz;
+		totaldatasz = adatasz + paddingsz + bdatasz;
+	}
+	else if (attr->attlen == -1)
+	{
+		/*
+		 * For varlenas, we have to work harder, to get the alignment right.
+		 * We have to walk through all the elements, and figure out where
+		 * each element will land and what alignment padding they need, when
+		 * they're appended to the first array. (TODO: We could stop short as
+		 * soon as we reach a point where the alignments in the source and
+		 * destination are the same)
+		 */
+		char		*src;
+		int			offset;
+
+		offset = adatasz;
+		src = b_arr_item->t_payload;
+		for (int i = 0; i < b_arr_item->t_nelements; i++)
+		{
+			Size		data_length;
+
+			/* Walk to the next element in the source */
+			src = (Pointer) att_align_pointer(src, attr->attalign, attr->attlen, src);
+
+			/* Write it to dest, with proper alignment */
+			if (VARATT_IS_EXTERNAL(src) && VARTAG_EXTERNAL(src) == VARTAG_ZEDSTORE)
+			{
+				data_length = sizeof(varatt_zs_toastptr);
+			}
+			else if (VARATT_IS_SHORT(src))
+			{
+				data_length = VARSIZE_SHORT(src);
+			}
+			else
+			{
+				/* full 4-byte header varlena */
+				offset = att_align_nominal(offset, attr->attalign);
+				data_length = VARSIZE(src);
+			}
+			src += data_length;
+			offset += data_length;
+		}
+
+		totaldatasz = offset;
+		bdatasz = offset - adatasz;
+	}
+	else
+		elog(ERROR, "unexpected attlen %d", attr->attlen);
 
 	/* Like in zsbt_attr_multi_insert(), enforce a practical limit on the
 	 * size of the array tuple. */
-	if (adatasz + bdatasz >= MaxZedStoreDatumSize / 4)
+	if (totaldatasz >= MaxZedStoreDatumSize / 4)
 		return NULL;
 
-	newitemsz = offsetof(ZSAttributeArrayItem, t_payload) + adatasz + bdatasz;
+	return NULL;
+	newitemsz = offsetof(ZSAttributeArrayItem, t_payload) + totaldatasz;
 
 	newitem = palloc(newitemsz);
 	newitem->t_tid = aitem->t_tid;
@@ -983,8 +1027,56 @@ zsbt_attr_merge_items(ZSAttributeItem *aitem, ZSAttributeItem *bitem)
 
 	if (!isnull)
 	{
-		memcpy(newitem->t_payload, a_arr_item->t_payload, adatasz);
-		memcpy(newitem->t_payload + adatasz, b_arr_item->t_payload, bdatasz);
+		char	   *p = newitem->t_payload;
+
+		memcpy(p, a_arr_item->t_payload, adatasz);
+
+		p += adatasz;
+
+		if (attr->attlen > 0)
+		{
+			memset(p, 0, paddingsz);
+			p += paddingsz;
+
+			memcpy(newitem->t_payload + adatasz, b_arr_item->t_payload, bdatasz);
+			p += bdatasz;
+		}
+		else
+		{
+			char	   *src;
+
+			/* clear alignment padding */
+			memset(p, 0, bdatasz);
+
+			src = b_arr_item->t_payload;
+			for (int i = 0; i < b_arr_item->t_nelements; i++)
+			{
+				Size		data_length;
+
+				/* Walk to the next element in the source */
+				src = (Pointer) att_align_pointer(src, attr->attalign, attr->attlen, src);
+
+				/* Write it to dest, with proper alignment */
+				if (VARATT_IS_EXTERNAL(src) && VARTAG_EXTERNAL(src) == VARTAG_ZEDSTORE)
+				{
+					data_length = sizeof(varatt_zs_toastptr);
+				}
+				else if (VARATT_IS_SHORT(src))
+				{
+					data_length = VARSIZE_SHORT(src);
+				}
+				else
+				{
+					/* full 4-byte header varlena */
+					p = (char *) att_align_nominal(p, attr->attalign);
+					data_length = VARSIZE(src);
+				}
+				memcpy(p, src, data_length);
+				p += data_length;
+				src += data_length;
+			}
+		}
+		Assert(p == (char *) newitem + newitem->t_size);
 	}
 
 	return (ZSAttributeItem *) newitem;
@@ -1030,7 +1122,8 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 		ZSAttributeItem *last_old_item = (ZSAttributeItem *) PageGetItem(page, last_iid);
 		ZSAttributeItem *first_new_item = (ZSAttributeItem *) linitial(newitems);
 
-		mergeditem = zsbt_attr_merge_items(last_old_item, first_new_item);
+		mergeditem = zsbt_attr_merge_items(TupleDescAttr(RelationGetDescr(rel), attno - 1),
+										   last_old_item, first_new_item);
 		if (mergeditem)
 		{
 			/*
@@ -1048,7 +1141,7 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 	/* Can we make the new items fit without splitting the page? */
 	growth = 0;
 	if (mergeditem)
-		growth += mergeditem->t_size - last_item_size;
+		growth += MAXALIGN(mergeditem->t_size) - last_item_size;
 	foreach (lc, newitems)
 	{
 		ZSAttributeItem *item = (ZSAttributeItem *) lfirst(lc);
@@ -1068,7 +1161,7 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 									(Item) mergeditem, mergeditem->t_size,
 									maxoff,
 									PAI_OVERWRITE) == InvalidOffsetNumber)
-				elog(ERROR, "could not add item to TID page");
+				elog(ERROR, "could not add item to attribute page");
 		}
 
 		foreach(lc, newitems)
@@ -1079,7 +1172,7 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 									(Item) item, item->t_size,
 									PageGetMaxOffsetNumber(page) + 1,
 									PAI_OVERWRITE) == InvalidOffsetNumber)
-				elog(ERROR, "could not add item to TID page");
+				elog(ERROR, "could not add item to attribute page");
 		}
 
 		MarkBufferDirty(buf);
@@ -1122,6 +1215,162 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 }
 
 /*
+ * Remove the value with the given TID from an array item,
+ * creating two new array items.
+ */
+static void
+zsbt_attr_split_item(Form_pg_attribute atti,
+					 ZSAttributeArrayItem *olditem, zstid removetid,
+					 ZSAttributeItem **newitem1, ZSAttributeItem **newitem2)
+{
+	bool		isnull = (olditem->t_flags & ZSBT_ATTR_NULL) != 0;
+	int			offset;
+
+	*newitem1 = NULL;
+	*newitem2 = NULL;
+
+	/* Only varlenas and fixed-width attributes are supported (not cstrings) */
+	Assert(atti->attlen > 0 || atti->attlen == -1);
+
+	offset = removetid - olditem->t_tid;
+
+	if (isnull || atti->attlen > 0)
+	{
+		/* Fixed-length (or all NULL) */
+		size_t		attlen;
+		size_t		aligned_attlen;
+
+		if (isnull)
+		{
+			attlen = 0;
+			aligned_attlen = 0;
+		}
+		else
+		{
+			attlen = atti->attlen;
+			aligned_attlen = att_align_nominal(atti->attlen, atti->attalign);
+		}
+
+		if (offset > 0)
+		{
+			ZSAttributeItem *item;
+			int			nelem = offset - 1;
+			size_t		datalen;
+
+			if (isnull)
+				datalen = 0;
+			else
+				datalen = aligned_attlen * nelem + attlen;
+
+			item = zsbt_attr_create_item_from_data(atti, olditem->t_tid, isnull, nelem,
+										 olditem->t_payload, datalen);
+			*newitem1 = (ZSAttributeItem *) item;
+		}
+
+		if (offset < olditem->t_nelements - 1)
+		{
+			ZSAttributeItem *item;
+			int			nelem = olditem->t_nelements - offset - 1;
+			size_t		datalen;
+
+			if (isnull)
+				datalen = 0;
+			else
+				datalen = aligned_attlen * (nelem - 1) + attlen;
+
+			item = zsbt_attr_create_item_from_data(atti, removetid + 1, nelem, isnull,
+												   olditem->t_payload + aligned_attlen * (offset + 1),
+												   datalen);
+			*newitem2 = (ZSAttributeItem *) item;
+		}
+	}
+	else
+	{
+		char	   *src;
+
+		Assert(!isnull);
+		Assert(atti->attlen == -1);
+
+		src = olditem->t_payload;
+
+		if (offset > 0)
+		{
+			ZSAttributeItem *item;
+			int			nelem = offset - 1;
+			size_t		datalen;
+
+			/* Walk the elements, up to the target element */
+			for (int i = 0; i < nelem; i++)
+			{
+				src = (Pointer) att_align_pointer(src, atti->attalign, atti->attlen, src);
+
+				if (VARATT_IS_EXTERNAL(src) && VARTAG_EXTERNAL(src) == VARTAG_ZEDSTORE)
+					src += sizeof(varatt_zs_toastptr);
+				else
+					src = att_addlength_pointer(src, atti->attlen, src);
+
+				/*
+				 * The array should already use short varlen representation whenever
+				 * possible.
+				 */
+				Assert(!VARATT_CAN_MAKE_SHORT(DatumGetPointer(src)));
+			}
+			datalen = src - olditem->t_payload;
+
+			item = zsbt_attr_create_item_from_data(atti, olditem->t_tid, nelem, isnull,
+												   olditem->t_payload, datalen);
+			*newitem1 = (ZSAttributeItem *) item;
+		}
+
+		if (offset < olditem->t_nelements - 1)
+		{
+			ZSAttributeArrayItem *item;
+			int			nelem = olditem->t_nelements - offset - 1;
+			size_t		allocsz;
+			char	   *dst;
+
+			allocsz = olditem->t_size - (src - olditem->t_payload) + MAXIMUM_ALIGNOF;
+			item = (ZSAttributeArrayItem *) palloc(olditem->t_size);
+			item->t_tid = removetid + 1;
+			/* item->t_size is filled in later */
+			item->t_flags = 0;
+			item->t_nelements = nelem;
+			item->t_padding = 0; /* zero padding */
+
+			/* Copy the remaining elements */
+			dst = item->t_payload;
+			for (int i = 0; i < nelem; i++)
+			{
+				size_t		this_length;
+
+				src = (Pointer) att_align_pointer(src, atti->attalign, atti->attlen, src);
+
+				if (VARATT_IS_EXTERNAL(src) && VARTAG_EXTERNAL(src) == VARTAG_ZEDSTORE)
+					this_length = sizeof(varatt_zs_toastptr);
+				else if (VARATT_IS_SHORT(src))
+					this_length = VARSIZE_SHORT(src);
+				else
+				{
+					/* full 4-byte header varlena */
+					this_length = VARSIZE(src);
+					dst = (char *) att_align_nominal(dst, atti->attalign);
+				}
+
+				memcpy(dst, src, this_length);
+				src += this_length;
+				dst += this_length;
+			}
+			Assert(src == (char *) olditem + olditem->t_size);
+			Assert(dst <= (char *) item + allocsz);
+			item->t_size = dst - (char *) item;
+
+			*newitem2 = (ZSAttributeItem *) item;
+		}
+	}
+}
+
+
+/*
  * This helper function is used to implement vacuum cleanup after a DELETE,
  * to delete attribute data belonging to dead tuples.
  *
@@ -1132,8 +1381,6 @@ static void
 zsbt_attr_remove_item(Relation rel, AttrNumber attno, Buffer buf, zstid oldtid)
 {
 	Form_pg_attribute attr;
-	int16		attlen;
-	bool		attbyval;
 	Page		page = BufferGetPage(buf);
 	OffsetNumber off;
 	OffsetNumber maxoff;
@@ -1145,13 +1392,6 @@ zsbt_attr_remove_item(Relation rel, AttrNumber attno, Buffer buf, zstid oldtid)
 	bool		decompressing;
 
 	attr = &rel->rd_att->attrs[attno - 1];
-	attlen = attr->attlen;
-	attbyval = attr->attbyval;
-
-	/*
-	 * TODO: It would be good to have a fast path, for the common case that we're
-	 * just adding items to the end.
-	 */
 
 	/* Loop through all old items on the page */
 	items = NIL;
@@ -1231,49 +1471,14 @@ zsbt_attr_remove_item(Relation rel, AttrNumber attno, Buffer buf, zstid oldtid)
 				 * The target TID is currently part of an array item. We have to split
 				 * the array item into two, and put the replacement item in the middle.
 				 */
-				int			cutoff;
-				Size		olddatalen;
-				int			nelements = aitem->t_nelements;
-				bool		isnull = (aitem->t_flags & ZSBT_ATTR_NULL) != 0;
-				char	   *dataptr;
+				ZSAttributeItem *item1;
+				ZSAttributeItem *item2;
 
-				cutoff = oldtid - item->t_tid;
-
-				/* Array slice before the target TID */
-				dataptr = aitem->t_payload;
-				if (cutoff > 0)
-				{
-					ZSAttributeItem *item1;
-					Size		datalen1;
-
-					datalen1 = zsbt_get_array_slice_len(attlen, attbyval, isnull,
-														dataptr, cutoff);
-					item1 = zsbt_attr_create_item(attr, aitem->t_tid,
-												  cutoff, NULL, dataptr, datalen1, isnull);
-					dataptr += datalen1;
+				zsbt_attr_split_item(attr, aitem, oldtid, &item1, &item2);
+				if (item1)
 					items = lappend(items, item1);
-				}
-
-				/*
-				 * Skip over the target element, and store the replacement
-				 * item, if any, in its place
-				 */
-				olddatalen = zsbt_get_array_slice_len(attlen, attbyval, isnull,
-													  dataptr, 1);
-				dataptr += olddatalen;
-
-				/* Array slice after the target */
-				if (cutoff + 1 < nelements)
-				{
-					ZSAttributeItem *item2;
-					Size		datalen2;
-
-					datalen2 = zsbt_get_array_slice_len(attlen, attbyval, isnull,
-														dataptr, nelements - (cutoff + 1));
-					item2 = zsbt_attr_create_item(attr, oldtid + 1,
-												  nelements - (cutoff + 1), NULL, dataptr, datalen2, isnull);
+				if (item2)
 					items = lappend(items, item2);
-				}
 
 				found_old_item = true;
 			}

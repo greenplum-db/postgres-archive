@@ -1085,10 +1085,6 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
 	Size		newitemsize;
 	ListCell   *lc;
 
-	/*
-	 * TODO: It would be good to have a fast path, for the common case that we're
-	 * just adding items to the end.
-	 */
 	newitemsize = 0;
 	foreach(lc, newitems)
 	{
