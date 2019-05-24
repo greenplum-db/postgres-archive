@@ -241,6 +241,11 @@ RelationTruncate(Relation rel, BlockNumber nblocks)
 	rel->rd_smgr->smgr_targblock = InvalidBlockNumber;
 	rel->rd_smgr->smgr_fsm_nblocks = InvalidBlockNumber;
 	rel->rd_smgr->smgr_vm_nblocks = InvalidBlockNumber;
+	if (rel->rd_smgr->smgr_amcache)
+	{
+		pfree(rel->rd_smgr->smgr_amcache);
+		rel->rd_smgr->smgr_amcache = NULL;
+	}
 
 	/* Truncate the FSM first if it exists */
 	fsm = smgrexists(rel->rd_smgr, FSM_FORKNUM);

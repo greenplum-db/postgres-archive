@@ -14,6 +14,7 @@
 #include "access/zedstore_compression.h"
 #include "access/zedstore_undo.h"
 #include "storage/bufmgr.h"
+#include "storage/smgr.h"
 #include "utils/datum.h"
 
 #define ZS_META_ATTRIBUTE_NUM 0
@@ -484,6 +485,62 @@ static inline Form_pg_attribute
 ZSBtreeScanGetAttInfo(ZSBtreeScan *scan)
 {
 	return TupleDescAttr(scan->tupledesc, scan->attno - 1);
+}
+
+/*
+ * We keep a cached copy of the information in the metapage in
+ * backend-private  memory. The cache is kept in SmgrRelation->smgr_amcache.
+ *
+ * The cache contains the block numbers of the roots of all the
+ * tree structures, for quick searches, as well as the rightmost
+ * leaf page, for quick insertions to the end.
+ *
+ * Use zsmeta_get_cache() to get the cached struct.
+ */
+typedef struct ZSMetaCacheData
+{
+	/*
+	 * Is the relation completely empty? If this is set, you cannot trust
+	 * that it's still empty; you have to check. But if this is not set, you
+	 * can read the metapage without checking for emptiness.
+	 */
+	bool		cache_rel_is_empty;
+
+	int			cache_nattributes;
+
+	BlockNumber	cache_fpm_root;
+
+	/* For each attribute */
+	struct {
+		BlockNumber root;				/* root of the b-tree */
+		BlockNumber rightmost; 			/* right most leaf page */
+		zstid		rightmost_lokey;	/* lokey of rightmost leaf */
+	} cache_attrs[FLEXIBLE_ARRAY_MEMBER];
+
+} ZSMetaCacheData;
+
+extern ZSMetaCacheData *zsmeta_populate_cache(Relation rel);
+
+static inline ZSMetaCacheData *
+zsmeta_get_cache(Relation rel)
+{
+	if (rel->rd_smgr == NULL || rel->rd_smgr->smgr_amcache == NULL)
+		zsmeta_populate_cache(rel);
+	return (ZSMetaCacheData *) rel->rd_smgr->smgr_amcache;
+}
+
+/*
+ * Blow away the cached ZSMetaCacheData struct. Next call to zsmeta_get_cache()
+ * will reload it from the metapage.
+ */
+static inline void
+zsmeta_invalidate_cache(Relation rel)
+{
+	if (rel->rd_smgr->smgr_amcache != NULL)
+	{
+		pfree(rel->rd_smgr->smgr_amcache);
+		rel->rd_smgr->smgr_amcache = NULL;
+	}
 }
 
 /*

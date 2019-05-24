@@ -20,44 +20,133 @@
 
 #include "access/itup.h"
 #include "access/zedstore_internal.h"
+#include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 
-static void
-zsmeta_add_root_for_attributes(Relation rel, Page page, bool init)
+static ZSMetaCacheData *
+zsmeta_populate_cache_from_metapage(Relation rel, Page page)
 {
-	int natts = RelationGetNumberOfAttributes(rel) + 1;
-	int cur_natts;
-	int maxatts;
-	Size freespace;
+	ZSMetaCacheData *cache;
 	ZSMetaPage *metapg;
+	int			natts;
+	ZSMetaPageOpaque *opaque;
 
-	/* Initialize the attribute root dir for new attribute */
-	freespace = PageGetExactFreeSpace(page);
-	maxatts = freespace / sizeof(ZSRootDirItem);
-	if (natts > maxatts)
+	if (rel->rd_smgr->smgr_amcache != NULL)
 	{
-		/*
-		 * The root block directory must fit on the metapage.
-		 *
-		 * TODO: We could extend this by overflowing to another page.
-		 */
-		elog(ERROR, "too many attributes for zedstore");
+		pfree(rel->rd_smgr->smgr_amcache);
+		rel->rd_smgr->smgr_amcache = NULL;
 	}
 
 	metapg = (ZSMetaPage *) PageGetContents(page);
+	opaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(page);
 
-	if (init)
-		metapg->nattributes = 0;
+	natts = metapg->nattributes;
 
-	for (cur_natts = metapg->nattributes; cur_natts < natts; cur_natts++)
+	cache =
+		MemoryContextAllocZero(TopMemoryContext,
+							   offsetof(ZSMetaCacheData, cache_attrs[natts]));
+	cache->cache_rel_is_empty = false;
+	cache->cache_nattributes = natts;
+	cache->cache_fpm_root = opaque->zs_fpm_root;
+
+	for (int i = 0; i < natts; i++)
 	{
-		metapg->tree_root_dir[cur_natts].root = InvalidBlockNumber;
+		cache->cache_attrs[i].root = metapg->tree_root_dir[i].root;
+		cache->cache_attrs[i].rightmost = InvalidBlockNumber;
 	}
 
-	metapg->nattributes = natts;
-	((PageHeader) page)->pd_lower += sizeof(ZSRootDirItem);
+	rel->rd_smgr->smgr_amcache = cache;
+	return cache;
+}
+
+ZSMetaCacheData *
+zsmeta_populate_cache(Relation rel)
+{
+	ZSMetaCacheData *cache;
+	Buffer		metabuf;
+
+	RelationOpenSmgr(rel);
+
+	if (rel->rd_smgr->smgr_amcache != NULL)
+	{
+		pfree(rel->rd_smgr->smgr_amcache);
+		rel->rd_smgr->smgr_amcache = NULL;
+	}
+
+	if (RelationGetNumberOfBlocks(rel) == 0)
+	{
+		cache =
+			MemoryContextAllocZero(TopMemoryContext,
+								   offsetof(ZSMetaCacheData, cache_attrs));
+		cache->cache_rel_is_empty = true;
+		cache->cache_nattributes = 0;
+		cache->cache_fpm_root = InvalidBlockNumber;
+		rel->rd_smgr->smgr_amcache = cache;
+	}
+	else
+	{
+		metabuf = ReadBuffer(rel, ZS_META_BLK);
+		LockBuffer(metabuf, BUFFER_LOCK_SHARE);
+		cache = zsmeta_populate_cache_from_metapage(rel, BufferGetPage(metabuf));
+		UnlockReleaseBuffer(metabuf);
+	}
+
+	return cache;
+}
+
+static void
+zsmeta_expand_metapage_for_new_attributes(Relation rel)
+{
+	int			natts = RelationGetNumberOfAttributes(rel) + 1;
+	Buffer		metabuf;
+	Page		page;
+	ZSMetaPage *metapg;
+
+	metabuf = ReadBuffer(rel, ZS_META_BLK);
+
+	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+	page = BufferGetPage(metabuf);
+	metapg = (ZSMetaPage *) PageGetContents(page);
+
+	if (natts > metapg->nattributes)
+	{
+		int			new_pd_lower;
+
+		new_pd_lower = (char *) &metapg->tree_root_dir[natts] - (char *) page;
+		if (new_pd_lower > ((PageHeader) page)->pd_upper)
+		{
+			/*
+			 * The root block directory must fit on the metapage.
+			 *
+			 * TODO: We could extend this by overflowing to another page.
+			 */
+			elog(ERROR, "too many attributes for zedstore");
+		}
+
+		START_CRIT_SECTION();
+
+		/* Initialize the new attribute roots to InvalidBlockNumber */
+		for (int i = metapg->nattributes; i < natts; i++)
+			metapg->tree_root_dir[i].root = InvalidBlockNumber;
+
+		metapg->nattributes = natts;
+		((PageHeader) page)->pd_lower = new_pd_lower;
+
+		MarkBufferDirty(metabuf);
+		/* TODO: WAL-log */
+
+		END_CRIT_SECTION();
+	}
+	UnlockReleaseBuffer(metabuf);
+
+	if (rel->rd_smgr->smgr_amcache != NULL)
+	{
+		pfree(rel->rd_smgr->smgr_amcache);
+		rel->rd_smgr->smgr_amcache = NULL;
+	}
 }
 
 /*
@@ -66,9 +155,12 @@ zsmeta_add_root_for_attributes(Relation rel, Page page, bool init)
 void
 zsmeta_initmetapage(Relation rel)
 {
+	int			natts = RelationGetNumberOfAttributes(rel) + 1;
 	Buffer		buf;
 	Page		page;
 	ZSMetaPageOpaque *opaque;
+	ZSMetaPage *metapg;
+	int			new_pd_lower;
 
 	/*
 	 * It's possible that we error out when building the metapage, if there
@@ -77,7 +169,6 @@ zsmeta_initmetapage(Relation rel)
 	 */
 	page = palloc(BLCKSZ);
 	PageInit(page, BLCKSZ, sizeof(ZSMetaPageOpaque));
-	zsmeta_add_root_for_attributes(rel, page, true);
 
 	opaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(page);
 	opaque->zs_flags = 0;
@@ -90,6 +181,25 @@ zsmeta_initmetapage(Relation rel)
 	opaque->zs_undo_oldestptr.counter = 1;
 
 	opaque->zs_fpm_root = InvalidBlockNumber;
+
+	metapg = (ZSMetaPage *) PageGetContents(page);
+
+	new_pd_lower = (char *) &metapg->tree_root_dir[natts] - (char *) page;
+	if (new_pd_lower > ((PageHeader) page)->pd_upper)
+	{
+		/*
+		 * The root block directory must fit on the metapage.
+		 *
+		 * TODO: We could extend this by overflowing to another page.
+		 */
+		elog(ERROR, "too many attributes for zedstore");
+	}
+
+	metapg->nattributes = natts;
+	for (int i = 0; i < natts; i++)
+		metapg->tree_root_dir[i].root = InvalidBlockNumber;
+
+	((PageHeader) page)->pd_lower = new_pd_lower;
 
 	/* Ok, write it out to disk */
 	buf = ReadBuffer(rel, P_NEW);
@@ -117,79 +227,97 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 	Buffer		metabuf;
 	ZSMetaPage *metapg;
 	BlockNumber	rootblk;
-	Page        page;
+	ZSMetaCacheData *metacache;
 
-	if (RelationGetNumberOfBlocks(rel) == 0)
+	Assert(attno == ZS_META_ATTRIBUTE_NUM || attno >= 1);
+
+	metacache = zsmeta_get_cache(rel);
+
+	if (metacache->cache_rel_is_empty)
 	{
-		if (readonly)
+		if (RelationGetNumberOfBlocks(rel) != 0)
+			metacache = zsmeta_populate_cache(rel);
+		else if (readonly)
 			return InvalidBlockNumber;
-
-		zsmeta_initmetapage(rel);
+		else
+		{
+			zsmeta_initmetapage(rel);
+			metacache = zsmeta_populate_cache(rel);
+		}
 	}
-
-	metabuf = ReadBuffer(rel, ZS_META_BLK);
-
-	/* TODO: get share lock to begin with */
-	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
-	page = BufferGetPage(metabuf);
-	metapg = (ZSMetaPage *) PageGetContents(page);
-
-	if ((attno != ZS_META_ATTRIBUTE_NUM) && attno <= 0)
-		elog(ERROR, "invalid attribute number %d (table has only %d attributes)", attno, metapg->nattributes);
 
 	/*
 	 * file has less number of attributes stored compared to catalog. This
 	 * happens due to add column default value storing value in catalog and
 	 * absent in table. This attribute must be marked with atthasmissing.
 	 */
-	if (attno >= metapg->nattributes)
+	if (attno >= metacache->cache_nattributes)
 	{
 		if (readonly)
 		{
-			UnlockReleaseBuffer(metabuf);
-			return InvalidBlockNumber;
+			/* re-check */
+			metacache = zsmeta_populate_cache(rel);
+			if (attno >= metacache->cache_nattributes)
+				return InvalidBlockNumber;
 		}
 		else
 		{
-			zsmeta_add_root_for_attributes(rel, page, false);
+			zsmeta_expand_metapage_for_new_attributes(rel);
+			metacache = zsmeta_populate_cache(rel);
 		}
 	}
 
-	rootblk = metapg->tree_root_dir[attno].root;
+	rootblk = metacache->cache_attrs[attno].root;
 
 	if (!readonly && rootblk == InvalidBlockNumber)
 	{
 		/* try to allocate one */
-		Buffer		rootbuf;
-		Page		rootpage;
-		ZSBtreePageOpaque *opaque;
+		Page		page;
 
-		/* TODO: release lock on metapage while we do I/O */
-		rootbuf = zspage_getnewbuf(rel, metabuf);
-		rootblk = BufferGetBlockNumber(rootbuf);
+		metabuf = ReadBuffer(rel, ZS_META_BLK);
 
-		metapg->tree_root_dir[attno].root = rootblk;
+		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+		page = BufferGetPage(metabuf);
+		metapg = (ZSMetaPage *) PageGetContents(page);
 
-		/* initialize the page to look like a root leaf */
-		rootpage = BufferGetPage(rootbuf);
-		PageInit(rootpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
-		opaque = ZSBtreePageGetOpaque(rootpage);
-		opaque->zs_attno = attno;
-		opaque->zs_next = InvalidBlockNumber;
-		opaque->zs_lokey = MinZSTid;
-		opaque->zs_hikey = MaxPlusOneZSTid;
-		opaque->zs_level = 0;
-		opaque->zs_flags = ZSBT_ROOT;
-		opaque->zs_page_id = ZS_BTREE_PAGE_ID;
+		/*
+		 * Re-check that the root is still invalid, now that we have the
+		 * metapage locked.
+		 */
+		rootblk = metapg->tree_root_dir[attno].root;
+		if (rootblk == InvalidBlockNumber)
+		{
+			Buffer		rootbuf;
+			Page		rootpage;
+			ZSBtreePageOpaque *opaque;
 
-		MarkBufferDirty(rootbuf);
-		MarkBufferDirty(metabuf);
-		/* TODO: WAL-log both pages */
+			/* TODO: release lock on metapage while we do I/O */
+			rootbuf = zspage_getnewbuf(rel, metabuf);
+			rootblk = BufferGetBlockNumber(rootbuf);
 
-		UnlockReleaseBuffer(rootbuf);
+			metapg->tree_root_dir[attno].root = rootblk;
+
+			/* initialize the page to look like a root leaf */
+			rootpage = BufferGetPage(rootbuf);
+			PageInit(rootpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
+			opaque = ZSBtreePageGetOpaque(rootpage);
+			opaque->zs_attno = attno;
+			opaque->zs_next = InvalidBlockNumber;
+			opaque->zs_lokey = MinZSTid;
+			opaque->zs_hikey = MaxPlusOneZSTid;
+			opaque->zs_level = 0;
+			opaque->zs_flags = ZSBT_ROOT;
+			opaque->zs_page_id = ZS_BTREE_PAGE_ID;
+
+			MarkBufferDirty(rootbuf);
+			MarkBufferDirty(metabuf);
+			/* TODO: WAL-log both pages */
+
+			UnlockReleaseBuffer(rootbuf);
+		}
+		metacache->cache_attrs[attno].root = rootblk;
+		UnlockReleaseBuffer(metabuf);
 	}
-
-	UnlockReleaseBuffer(metabuf);
 
 	return rootblk;
 }

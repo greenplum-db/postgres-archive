@@ -411,7 +411,6 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	 * TODO: use a Free Space Map to find suitable target.
 	 */
 	insert_target_key = MaxZSTid;
-
 	buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, insert_target_key, 0, false);
 	page = BufferGetPage(buf);
 	opaque = ZSBtreePageGetOpaque(page);

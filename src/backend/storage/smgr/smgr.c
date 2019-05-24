@@ -177,6 +177,7 @@ smgropen(RelFileNode rnode, BackendId backend)
 		reln->smgr_targblock = InvalidBlockNumber;
 		reln->smgr_fsm_nblocks = InvalidBlockNumber;
 		reln->smgr_vm_nblocks = InvalidBlockNumber;
+		reln->smgr_amcache = NULL;
 		reln->smgr_which = 0;	/* we only have md.c at present */
 
 		/* mark it not open */
@@ -267,6 +268,12 @@ smgrclose(SMgrRelation reln)
 
 	if (!owner)
 		dlist_delete(&reln->node);
+
+	if (reln->smgr_amcache)
+	{
+		pfree(reln->smgr_amcache);
+		reln->smgr_amcache = NULL;
+	}
 
 	if (hash_search(SMgrRelationHash,
 					(void *) &(reln->smgr_rnode),

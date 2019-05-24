@@ -47,21 +47,31 @@ zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly
 	ZSBtreeInternalPageItem *items;
 	int			nitems;
 	int			itemno;
-	BlockNumber rootblk;
-	int			nextlevel = -1;
+	int			nextlevel;
 	BlockNumber failblk = InvalidBlockNumber;
+	ZSMetaCacheData *metacache;
 
-	/* start from root */
-restart:
-	rootblk = zsmeta_get_root_for_attribute(rel, attno, readonly);
-
-	if (rootblk == InvalidBlockNumber)
+	/* Fast path for the very common case that we're looking for the rightmost page */
+	metacache = zsmeta_get_cache(rel);
+	if (level == 0 &&
+		attno < metacache->cache_nattributes &&
+		metacache->cache_attrs[attno].rightmost != InvalidBlockNumber &&
+		key >= metacache->cache_attrs[attno].rightmost_lokey)
 	{
-		/* completely empty tree */
-		return InvalidBuffer;
+		next = metacache->cache_attrs[attno].rightmost;
+		nextlevel = 0;
 	}
-
-	next = rootblk;
+	else
+	{
+		/* start from root */
+		next = zsmeta_get_root_for_attribute(rel, attno, readonly);
+		if (next == InvalidBlockNumber)
+		{
+			/* completely empty tree */
+			return InvalidBuffer;
+		}
+		nextlevel = -1;
+	}
 	for (;;)
 	{
 		/*
@@ -90,8 +100,14 @@ restart:
 			 * the tree is corrupt, rather than concurrent splits, and we land here
 			 * again, we won't loop forever.
 			 */
+			UnlockReleaseBuffer(buf);
 			failblk = next;
-			goto restart;
+			nextlevel = -1;
+			zsmeta_invalidate_cache(rel);
+			next = zsmeta_get_root_for_attribute(rel, attno, readonly);
+			if (next == InvalidBlockNumber)
+				elog(ERROR, "could not find root for attribute %d", attno);
+			continue;
 		}
 		opaque = ZSBtreePageGetOpaque(page);
 
@@ -102,7 +118,7 @@ restart:
 			elog(ERROR, "unexpected level encountered when descending tree");
 
 		if (opaque->zs_level == level)
-			return buf;
+			break;
 
 		/* Find the downlink and follow it */
 		items = ZSBtreeInternalPageGetItems(page);
@@ -118,6 +134,18 @@ restart:
 
 		UnlockReleaseBuffer(buf);
 	}
+
+	if (opaque->zs_level == 0 && opaque->zs_next == InvalidBlockNumber)
+	{
+		metacache = zsmeta_get_cache(rel);
+		if (attno < metacache->cache_nattributes)
+		{
+			metacache->cache_attrs[attno].rightmost = next;
+			metacache->cache_attrs[attno].rightmost_lokey = opaque->zs_lokey;
+		}
+	}
+
+	return buf;
 }
 
 /*
