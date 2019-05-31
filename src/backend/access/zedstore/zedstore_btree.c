@@ -49,6 +49,7 @@ zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly
 	int			itemno;
 	int			nextlevel;
 	BlockNumber failblk = InvalidBlockNumber;
+	int			faillevel = -1;
 	ZSMetaCacheData *metacache;
 
 	/* Fast path for the very common case that we're looking for the rightmost page */
@@ -101,12 +102,28 @@ zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly
 			 * again, we won't loop forever.
 			 */
 			UnlockReleaseBuffer(buf);
+
 			failblk = next;
+			faillevel = nextlevel;
 			nextlevel = -1;
 			zsmeta_invalidate_cache(rel);
 			next = zsmeta_get_root_for_attribute(rel, attno, readonly);
 			if (next == InvalidBlockNumber)
 				elog(ERROR, "could not find root for attribute %d", attno);
+
+			/*
+			 * If the root was split after we cached the metadata, it's
+			 * possible that the page we thought was the root page no longer
+			 * is, but as we descend from the new root page, we'll end up on
+			 * the same page again anyway. Don't treat thatas an error. To
+			 * avoid it, check for the root case here, and if reset 'failblk'.
+			 */
+			if (faillevel == -1)
+			{
+				if (next == failblk)
+					elog(ERROR, "arrived at incorrect block %u while descending zedstore btree", next);
+				failblk = InvalidBlockNumber;
+			}
 			continue;
 		}
 		opaque = ZSBtreePageGetOpaque(page);
@@ -181,8 +198,16 @@ zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buff
 	if (opaque->zs_attno != attno)
 		return false;
 
-	if (level != -1 && opaque->zs_level != level)
-		return false;
+	if (level == -1)
+	{
+		if ((opaque->zs_flags & ZSBT_ROOT) == 0)
+			return false;
+	}
+	else
+	{
+		if (opaque->zs_level != level)
+			return false;
+	}
 
 	if (opaque->zs_lokey > key || opaque->zs_hikey <= key)
 		return false;

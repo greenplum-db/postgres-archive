@@ -36,3 +36,18 @@ select extract(epoch from now()) as after
 
 INSERT INTO results (testname, val) VALUES ('onecol, COPY, size', pg_total_relation_size('onecol'));
 INSERT INTO results (testname, val) VALUES ('onecol, COPY, time', :after - :before);
+
+--
+-- Delete half of the rows
+--
+
+select extract(epoch from now()) as before
+\gset
+
+DELETE FROM onecol WHERE i%2 = 0;
+
+select extract(epoch from now()) as after
+\gset
+
+INSERT INTO results (testname, val) VALUES ('onecol, deleted half, size', pg_total_relation_size('onecol'));
+INSERT INTO results (testname, val) VALUES ('onecol, deleted half, time', :after - :before);

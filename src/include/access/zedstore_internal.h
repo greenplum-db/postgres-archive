@@ -271,16 +271,17 @@ typedef struct
 	uint16		t_size;
 	uint16		t_flags;
 
+	uint16		t_nelements;
+	
 	ZSUndoRecPtr t_undo_ptr;
 
-	uint16		t_nelements;
 } ZSTidArrayItem;
 
 #define ZSBT_TID_DEAD			0x0001
 
 /*
  * Get the last TID that the given item spans.
-x */
+ */
 static inline zstid
 zsbt_tid_item_lasttid(ZSTidItem *item)
 {
