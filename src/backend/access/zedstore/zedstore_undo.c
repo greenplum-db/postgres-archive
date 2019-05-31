@@ -381,7 +381,6 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 	{
 		ZSUndoRecPtr reaped_upto;
 		BlockNumber oldest_undopage;
-		int			j;
 		List	   *unused_pages = NIL;
 
 		trimstats->dead_tuples_overflowed = false;
@@ -394,16 +393,6 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 		{
 			pg_qsort(trimstats->dead_tuples, trimstats->num_dead_tuples,
 					 sizeof(ItemPointerData), zs_vac_cmp_itemptr);
-			/* TODO: currently, we write a separate UNDO record for each attribute, so there will
-			 * be duplicates. Eliminate them. */
-			j = 1;
-			for (int i = 1; i < trimstats->num_dead_tuples; i++)
-			{
-				if (!ItemPointerEquals(&trimstats->dead_tuples[j - 1],
-									   &trimstats->dead_tuples[i]))
-					trimstats->dead_tuples[j++] = trimstats->dead_tuples[i];
-			}
-			trimstats->num_dead_tuples = j;
 
 			/* Remove index entries */
 			for (int i = 0; i < nindexes; i++)
@@ -412,22 +401,25 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 								  vacrelstats);
 
 			/*
-			 * Mark the items as dead in the attribute b-trees.
+			 * Mark the items as dead in the TID tree, and remove them from the
+			 * attribute b-trees.
 			 *
-			 * We cannot remove them immediately, because we must prevent the TIDs from
-			 * being reused, until we have trimmed the UNDO records. Otherwise, this might
-			 * happen:
+			 * We cannot remove them immediately from the TID tree, because we
+			 * must prevent the TIDs from being reused, until we have trimmed
+			 * the UNDO records. Otherwise, this might happen:
 			 *
 			 * 1. We remove items from all the B-trees.
 			 * 2. An inserter reuses the now-unused TID for a new tuple
 			 * 3. We abort the VACUUM, for some reason
-			 * 4. We start VACUUM again. We will now try to remove the item again, but
-			 *    we will remove the new item with the same TID instead.
+			 * 4. We start VACUUM again. We will now try to remove the item
+			 *    again, but we will remove the new item with the same TID
+			 *    instead.
 			 *
-			 * There would be other ways to deal with it. For example in step #4, we could
-			 * refrain from removing items, whose UNDO pointers are newer than expected.
-			 * But that's tricky, because we scan the indexes first, and we must refrain
-			 * from removing index entries for new items, too.
+			 * There would be other ways to deal with it. For example in step
+			 * #4, we could refrain from removing items, whose UNDO pointers
+			 * are newer than expected. But that's tricky, because we scan the
+			 * indexes first, and we must refrain from removing index entries
+			 * for new items, too.
 			 */
 			for (int i = 0; i < trimstats->num_dead_tuples; i++)
 				zsbt_tid_mark_dead(rel,
