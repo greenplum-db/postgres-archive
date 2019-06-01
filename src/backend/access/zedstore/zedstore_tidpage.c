@@ -49,6 +49,7 @@ static void zsbt_tid_update_insert_new(Relation rel, zstid *newtid,
 					   TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr);
 static void zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 					  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot);
+static int zsbt_binsrch_tidpage(zstid key, ZSTidArrayItem *arr, int arr_elems);
 
 /* ----------------------------------------------------------------
  *						 Public interface
@@ -1177,105 +1178,165 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, zstid oldtid, ZSTidArrayItem *re
 	Page		page = BufferGetPage(buf);
 	ZSTidArrayItem *tiditems;
 	int			ntiditems;
-	List	   *items;
-	bool		found_old_item = false;
+	ZSTidArrayItem *olditem;
+	int			itemno;
+
+	Assert(!replacementitem || (replacementitem->t_tid == oldtid && replacementitem->t_nelements == 1));
 
 	if (replacementitem)
 		Assert(replacementitem->t_tid == oldtid);
 
+	/*
+	 * Find the item that covers the given tid.
+	 */
 	tiditems = PageGetZSTidArray(page);
 	ntiditems = PageGetNumZSTidItems(page);
 
-	/*
-	 * TODO: It would be good to have a fast path, for the common case that we're
-	 * just adding items to the end.
-	 */
+	itemno = zsbt_binsrch_tidpage(oldtid, tiditems, ntiditems);
+	if (itemno < 0)
+		elog(ERROR, "could not find item to replace for tid (%u, %u)",
+			 ZSTidGetBlockNumber(oldtid), ZSTidGetOffsetNumber(oldtid));
+	olditem = &tiditems[itemno];
 
-	/* Loop through all old items on the page */
-	items = NIL;
-	for (int i = 0; i < ntiditems; i++)
+	if (oldtid < olditem->t_tid || oldtid >= olditem->t_tid + olditem->t_nelements)
+		elog(ERROR, "could not find item to replace for tid (%u, %u)",
+			 ZSTidGetBlockNumber(oldtid), ZSTidGetOffsetNumber(oldtid));
+
 	{
-		ZSTidArrayItem *item = &tiditems[i];
-		zstid		item_lasttid;
-
 		/*
-		 * XXX: currently, there's only one kind of an item, but we'll probably get
-		 * different more or less compact formats in the future.
+		 * The target TID might be part of an array item. We have to split
+		 * the array item into two, and put the replacement item in the middle.
 		 */
-		item_lasttid = zsbt_tid_item_lasttid(item);
+		int			cutoff;
+		int			nelements = olditem->t_nelements;
+		ZSTidArrayItem *item_before = NULL;
+		ZSTidArrayItem *item_after = NULL;
+		int			n_replacements = -1;
 
-		if (oldtid != InvalidZSTid && item->t_tid <= oldtid && oldtid <= item_lasttid)
+		cutoff = oldtid - olditem->t_tid;
+
+		/* Array slice before the target TID */
+		if (cutoff > 0)
 		{
-			/*
-			 * The target TID is currently part of an array item. We have to split
-			 * the array item into two, and put the replacement item in the middle.
-			 */
-			int			cutoff;
-			int			nelements = item->t_nelements;
+			item_before = zsbt_tid_create_item(olditem->t_tid, olditem->t_undo_ptr,
+											   cutoff);
+			n_replacements++;
+		}
 
-			cutoff = oldtid - item->t_tid;
+		if (replacementitem)
+			n_replacements++;
 
-			/* Array slice before the target TID */
-			if (cutoff > 0)
+		/* Array slice after the target */
+		if (cutoff + 1 < nelements)
+		{
+			item_after = zsbt_tid_create_item(oldtid + 1, olditem->t_undo_ptr,
+											  nelements - (cutoff + 1));
+			n_replacements++;
+		}
+
+		/* Can we fit them? */
+		if (n_replacements * sizeof(ZSTidArrayItem) <= PageGetExactFreeSpace(page))
+		{
+			ZSTidArrayItem *dstitem = olditem;
+
+			START_CRIT_SECTION();
+
+			/* move existing items */
+			if (n_replacements == -1)
+				memmove(olditem, olditem + n_replacements,
+						(ntiditems - itemno - 1) * sizeof(ZSTidArrayItem));
+			else
 			{
-				ZSTidArrayItem *item1;
+				memmove(olditem + n_replacements + 1, olditem + 1,
+						(ntiditems - itemno - 1) * sizeof(ZSTidArrayItem));
 
-				item1 = zsbt_tid_create_item(item->t_tid, item->t_undo_ptr,
-											 cutoff);
-				items = lappend(items, item1);
+				if (item_before)
+					*(dstitem++) = *item_before;
+				if (replacementitem)
+					*(dstitem++) = *replacementitem;
+				if (item_after)
+					*(dstitem++) = *item_after;
 			}
 
-			/*
-			 * Skip over the target element, and store the replacement
-			 * item, if any, in its place
-			 */
-			if (replacementitem)
-				items = lappend(items, replacementitem);
+			((PageHeader) page)->pd_lower += n_replacements * sizeof(ZSTidArrayItem);
 
-			/* Array slice after the target */
-			if (cutoff + 1 < nelements)
+			MarkBufferDirty(buf);
+			/* TODO: WAL-log */
+			END_CRIT_SECTION();
+
 			{
-				ZSTidArrayItem *item2;
-
-				item2 = zsbt_tid_create_item(oldtid + 1, item->t_undo_ptr,
-											 nelements - (cutoff + 1));
-				items = lappend(items, item2);
+				zstid lasttid = 0;
+				ntiditems = PageGetNumZSTidItems(page);
+				for (int i = 0; i < ntiditems; i++)
+				{
+					Assert(tiditems[i].t_tid > lasttid);
+					lasttid = zsbt_tid_item_lasttid(&tiditems[i]);
+				}
 			}
 
-			found_old_item = true;
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 		}
 		else
-			items = lappend(items, item);
-	}
-
-	if (oldtid != InvalidZSTid && !found_old_item)
-		elog(ERROR, "could not find old item to replace");
-
-	/* Now pass the list to the recompressor. */
-	IncrBufferRefCount(buf);
-	if (items)
-	{
-		zsbt_tid_recompress_replace(rel, buf, items);
-	}
-	else
-	{
-		zs_split_stack *stack;
-
-		stack = zsbt_unlink_page(rel, ZS_META_ATTRIBUTE_NUM, buf, 0);
-
-		if (!stack)
 		{
-			/* failed. */
-			Page		newpage = PageGetTempPageCopySpecial(BufferGetPage(buf));
+			/* Have to split the page. */
+			List	   *items = NIL;
+			int			i;
 
-			stack = zs_new_split_stack_entry(buf, newpage);
+			for (i = 0; i < itemno; i++)
+				items = lappend(items, &tiditems[i]);
+
+			if (item_before)
+				items = lappend(items, item_before);
+			if (replacementitem)
+				items = lappend(items, replacementitem);
+			if (item_after)
+				items = lappend(items, item_after);
+
+			i++;
+			for (; i < ntiditems; i++)
+				items = lappend(items, &tiditems[i]);
+
+
+
+			{
+				zstid lasttid = 0;
+				ListCell *lc;
+				ntiditems = PageGetNumZSTidItems(page);
+				foreach (lc, items)
+				{
+					ZSTidArrayItem *i = (ZSTidArrayItem *) lfirst(lc);
+					Assert(i->t_tid > lasttid);
+					lasttid = zsbt_tid_item_lasttid(i);
+				}
+			}
+
+			/* Pass the list to the recompressor. */
+			IncrBufferRefCount(buf);
+			if (items)
+			{
+				zsbt_tid_recompress_replace(rel, buf, items);
+			}
+			else
+			{
+				zs_split_stack *stack;
+
+				stack = zsbt_unlink_page(rel, ZS_META_ATTRIBUTE_NUM, buf, 0);
+
+				if (!stack)
+				{
+					/* failed. */
+					Page		newpage = PageGetTempPageCopySpecial(BufferGetPage(buf));
+
+					stack = zs_new_split_stack_entry(buf, newpage);
+				}
+
+				/* apply the changes */
+				zs_apply_split_changes(rel, stack);
+			}
+
+			list_free(items);
 		}
-
-		/* apply the changes */
-		zs_apply_split_changes(rel, stack);
 	}
-
-	list_free(items);
 }
 
 /*
@@ -1472,4 +1533,25 @@ zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items)
 
 	/* Finally, overwrite all the pages we had to modify */
 	zs_apply_split_changes(rel, cxt.stack_head);
+}
+
+static int
+zsbt_binsrch_tidpage(zstid key, ZSTidArrayItem *arr, int arr_elems)
+{
+	int			low,
+		high,
+		mid;
+
+	low = 0;
+	high = arr_elems;
+	while (high > low)
+	{
+		mid = low + (high - low) / 2;
+
+		if (key >= arr[mid].t_tid)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+	return low - 1;
 }

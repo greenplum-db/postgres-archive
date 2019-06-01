@@ -51,3 +51,17 @@ select extract(epoch from now()) as after
 
 INSERT INTO results (testname, val) VALUES ('onecol, deleted half, size', pg_total_relation_size('onecol'));
 INSERT INTO results (testname, val) VALUES ('onecol, deleted half, time', :after - :before);
+
+--
+-- And vacuum the deleted rows away
+--
+select extract(epoch from now()) as before
+\gset
+
+VACUUM onecol;
+
+select extract(epoch from now()) as after
+\gset
+
+INSERT INTO results (testname, val) VALUES ('onecol, vacuumed, size', pg_total_relation_size('onecol'));
+INSERT INTO results (testname, val) VALUES ('onecol, vacuumed, time', :after - :before);
