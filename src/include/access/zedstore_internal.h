@@ -149,20 +149,18 @@ ZSBtreeInternalPageIsFull(Page page)
 }
 
 /*
- * Leaf B-tree page layout
+ * Attribute B-tree leaf page layout
  *
- * FIXME
- * Leaf pages are packed with ZSAttributeItems. There are three kinds of items:
+ * Leaf pages in the attribute trees are packed with ZSAttributeItems. There are two
+ * kinds of items:
  *
- * 1. Single item, holds one tuple (or rather, one datum).
- *
- * 2. "Array item", holds multiple datums, with consecutive TIDs and the same
+ * 1. "Array item", holds multiple datums, with consecutive TIDs and the same
  *    visibility information. An array item saves space compared to multiple
  *    single items, by leaving out repetitive UNDO and TID fields. An array
  *    item cannot mix NULLs and non-NULLs, so the ZSBT_NULL flag applies to
  *    all elements.
  *
- * 3. "Compressed item", which can hold multiple single or array items.
+ * 2. "Compressed item", which can hold multiple single or array items.
  *
  * A single or array item can furthermore be marked as DEAD. A dead item
  * prevents the TID (or TID range, for an array item) from being reused. It's
@@ -232,47 +230,30 @@ zsbt_attr_item_lasttid(ZSAttributeItem *item)
 
 
 /*
- * Leaf B-tree page layout
+ * TID B-tree leaf page layout
  *
- * FIXME
- * Leaf pages are packed with ZSBtreeItems. There are three kinds of items:
+ * Leaf pages are packed with ZSTidArrayItems. Each ZSTidArrayItem represents
+ * a range of tuples, starting at 't_tid'.
  *
- * 1. Single item, holds one tuple (or rather, one datum).
- *
- * 2. "Array item", holds multiple datums, with consecutive TIDs and the same
- *    visibility information. An array item saves space compared to multiple
- *    single items, by leaving out repetitive UNDO and TID fields. An array
- *    item cannot mix NULLs and non-NULLs, so the ZSBT_NULL flag applies to
- *    all elements.
- *
- * 3. "Compressed item", which can hold multiple single or array items.
- *
- * A single or array item can furthermore be marked as DEAD. A dead item
- * prevents the TID (or TID range, for an array item) from being reused. It's
- * used during VACUUM, to mark items for which there are no index pointers
- * anymore. But it cannot be removed until the undo record has been trimmed
- * away, because if the TID was reused for a new record, vacuum might remove
+ * An item can be marked DEAD. A dead item prevents the TID (or TID range) from
+ * being reused. It's used during VACUUM, to mark items for which there are no
+ * index pointers anymore. But it cannot be removed until the undo record has been
+ * trimmed away, because if the TID was reused for a new record, vacuum might remove
  * the new tuple version instead. After t_undo_ptr becomes older than "oldest
  * undo ptr", the item can be removed and the TID recycled.
  *
- * TODO: squeeze harder: eliminate padding, use high bits of t_tid for flags or size
+ * The page uses the standard page layout, but does *not* use standard line pointers.
+ * Each item has a fixed size, so we store an array of them directly after the
+ * standard page header.
+ *
+ * TODO: squeeze harder: eliminate padding, use high bits of t_tid for flags etc.
  */
 typedef struct
 {
 	zstid		t_tid;
-	uint16		t_size;
-	uint16		t_flags;
-} ZSTidItem;
-
-typedef struct
-{
-	/* these fields must match ZSTidItem */
-	zstid		t_tid;
-	uint16		t_size;
+	uint32		t_nelements;
 	uint16		t_flags;
 
-	uint16		t_nelements;
-	
 	ZSUndoRecPtr t_undo_ptr;
 
 } ZSTidArrayItem;
@@ -283,17 +264,23 @@ typedef struct
  * Get the last TID that the given item spans.
  */
 static inline zstid
-zsbt_tid_item_lasttid(ZSTidItem *item)
+zsbt_tid_item_lasttid(ZSTidArrayItem *item)
 {
-	ZSTidArrayItem *aitem = (ZSTidArrayItem *) item;
-	return aitem->t_tid + aitem->t_nelements - 1;
+	return item->t_tid + item->t_nelements - 1;
 }
 
-static inline ZSUndoRecPtr
-zsbt_item_undoptr(ZSTidItem *item)
+static inline ZSTidArrayItem *
+PageGetZSTidArray(Page page)
 {
-	ZSTidArrayItem *aitem = (ZSTidArrayItem *) item;
-	return aitem->t_undo_ptr;
+	return (ZSTidArrayItem *) PageGetContents(page);
+}
+
+static inline int
+PageGetNumZSTidItems(Page page)
+{
+	PageHeader phdr = (PageHeader) page;
+
+	return (phdr->pd_lower - MAXALIGN(SizeOfPageHeaderData))  / sizeof(ZSTidArrayItem);
 }
 
 /*

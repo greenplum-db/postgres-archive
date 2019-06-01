@@ -52,6 +52,8 @@ zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly
 	int			faillevel = -1;
 	ZSMetaCacheData *metacache;
 
+	Assert(key != InvalidZSTid);
+
 	/* Fast path for the very common case that we're looking for the rightmost page */
 	metacache = zsmeta_get_cache(rel);
 	if (level == 0 &&

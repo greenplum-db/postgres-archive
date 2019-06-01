@@ -1164,7 +1164,7 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 
 		foreach(lc, newitems)
 		{
-			ZSTidItem *item = (ZSTidItem *) lfirst(lc);
+			ZSAttributeItem *item = (ZSAttributeItem *) lfirst(lc);
 
 			if (PageAddItemExtended(page,
 									(Item) item, item->t_size,

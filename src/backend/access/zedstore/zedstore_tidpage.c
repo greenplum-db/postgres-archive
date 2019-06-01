@@ -39,8 +39,8 @@ static bool zsbt_tid_fetch(Relation rel, zstid tid,
 						   Buffer *buf_p, ZSUndoRecPtr *undo_ptr_p, bool *isdead_p);
 static void zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems);
 static void zsbt_tid_replace_item(Relation rel, Buffer buf,
-								  zstid oldtid, ZSTidItem *replacementitem);
-static ZSTidItem *zsbt_tid_create_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements);
+								  zstid oldtid, ZSTidArrayItem *replacementitem);
+static ZSTidArrayItem *zsbt_tid_create_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements);
 
 static TM_Result zsbt_tid_update_lock_old(Relation rel, zstid otid,
 									  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot,
@@ -175,8 +175,8 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 	bool		buf_is_locked = false;
 	Page		page;
 	ZSBtreePageOpaque *opaque;
-	OffsetNumber off;
-	OffsetNumber maxoff;
+	ZSTidArrayItem *tiditems;
+	int			ntiditems;
 	BlockNumber	next;
 	bool		visible;
 
@@ -251,11 +251,11 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 		Assert(opaque->zs_page_id == ZS_BTREE_PAGE_ID);
 
 		/* TODO: check the last offset first, as an optimization */
-		maxoff = PageGetMaxOffsetNumber(page);
-		for (off = FirstOffsetNumber; off <= maxoff; off++)
+		tiditems = PageGetZSTidArray(page);
+		ntiditems = PageGetNumZSTidItems(page);
+		for (int i = 0; i < ntiditems; i++)
 		{
-			ItemId		iid = PageGetItemId(page, off);
-			ZSTidItem	*item = (ZSTidItem *) PageGetItem(page, iid);
+			ZSTidArrayItem *item = &tiditems[i];
 			zstid		lasttid;
 			TransactionId obsoleting_xid = InvalidTransactionId;
 			ZSTidArrayItem *aitem;
@@ -275,7 +275,7 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 			if ((item->t_flags & ZSBT_TID_DEAD) != 0)
 				visible = false;
 			else
-				visible = zs_SatisfiesVisibility(scan, zsbt_item_undoptr(item), &obsoleting_xid, NULL);
+				visible = zs_SatisfiesVisibility(scan, item->t_undo_ptr, &obsoleting_xid, NULL);
 
 			if (!visible)
 			{
@@ -287,8 +287,8 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 
 			/* copy the item, because we can't hold a lock on the page  */
 
-			aitem = MemoryContextAlloc(scan->context, item->t_size);
-			memcpy(aitem, item, item->t_size);
+			aitem = MemoryContextAlloc(scan->context, sizeof(ZSTidArrayItem));
+			memcpy(aitem, item, sizeof(ZSTidArrayItem));
 
 			zsbt_tid_scan_extract_array(scan, aitem);
 
@@ -347,7 +347,7 @@ zsbt_get_last_tid(Relation rel)
 	Buffer		buf;
 	Page		page;
 	ZSBtreePageOpaque *opaque;
-	OffsetNumber maxoff;
+	int			ntiditems;
 
 	/* Find the rightmost leaf */
 	rightmostkey = MaxZSTid;
@@ -362,13 +362,12 @@ zsbt_get_last_tid(Relation rel)
 	/*
 	 * Look at the last item, for its tid.
 	 */
-	maxoff = PageGetMaxOffsetNumber(page);
-	if (maxoff >= FirstOffsetNumber)
+	ntiditems = PageGetNumZSTidItems(page);
+	if (ntiditems > 0)
 	{
-		ItemId		iid = PageGetItemId(page, maxoff);
-		ZSTidItem	*hitup = (ZSTidItem *) PageGetItem(page, iid);
+		ZSTidArrayItem *lastitem = &PageGetZSTidArray(page)[ntiditems - 1];
 
-		tid = zsbt_tid_item_lasttid(hitup) + 1;
+		tid = zsbt_tid_item_lasttid(lastitem) + 1;
 	}
 	else
 	{
@@ -396,14 +395,14 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	Buffer		buf;
 	Page		page;
 	ZSBtreePageOpaque *opaque;
-	OffsetNumber maxoff;
+	int			ntiditems;
 	zstid		insert_target_key;
 	ZSUndoRec_Insert undorec;
 	List	   *newitems;
 	ZSUndoRecPtr undorecptr;
 	zstid		lasttid;
 	zstid		tid;
-	ZSTidItem  *newitem;
+	ZSTidArrayItem  *newitem;
 
 	/*
 	 * Insert to the rightmost leaf.
@@ -414,26 +413,26 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, insert_target_key, 0, false);
 	page = BufferGetPage(buf);
 	opaque = ZSBtreePageGetOpaque(page);
-	maxoff = PageGetMaxOffsetNumber(page);
+	ntiditems = PageGetNumZSTidItems(page);
 
 	/*
 	 * Look at the last item, for its tid.
 	 *
 	 * assign TIDS for each item.
 	 */
-	 if (maxoff >= FirstOffsetNumber)
-	 {
-		 ItemId		iid = PageGetItemId(page, maxoff);
-		 ZSTidItem	*hitup = (ZSTidItem *) PageGetItem(page, iid);
+	if (ntiditems > 0)
+	{
+		ZSTidArrayItem *lastitem = &PageGetZSTidArray(page)[ntiditems - 1];
 
-		 lasttid = zsbt_tid_item_lasttid(hitup);
-		 tid = lasttid + 1;
-	 }
-	 else
-	 {
-		 lasttid = opaque->zs_lokey;
-		 tid = lasttid;
-	 }
+		lasttid = zsbt_tid_item_lasttid(lastitem);
+		tid = lasttid + 1;
+	}
+	else
+	{
+		lasttid = opaque->zs_lokey;
+		tid = lasttid;
+	}
+	Assert(tid != InvalidZSTid);
 
 	/* Form an undo record */
 	if (xid != FrozenTransactionId)
@@ -483,7 +482,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 	ZSUndoRecPtr undorecptr;
-	ZSTidItem *deleteditem;
+	ZSTidArrayItem *deleteditem;
 	Buffer		buf;
 	zstid		next_tid;
 
@@ -759,7 +758,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	bool		keep_old_undo_ptr = true;
 	TM_FailureData tmfd;
 	ZSUndoRecPtr undorecptr;
-	ZSTidItem *deleteditem;
+	ZSTidArrayItem *deleteditem;
 	zstid		next_tid;
 
 	/*
@@ -812,7 +811,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	/* Replace the ZSBreeItem with one with the updated undo pointer. */
 	deleteditem = zsbt_tid_create_item(otid, undorecptr, 1);
 
-	zsbt_tid_replace_item(rel, buf, otid, (ZSTidItem *) deleteditem);
+	zsbt_tid_replace_item(rel, buf, otid, deleteditem);
 	ReleaseBuffer(buf);		/* zsbt_recompress_replace released */
 
 	pfree(deleteditem);
@@ -832,7 +831,7 @@ zsbt_tid_lock(Relation rel, zstid tid,
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 	ZSUndoRecPtr undorecptr;
-	ZSTidItem  *newitem;
+	ZSTidArrayItem *newitem;
 
 	*next_tid = tid;
 
@@ -917,12 +916,11 @@ zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr undoptr)
 
 	memset(&deaditem, 0, sizeof(ZSTidArrayItem));
 	deaditem.t_tid = tid;
-	deaditem.t_size = sizeof(ZSTidArrayItem);
 	deaditem.t_flags = ZSBT_TID_DEAD;
 	deaditem.t_undo_ptr = undoptr;
 	deaditem.t_nelements = 1;
 
-	zsbt_tid_replace_item(rel, buf, tid, (ZSTidItem *) &deaditem);
+	zsbt_tid_replace_item(rel, buf, tid, &deaditem);
 	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 }
 
@@ -937,7 +935,7 @@ zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr)
 	Buffer		buf;
 	ZSUndoRecPtr item_undoptr;
 	bool		found;
-	ZSTidItem *copy;
+	ZSTidArrayItem *copy;
 
 	/* Find the item to delete. (It could be compressed) */
 	found = zsbt_tid_fetch(rel, tid, &buf, &item_undoptr, NULL);
@@ -998,10 +996,10 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoRecPtr *undoptr_p, 
 {
 	Buffer		buf;
 	Page		page;
-	ZSTidItem *item = NULL;
+	ZSTidArrayItem *item = NULL;
 	bool		found = false;
-	OffsetNumber maxoff;
-	OffsetNumber off;
+	int			ntiditems;
+	ZSTidArrayItem *tiditems;
 
 	buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, tid, 0, false);
 	if (buf == InvalidBuffer)
@@ -1013,13 +1011,13 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoRecPtr *undoptr_p, 
 	page = BufferGetPage(buf);
 
 	/* Find the item on the page that covers the target TID */
-	maxoff = PageGetMaxOffsetNumber(page);
-	for (off = FirstOffsetNumber; off <= maxoff; off++)
+	ntiditems = PageGetNumZSTidItems(page);
+	tiditems = PageGetZSTidArray(page);
+	for (int i = 0; i < ntiditems; i++)
 	{
-		ItemId		iid = PageGetItemId(page, off);
 		zstid		lasttid;
 
-		item = (ZSTidItem *) PageGetItem(page, iid);
+		item = &tiditems[i];
 		lasttid = zsbt_tid_item_lasttid(item);
 
 		if (item->t_tid <= tid && lasttid >= tid)
@@ -1031,7 +1029,7 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoRecPtr *undoptr_p, 
 
 	if (found)
 	{
-		*undoptr_p = zsbt_item_undoptr(item);
+		*undoptr_p = item->t_undo_ptr;
 		*buf_p = buf;
 		if (isdead_p)
 			*isdead_p = (item->t_flags & ZSBT_TID_DEAD) != 0;
@@ -1046,9 +1044,9 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoRecPtr *undoptr_p, 
 }
 
 /*
- * Form a ZSTidItem for the 'nelements' consecutive TIDs, starting with 'tid'.
+ * Form a ZSTidArrayItem for the 'nelements' consecutive TIDs, starting with 'tid'.
  */
-static ZSTidItem *
+static ZSTidArrayItem *
 zsbt_tid_create_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements)
 {
 	ZSTidArrayItem *newitem;
@@ -1060,12 +1058,11 @@ zsbt_tid_create_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements)
 
 	newitem = palloc(itemsz);
 	newitem->t_tid = tid;
-	newitem->t_size = itemsz;
 	newitem->t_flags = 0;
 	newitem->t_nelements = nelements;
 	newitem->t_undo_ptr = undo_ptr;
 
-	return (ZSTidItem *) newitem;
+	return newitem;
 }
 
 /*
@@ -1081,33 +1078,29 @@ static void
 zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
 {
 	Page		page = BufferGetPage(buf);
+	ZSTidArrayItem *tiditems;
+	int			ntiditems;
+
 	Size		newitemsize;
 	ListCell   *lc;
 
-	newitemsize = 0;
-	foreach(lc, newitems)
-	{
-		ZSTidItem *item = (ZSTidItem *) lfirst(lc);
+	tiditems = PageGetZSTidArray(page);
+	ntiditems = PageGetNumZSTidItems(page);
 
-		newitemsize += MAXALIGN(item->t_size);
-		newitemsize += sizeof(ItemIdData);	/* line pointer */
-	}
-
+	newitemsize = list_length(newitems) * sizeof(ZSTidArrayItem);
 	if (newitemsize <= PageGetExactFreeSpace(page))
 	{
 		/* The new items fit on the page. Add them. */
+
 		START_CRIT_SECTION();
 
 		foreach(lc, newitems)
 		{
-			ZSTidItem *item = (ZSTidItem *) lfirst(lc);
+			ZSTidArrayItem *item = (ZSTidArrayItem *) lfirst(lc);
 
-			if (PageAddItemExtended(page,
-									(Item) item, item->t_size,
-									PageGetMaxOffsetNumber(page) + 1,
-									PAI_OVERWRITE) == InvalidOffsetNumber)
-				elog(ERROR, "could not add item to TID page");
+			tiditems[ntiditems++] = *item;
 		}
+		((PageHeader) page)->pd_lower += newitemsize;
 
 		MarkBufferDirty(buf);
 
@@ -1119,35 +1112,16 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
 	}
 	else
 	{
-		OffsetNumber off;
-		OffsetNumber maxoff;
-		List	   *items;
+		List	   *items = NIL;
 
 		/* Loop through all old items on the page */
-		items = NIL;
-		maxoff = PageGetMaxOffsetNumber(page);
-		off = 1;
-		for (;;)
+		for (int i = 0; i < ntiditems; i++)
 		{
-			ZSTidItem *item;
+			ZSTidArrayItem *item = &tiditems[i];
 
 			/*
 			 * Get the next item to process from the page.
 			 */
-			if (off <= maxoff)
-			{
-				ItemId		iid = PageGetItemId(page, off);
-
-				item = (ZSTidItem *) PageGetItem(page, iid);
-				off++;
-
-			}
-			else
-			{
-				/* out of items */
-				break;
-			}
-
 			items = lappend(items, item);
 		}
 
@@ -1198,16 +1172,19 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
  * the page if needed.
  */
 static void
-zsbt_tid_replace_item(Relation rel, Buffer buf, zstid oldtid, ZSTidItem *replacementitem)
+zsbt_tid_replace_item(Relation rel, Buffer buf, zstid oldtid, ZSTidArrayItem *replacementitem)
 {
 	Page		page = BufferGetPage(buf);
-	OffsetNumber off;
-	OffsetNumber maxoff;
+	ZSTidArrayItem *tiditems;
+	int			ntiditems;
 	List	   *items;
 	bool		found_old_item = false;
 
 	if (replacementitem)
 		Assert(replacementitem->t_tid == oldtid);
+
+	tiditems = PageGetZSTidArray(page);
+	ntiditems = PageGetNumZSTidItems(page);
 
 	/*
 	 * TODO: It would be good to have a fast path, for the common case that we're
@@ -1216,36 +1193,15 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, zstid oldtid, ZSTidItem *replace
 
 	/* Loop through all old items on the page */
 	items = NIL;
-	maxoff = PageGetMaxOffsetNumber(page);
-	off = 1;
-	for (;;)
+	for (int i = 0; i < ntiditems; i++)
 	{
-		ZSTidItem *item;
-		ZSTidArrayItem *aitem;
+		ZSTidArrayItem *item = &tiditems[i];
 		zstid		item_lasttid;
-
-		/*
-		 * Get the next item to process from the page.
-		 */
-		if (off <= maxoff)
-		{
-			ItemId		iid = PageGetItemId(page, off);
-
-			item = (ZSTidItem *) PageGetItem(page, iid);
-			off++;
-
-		}
-		else
-		{
-			/* out of items */
-			break;
-		}
 
 		/*
 		 * XXX: currently, there's only one kind of an item, but we'll probably get
 		 * different more or less compact formats in the future.
 		 */
-		aitem = (ZSTidArrayItem *) item;
 		item_lasttid = zsbt_tid_item_lasttid(item);
 
 		if (oldtid != InvalidZSTid && item->t_tid <= oldtid && oldtid <= item_lasttid)
@@ -1255,16 +1211,16 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, zstid oldtid, ZSTidItem *replace
 			 * the array item into two, and put the replacement item in the middle.
 			 */
 			int			cutoff;
-			int			nelements = aitem->t_nelements;
+			int			nelements = item->t_nelements;
 
 			cutoff = oldtid - item->t_tid;
 
 			/* Array slice before the target TID */
 			if (cutoff > 0)
 			{
-				ZSTidItem *item1;
+				ZSTidArrayItem *item1;
 
-				item1 = zsbt_tid_create_item(aitem->t_tid, aitem->t_undo_ptr,
+				item1 = zsbt_tid_create_item(item->t_tid, item->t_undo_ptr,
 											 cutoff);
 				items = lappend(items, item1);
 			}
@@ -1279,9 +1235,9 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, zstid oldtid, ZSTidItem *replace
 			/* Array slice after the target */
 			if (cutoff + 1 < nelements)
 			{
-				ZSTidItem *item2;
+				ZSTidArrayItem *item2;
 
-				item2 = zsbt_tid_create_item(oldtid + 1, aitem->t_undo_ptr,
+				item2 = zsbt_tid_create_item(oldtid + 1, item->t_undo_ptr,
 											 nelements - (cutoff + 1));
 				items = lappend(items, item2);
 			}
@@ -1377,16 +1333,19 @@ zsbt_tid_recompress_newpage(zsbt_tid_recompress_context *cxt, zstid nexttid, int
 }
 
 static void
-zsbt_tid_recompress_add_to_page(zsbt_tid_recompress_context *cxt, ZSTidItem *item)
+zsbt_tid_recompress_add_to_page(zsbt_tid_recompress_context *cxt, ZSTidArrayItem *item)
 {
-	if (PageGetFreeSpace(cxt->currpage) < MAXALIGN(item->t_size))
+	ZSTidArrayItem *tiditems;
+	int			ntiditems;
+
+	if (PageGetFreeSpace(cxt->currpage) < MAXALIGN(sizeof(ZSTidArrayItem)))
 		zsbt_tid_recompress_newpage(cxt, item->t_tid, 0);
 
-	if (PageAddItemExtended(cxt->currpage,
-							(Item) item, item->t_size,
-							PageGetMaxOffsetNumber(cxt->currpage) + 1,
-							PAI_OVERWRITE) == InvalidOffsetNumber)
-		elog(ERROR, "could not add item to page while recompressing");
+	tiditems = PageGetZSTidArray(cxt->currpage);
+	ntiditems = PageGetNumZSTidItems(cxt->currpage);
+
+	tiditems[ntiditems] = *item;
+	((PageHeader) cxt->currpage)->pd_lower += sizeof(ZSTidArrayItem);
 
 	cxt->total_items++;
 }
@@ -1432,17 +1391,15 @@ zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items)
 
 	foreach(lc, items)
 	{
-		ZSTidItem *item = (ZSTidItem *) lfirst(lc);
+		ZSTidArrayItem *item = (ZSTidArrayItem *) lfirst(lc);
 
 		/* We can leave out any old-enough DEAD items */
 		if ((item->t_flags & ZSBT_TID_DEAD) != 0)
 		{
-			ZSTidItem *uitem = (ZSTidItem *) item;
-
 			if (recent_oldest_undo.counter == 0)
 				recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 
-			if (zsbt_item_undoptr(uitem).counter <= recent_oldest_undo.counter)
+			if (item->t_undo_ptr.counter <= recent_oldest_undo.counter)
 				continue;
 		}
 
