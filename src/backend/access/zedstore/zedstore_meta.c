@@ -32,7 +32,6 @@ zsmeta_populate_cache_from_metapage(Relation rel, Page page)
 	ZSMetaCacheData *cache;
 	ZSMetaPage *metapg;
 	int			natts;
-	ZSMetaPageOpaque *opaque;
 
 	if (rel->rd_smgr->smgr_amcache != NULL)
 	{
@@ -41,7 +40,6 @@ zsmeta_populate_cache_from_metapage(Relation rel, Page page)
 	}
 
 	metapg = (ZSMetaPage *) PageGetContents(page);
-	opaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(page);
 
 	natts = metapg->nattributes;
 
@@ -50,7 +48,6 @@ zsmeta_populate_cache_from_metapage(Relation rel, Page page)
 							   offsetof(ZSMetaCacheData, cache_attrs[natts]));
 	cache->cache_rel_is_empty = false;
 	cache->cache_nattributes = natts;
-	cache->cache_fpm_root = opaque->zs_fpm_root;
 
 	for (int i = 0; i < natts; i++)
 	{
@@ -83,7 +80,6 @@ zsmeta_populate_cache(Relation rel)
 								   offsetof(ZSMetaCacheData, cache_attrs));
 		cache->cache_rel_is_empty = true;
 		cache->cache_nattributes = 0;
-		cache->cache_fpm_root = InvalidBlockNumber;
 		rel->rd_smgr->smgr_amcache = cache;
 	}
 	else
@@ -180,7 +176,7 @@ zsmeta_initmetapage(Relation rel)
 	opaque->zs_undo_tail = InvalidBlockNumber;
 	opaque->zs_undo_oldestptr.counter = 1;
 
-	opaque->zs_fpm_root = InvalidBlockNumber;
+	opaque->zs_fpm_head = InvalidBlockNumber;
 
 	metapg = (ZSMetaPage *) PageGetContents(page);
 

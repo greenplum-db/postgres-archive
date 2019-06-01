@@ -88,7 +88,7 @@ ZSTidGetOffsetNumber(zstid tid)
 #define	ZS_BTREE_PAGE_ID	0xF084
 #define	ZS_UNDO_PAGE_ID		0xF085
 #define	ZS_TOAST_PAGE_ID	0xF086
-#define	ZS_FPM_PAGE_ID		0xF087
+#define	ZS_FREE_PAGE_ID		0xF087
 
 /* flags for zedstore b-tree pages */
 #define ZSBT_ROOT				0x0001
@@ -423,7 +423,7 @@ typedef struct ZSMetaPageOpaque
 	BlockNumber	zs_undo_tail;
 	ZSUndoRecPtr zs_undo_oldestptr;
 
-	BlockNumber zs_fpm_root;		/* root of the Free Page Map */
+	BlockNumber zs_fpm_head;		/* head of the Free Page Map list */
 
 	uint16		zs_flags;
 	uint16		zs_page_id;
@@ -508,8 +508,6 @@ typedef struct ZSMetaCacheData
 	bool		cache_rel_is_empty;
 
 	int			cache_nattributes;
-
-	BlockNumber	cache_fpm_root;
 
 	/* For each attribute */
 	struct {

@@ -109,8 +109,8 @@ pg_zs_page_type(PG_FUNCTION_ARGS)
 		case ZS_TOAST_PAGE_ID:
 			result = "TOAST";
 			break;
-		case ZS_FPM_PAGE_ID:
-			result = "FPM";
+		case ZS_FREE_PAGE_ID:
+			result = "FREE";
 			break;
 		default:
 			result = psprintf("UNKNOWN 0x%04x", zs_page_id);
