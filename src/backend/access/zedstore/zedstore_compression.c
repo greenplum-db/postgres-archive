@@ -19,14 +19,14 @@
  * Feed them to the compressor one by one with zs_compress_add(), until it
  * returns false.
  *
- * Finally, call zs_compress_finish(). It returns a ZSCompressedBtreeItem,
+ * Finally, call zs_compress_finish(). It returns a ZSAttributeCompressedItem,
  * which contains all the plain items that were added (except for the last one
  * for which zs_compress_add() returned false)
  *
  * Decompression interface
  * -----------------------
  *
- * zs_decompress_chunk() takes a ZSCompressedBtreeItem as argument. It
+ * zs_decompress_chunk() takes a ZSAttributeCompressedItem as argument. It
  * initializes a "context" with the given chunk.
  *
  * Call zs_decompress_read_item() to return the uncompressed items one by one.
@@ -249,7 +249,7 @@ zs_compress_begin(ZSCompressContext *context, int maxCompressedSize)
 
 	/* determine the max uncompressed size */
 	maxUncompressedSize = maxCompressedSize;
-	maxUncompressedSize -= offsetof(ZSCompressedBtreeItem, t_payload);
+	maxUncompressedSize -= offsetof(ZSAttributeCompressedItem, t_payload);
 	maxUncompressedSize -= maxUncompressedSize / MAX_COMPRESS_EXPANSION_OVERHEAD;
 	maxUncompressedSize -= MAX_COMPRESS_EXPANSION_BYTES;
 	if (maxUncompressedSize < 0)
@@ -269,8 +269,8 @@ zs_compress_add(ZSCompressContext *context, ZSAttributeItem *item)
 {
 	ZSAttributeCompressedItem *chunk = (ZSAttributeCompressedItem *) context->buffer;
 
-	Assert ((item->t_flags & ZSBT_ATTR_COMPRESSED) == 0);
-	Assert(item->t_size >= sizeof(ZSAttributeItem);
+	Assert((item->t_flags & ZSBT_ATTR_COMPRESSED) == 0);
+	Assert(item->t_size >= sizeof(ZSAttributeItem));
 
 	if (context->rawsize + item->t_size > context->maxUncompressedSize)
 		return false;
@@ -278,17 +278,17 @@ zs_compress_add(ZSCompressContext *context, ZSAttributeItem *item)
 	memcpy(context->uncompressedbuffer + context->rawsize, item, item->t_size);
 	if (context->nitems == 0)
 		chunk->t_tid = item->t_tid;
-	chunk->t_lasttid = zsbt_item_lasttid(item);
+	chunk->t_lasttid = zsbt_attr_item_lasttid(item);
 	context->nitems++;
 	context->rawsize += MAXALIGN(item->t_size);
 
 	return true;
 }
 
-ZSCompressedBtreeItem *
+ZSAttributeCompressedItem *
 zs_compress_finish(ZSCompressContext *context)
 {
-	ZSCompressedBtreeItem *chunk = (ZSCompressedBtreeItem *) context->buffer;
+	ZSAttributeCompressedItem *chunk = (ZSAttributeCompressedItem *) context->buffer;
 	int32		compressed_size;
 
 	compressed_size = pglz_compress(context->uncompressedbuffer, context->rawsize,
@@ -297,8 +297,8 @@ zs_compress_finish(ZSCompressContext *context)
 	if (compressed_size < 0)
 		return NULL;
 
-	chunk->t_size = offsetof(ZSCompressedBtreeItem, t_payload) + compressed_size;
-	chunk->t_flags = ZSBT_COMPRESSED;
+	chunk->t_size = offsetof(ZSAttributeCompressedItem, t_payload) + compressed_size;
+	chunk->t_flags = ZSBT_ATTR_COMPRESSED;
 	chunk->t_uncompressedsize = context->rawsize;
 
 	return chunk;
@@ -320,9 +320,9 @@ zs_decompress_init(ZSDecompressContext *context)
 }
 
 void
-zs_decompress_chunk(ZSDecompressContext *context, ZSCompressedBtreeItem *chunk)
+zs_decompress_chunk(ZSDecompressContext *context, ZSAttributeCompressedItem *chunk)
 {
-	Assert((chunk->t_flags & ZSBT_COMPRESSED) != 0);
+	Assert((chunk->t_flags & ZSBT_ATTR_COMPRESSED) != 0);
 	Assert(chunk->t_uncompressedsize > 0);
 	if (context->bufsize < chunk->t_uncompressedsize)
 	{
@@ -334,7 +334,7 @@ zs_decompress_chunk(ZSDecompressContext *context, ZSCompressedBtreeItem *chunk)
 	context->uncompressedsize = chunk->t_uncompressedsize;
 
 	if (pglz_decompress(chunk->t_payload,
-						chunk->t_size - offsetof(ZSCompressedBtreeItem, t_payload),
+						chunk->t_size - offsetof(ZSAttributeCompressedItem, t_payload),
 						context->buffer,
 						context->uncompressedsize, true) != context->uncompressedsize)
 		elog(ERROR, "could not decompress chunk");
