@@ -262,7 +262,7 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 		 */
 		zsbt_tid_mark_dead(relation, tid, zsUndoRecPtr);
 		for (int attno = 1; attno <= RelationGetNumberOfAttributes(relation); attno++)
-			zsbt_attr_remove(relation, attno, tid);
+			zsbt_attr_remove(relation, attno, &tid, 1);
 	}
 }
 

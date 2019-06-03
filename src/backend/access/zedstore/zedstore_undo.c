@@ -36,7 +36,7 @@ typedef struct ZSUndoTrimStats
 	/* NB: this list is ordered by TID address */
 	int			num_dead_tuples;	/* current # of entries */
 	int			max_dead_tuples;	/* # slots allocated in array */
-	ItemPointer dead_tuples;	/* array of ItemPointerData */
+	zstid	   *dead_tuples;		/* array of zstid */
 	bool		dead_tuples_overflowed;
 
 	BlockNumber	deleted_undo_pages;
@@ -79,7 +79,7 @@ typedef struct ZSVacRelStats
  */
 #define LAZY_ALLOC_TUPLES		MaxHeapTuplesPerPage
 
-static int zs_vac_cmp_itemptr(const void *left, const void *right);
+static int zs_vac_cmp_zstid(const void *left, const void *right);
 static bool zs_lazy_tid_reaped(ItemPointer itemptr, void *state);
 static void lazy_space_alloc(ZSVacRelStats *vacrelstats, BlockNumber relblocks);
 static void lazy_vacuum_index(Relation indrel,
@@ -299,12 +299,13 @@ zs_lazy_tid_reaped(ItemPointer itemptr, void *state)
 {
 	ZSVacRelStats *vacrelstats = (ZSVacRelStats *) state;
 	ItemPointer res;
+	zstid		tid = ZSTidFromItemPointer(*itemptr);
 
-	res = (ItemPointer) bsearch((void *) itemptr,
+	res = (ItemPointer) bsearch((void *) &tid,
 								(void *) vacrelstats->trimstats.dead_tuples,
 								vacrelstats->trimstats.num_dead_tuples,
-								sizeof(ItemPointerData),
-								zs_vac_cmp_itemptr);
+								sizeof(zstid),
+								zs_vac_cmp_zstid);
 
 	return (res != NULL);
 }
@@ -313,27 +314,14 @@ zs_lazy_tid_reaped(ItemPointer itemptr, void *state)
  * Comparator routines for use with qsort() and bsearch().
  */
 static int
-zs_vac_cmp_itemptr(const void *left, const void *right)
+zs_vac_cmp_zstid(const void *left, const void *right)
 {
-	BlockNumber lblk,
-				rblk;
-	OffsetNumber loff,
-				roff;
+	zstid		lefttid = *(zstid *) left;
+	zstid		righttid = *(zstid *) right;
 
-	lblk = ItemPointerGetBlockNumber((ItemPointer) left);
-	rblk = ItemPointerGetBlockNumber((ItemPointer) right);
-
-	if (lblk < rblk)
+	if (lefttid < righttid)
 		return -1;
-	if (lblk > rblk)
-		return 1;
-
-	loff = ItemPointerGetOffsetNumber((ItemPointer) left);
-	roff = ItemPointerGetOffsetNumber((ItemPointer) right);
-
-	if (loff < roff)
-		return -1;
-	if (loff > roff)
+	if (lefttid > righttid)
 		return 1;
 
 	return 0;
@@ -392,7 +380,7 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 		if (trimstats->num_dead_tuples > 0)
 		{
 			pg_qsort(trimstats->dead_tuples, trimstats->num_dead_tuples,
-					 sizeof(ItemPointerData), zs_vac_cmp_itemptr);
+					 sizeof(zstid), zs_vac_cmp_zstid);
 
 			/* Remove index entries */
 			for (int i = 0; i < nindexes; i++)
@@ -423,14 +411,11 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 			 */
 			for (int i = 0; i < trimstats->num_dead_tuples; i++)
 				zsbt_tid_mark_dead(rel,
-								   ZSTidFromItemPointer(trimstats->dead_tuples[i]),
+								   trimstats->dead_tuples[i],
 								   reaped_upto);
 
 			for (int attno = 1; attno <= RelationGetNumberOfAttributes(rel); attno++)
-			{
-				for (int i = 0; i < trimstats->num_dead_tuples; i++)
-					zsbt_attr_remove(rel, attno, ZSTidFromItemPointer(trimstats->dead_tuples[i]));
-			}
+				zsbt_attr_remove(rel, attno, trimstats->dead_tuples, trimstats->num_dead_tuples);
 		}
 
 		/*
@@ -490,9 +475,9 @@ lazy_space_alloc(ZSVacRelStats *vacrelstats, BlockNumber relblocks)
 
 	if (vacrelstats->hasindex)
 	{
-		maxtuples = (vac_work_mem * 1024L) / sizeof(ItemPointerData);
+		maxtuples = (vac_work_mem * 1024L) / sizeof(zstid);
 		maxtuples = Min(maxtuples, INT_MAX);
-		maxtuples = Min(maxtuples, MaxAllocSize / sizeof(ItemPointerData));
+		maxtuples = Min(maxtuples, MaxAllocSize / sizeof(zstid));
 
 		/* curious coding here to ensure the multiplication can't overflow */
 		if ((BlockNumber) (maxtuples / LAZY_ALLOC_TUPLES) > relblocks)
@@ -514,8 +499,8 @@ lazy_space_alloc(ZSVacRelStats *vacrelstats, BlockNumber relblocks)
 
 	vacrelstats->trimstats.num_dead_tuples = 0;
 	vacrelstats->trimstats.max_dead_tuples = (int) maxtuples;
-	vacrelstats->trimstats.dead_tuples = (ItemPointer)
-		palloc(maxtuples * sizeof(ItemPointerData));
+	vacrelstats->trimstats.dead_tuples = (zstid *)
+		palloc(maxtuples * sizeof(zstid));
 }
 
 /*
@@ -875,8 +860,8 @@ zsundo_record_dead_tuple(ZSUndoTrimStats *trimstats, zstid tid)
 	 */
 	if (trimstats->num_dead_tuples < trimstats->max_dead_tuples)
 	{
-		trimstats->dead_tuples[trimstats->num_dead_tuples] = ItemPointerFromZSTid(tid);
-		 trimstats->num_dead_tuples++;
+		trimstats->dead_tuples[trimstats->num_dead_tuples] = tid;
+		trimstats->num_dead_tuples++;
 		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
 									 trimstats->num_dead_tuples);
 	}

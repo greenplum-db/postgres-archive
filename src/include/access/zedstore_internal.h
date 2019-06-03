@@ -590,7 +590,7 @@ extern zs_split_stack *zsbt_newroot(Relation rel, AttrNumber attno, int level, L
 extern zs_split_stack *zsbt_insert_downlinks(Relation rel, AttrNumber attno,
 					  zstid leftlokey, BlockNumber leftblkno, int level,
 					  List *downlinks);
-extern void zsbt_attr_remove(Relation rel, AttrNumber attno, zstid tid);
+extern void zsbt_attr_remove(Relation rel, AttrNumber attno, zstid *tids, int num_tids);
 extern zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level);
 extern Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
 extern bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf);
