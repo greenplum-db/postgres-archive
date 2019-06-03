@@ -28,6 +28,7 @@
 
 #include "access/zedstore_internal.h"
 #include "access/zedstore_undo.h"
+#include "lib/integerset.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
@@ -886,12 +887,93 @@ zsbt_tid_lock(Relation rel, zstid tid,
 }
 
 /*
+ * Collect all TIDs marked as dead in the TID tree.
+ *
+ * This is used during VACUUM.
+ */
+IntegerSet *
+zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid)
+{
+	Buffer		buf = InvalidBuffer;
+	IntegerSet *result;
+	ZSBtreePageOpaque *opaque;
+	zstid		nexttid;
+	BlockNumber	nextblock;
+
+	result = intset_create();
+
+	nexttid = starttid;
+	nextblock = InvalidBlockNumber;
+	for (;;)
+	{
+		ZSTidArrayItem *tiditems;
+		int			ntiditems;
+		Page		page;
+
+		if (nextblock != InvalidBlockNumber)
+		{
+			buf = ReleaseAndReadBuffer(buf, rel, nextblock);
+			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+			page = BufferGetPage(buf);
+
+			if (!zsbt_page_is_expected(rel, ZS_META_ATTRIBUTE_NUM, nexttid, 0, buf))
+			{
+				UnlockReleaseBuffer(buf);
+				buf = InvalidBuffer;
+			}
+		}
+
+		if (!BufferIsValid(buf))
+		{
+			buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, nexttid, 0, true);
+			if (!BufferIsValid(buf))
+				return result;
+			page = BufferGetPage(buf);
+		}
+
+		tiditems = PageGetZSTidArray(page);
+		ntiditems = PageGetNumZSTidItems(page);
+		for (int i = 0; i < ntiditems; i++)
+		{
+			ZSTidArrayItem *item = &tiditems[i];
+
+			if ((item->t_flags & ZSBT_TID_DEAD) != 0)
+			{
+				for (int j = 0; j < item->t_nelements; j++)
+					intset_add_member(result, item->t_tid + j);
+			}
+		}
+
+		opaque = ZSBtreePageGetOpaque(page);
+		nexttid = opaque->zs_hikey;
+		nextblock = opaque->zs_next;
+
+		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+		if (nexttid == MaxPlusOneZSTid)
+		{
+			Assert(nextblock == InvalidBlockNumber);
+			break;
+		}
+
+		if (intset_memory_usage(result) > (uint64) maintenance_work_mem * 1024)
+			break;
+	}
+
+	if (BufferIsValid(buf))
+		ReleaseBuffer(buf);
+
+	*endtid = nexttid;
+	return result;
+}
+
+/*
  * Mark item with given TID as dead.
  *
  * This is used during VACUUM.
  */
 void
-zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr undoptr)
+zsbt_tid_mark_dead(Relation rel, zstid tid)
 {
 	Buffer		buf;
 	ZSUndoRecPtr item_undoptr;
@@ -918,11 +1000,42 @@ zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr undoptr)
 	memset(&deaditem, 0, sizeof(ZSTidArrayItem));
 	deaditem.t_tid = tid;
 	deaditem.t_flags = ZSBT_TID_DEAD;
-	deaditem.t_undo_ptr = undoptr;
+	ZSUndoRecPtrInitialize(&deaditem.t_undo_ptr);
 	deaditem.t_nelements = 1;
 
 	zsbt_tid_replace_item(rel, buf, tid, &deaditem);
 	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
+}
+
+
+/*
+ * Collect all TIDs marked as dead in the TID tree.
+ *
+ * This is used during VACUUM.
+ */
+void
+zsbt_tid_remove(Relation rel, IntegerSet *tids)
+{
+	zstid		nexttid;
+
+	intset_begin_iterate(tids);
+	if (!intset_iterate_next(tids, &nexttid))
+		nexttid = MaxZSTid;
+
+	/*
+	 * TODO: this removes the TIDs one by one, which is pretty inefficient.
+	 */
+	while (nexttid < MaxZSTid)
+	{
+		Buffer		buf;
+
+		buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, nexttid, 0, false);
+		zsbt_tid_replace_item(rel, buf, nexttid, NULL);
+		ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
+
+		if (!intset_iterate_next(tids, &nexttid))
+			nexttid = MaxZSTid;
+	}
 }
 
 /*
@@ -1435,7 +1548,6 @@ zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items)
 	ListCell   *lc;
 	zsbt_tid_recompress_context cxt;
 	ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(BufferGetPage(oldbuf));
-	ZSUndoRecPtr recent_oldest_undo = { 0 };
 	BlockNumber orignextblk;
 	zs_split_stack *stack;
 	List	   *downlinks = NIL;
@@ -1453,16 +1565,6 @@ zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items)
 	foreach(lc, items)
 	{
 		ZSTidArrayItem *item = (ZSTidArrayItem *) lfirst(lc);
-
-		/* We can leave out any old-enough DEAD items */
-		if ((item->t_flags & ZSBT_TID_DEAD) != 0)
-		{
-			if (recent_oldest_undo.counter == 0)
-				recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
-
-			if (item->t_undo_ptr.counter <= recent_oldest_undo.counter)
-				continue;
-		}
 
 		/* Store it uncompressed */
 		zsbt_tid_recompress_add_to_page(&cxt, item);

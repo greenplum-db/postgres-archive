@@ -43,10 +43,10 @@ static ZSAttributeItem *zsbt_attr_copy_item(ZSAttributeItem *item);
 static ZSAttributeItem *zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid, bool isnull,
 														  int nelements, Datum *datums,
 														  Size datasz);
-static int zsbt_attr_split_item(Form_pg_attribute atti,
-								ZSAttributeArrayItem *olditem,
-								zstid *removetids, int ntids,
-								List **newitems);
+static zstid zsbt_attr_split_item(Form_pg_attribute atti,
+								  ZSAttributeArrayItem *olditem,
+								  zstid removetid, IntegerSet *more_removetids,
+								  List **newitems);
 
 /* ----------------------------------------------------------------
  *						 Public interface
@@ -585,7 +585,7 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
  * Remove datums for the given TIDs from the attribute tree.
  */
 void
-zsbt_attr_remove(Relation rel, AttrNumber attno, zstid *tids, int ntids)
+zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 {
 	Form_pg_attribute attr;
 	Buffer		buf;
@@ -593,134 +593,134 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, zstid *tids, int ntids)
 	OffsetNumber maxoff;
 	OffsetNumber off;
 	List	   *newitems = NIL;
-	int			tidindex;
 	ZSDecompressContext decompressor;
 	bool		decompressing = false;
 	ZSAttributeItem *item;
+	zstid		nexttid;
 
 	attr = &rel->rd_att->attrs[attno - 1];
 
-nextpage:
-	buf = zsbt_descend(rel, attno, tids[0], 0, false);
-	page = BufferGetPage(buf);
+	intset_begin_iterate(tids);
+	if (!intset_iterate_next(tids, &nexttid))
+		nexttid = InvalidZSTid;
 
-	zs_decompress_init(&decompressor);
-	decompressing = false;
-	newitems = NIL;
-
-	/*
-	 * Find the item containing the first tid to remove.
-	 */
-	tidindex = 0;
-	maxoff = PageGetMaxOffsetNumber(page);
-	off = FirstOffsetNumber;
-	for (;;)
+	while (nexttid < MaxZSTid)
 	{
-		zstid		lasttid;
-		int			nremoved;
+		buf = zsbt_descend(rel, attno, nexttid, 0, false);
+		page = BufferGetPage(buf);
 
-		if (decompressing)
+		zs_decompress_init(&decompressor);
+		decompressing = false;
+		newitems = NIL;
+
+		/*
+		 * Find the item containing the first tid to remove.
+		 */
+		maxoff = PageGetMaxOffsetNumber(page);
+		off = FirstOffsetNumber;
+		for (;;)
 		{
-			item = zs_decompress_read_item(&decompressor);
-			if (item == NULL)
+			zstid		lasttid;
+
+			if (decompressing)
 			{
-				decompressing = false;
+				item = zs_decompress_read_item(&decompressor);
+				if (item == NULL)
+				{
+					decompressing = false;
+					continue;
+				}
+			}
+			else
+			{
+				ItemId		iid;
+
+				if (off > maxoff)
+					break;
+
+				iid = PageGetItemId(page, off);
+				item = (ZSAttributeItem *) PageGetItem(page, iid);
+				off++;
+			}
+
+			/*
+			 * If we don't find an item containing the given TID, just skip over it.
+			 *
+			 * XXX: This can legitimately happen, if e.g. VACUUM is interrupted, after it has already
+			 * removed the attribute data for the dead tuples. And in fact, zsbt_attr_split_item()
+			 * won't emit warnings like this.
+			 */
+			while (nexttid != MaxZSTid && nexttid < item->t_tid)
+			{
+				elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
+					 ZSTidGetBlockNumber(nexttid), ZSTidGetOffsetNumber(nexttid), attno);
+
+				if (!intset_iterate_next(tids, &nexttid))
+					nexttid = MaxZSTid;
+			}
+
+			/* If this item doesn't contain any of the items we're removing, keep it as it is. */
+			lasttid = zsbt_attr_item_lasttid(item);
+			if (nexttid == MaxZSTid || lasttid < nexttid)
+			{
+				if (decompressing)
+					item = zsbt_attr_copy_item(item);
+				newitems = lappend(newitems, item);
 				continue;
 			}
+
+			if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
+			{
+				ZSAttributeCompressedItem *citem = (ZSAttributeCompressedItem *) item;
+
+				zs_decompress_chunk(&decompressor, citem);
+				decompressing = true;
+				continue;
+			}
+
+			/*
+			 * We now have an array item at hand, that contains at least one of the TIDs we
+			 * want to remove. Split the array, removing all the target tids.
+			 */
+			nexttid = zsbt_attr_split_item(attr, (ZSAttributeArrayItem *) item,
+										   nexttid, tids,
+										   &newitems);
+		}
+
+		/* Now pass the list to the recompressor. */
+		IncrBufferRefCount(buf);
+		if (newitems)
+		{
+			zsbt_attr_recompress_replace(rel, attno, buf, newitems);
 		}
 		else
 		{
-			ItemId		iid;
+			zs_split_stack *stack;
 
-			if (off > maxoff)
-				break;
+			stack = zsbt_unlink_page(rel, attno, buf, 0);
 
-			iid = PageGetItemId(page, off);
-			item = (ZSAttributeItem *) PageGetItem(page, iid);
-			off++;
+			if (!stack)
+			{
+				/* failed. */
+				Page		newpage = PageGetTempPageCopySpecial(BufferGetPage(buf));
+
+				stack = zs_new_split_stack_entry(buf, newpage);
+			}
+
+			/* apply the changes */
+			zs_apply_split_changes(rel, stack);
 		}
+		ReleaseBuffer(buf); 	/* zsbt_apply_split_changes unlocked 'buf' */
 
 		/*
-		 * If we don't find an item containing the given TID, just skip over it.
-		 *
-		 * XXX: This can legitimately happen, if e.g. VACUUM is interrupted, after it has already
-		 * removed the attribute data for the dead tuples. And in fact, zsbt_attr_split_item()
-		 * won't emit warnings like this.
+		 * We can now free the decompression contexts. The pointers in the 'items' list
+		 * point to decompression buffers, so we cannot free them until after writing out
+		 * the pages.
 		 */
-		while (tidindex < ntids && tids[tidindex] < item->t_tid)
-		{
-			elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
-				 ZSTidGetBlockNumber(tids[tidindex]), ZSTidGetOffsetNumber(tids[tidindex]), attno);
-			tidindex++;
-		}
+		list_free(newitems);
 
-		/* If this item doesn't contain any of the items we're removing, keep it as it is. */
-		lasttid = zsbt_attr_item_lasttid(item);
-		if (tidindex == ntids || lasttid < tids[tidindex])
-		{
-			if (decompressing)
-				item = zsbt_attr_copy_item(item);
-			newitems = lappend(newitems, item);
-			continue;
-		}
-
-		if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
-		{
-			ZSAttributeCompressedItem *citem = (ZSAttributeCompressedItem *) item;
-
-			zs_decompress_chunk(&decompressor, citem);
-			decompressing = true;
-			continue;
-		}
-
-		/*
-		 * We now have an array item at hand, that contains at least one of the TIDs we
-		 * want to remove. Split the array, removing all the target tids.
-		 */
-		nremoved = zsbt_attr_split_item(attr, (ZSAttributeArrayItem *) item,
-										&tids[tidindex], ntids - tidindex,
-										&newitems);
-		tidindex += nremoved;
+		zs_decompress_free(&decompressor);
 	}
-
-	/* Now pass the list to the recompressor. */
-	IncrBufferRefCount(buf);
-	if (newitems)
-	{
-		zsbt_attr_recompress_replace(rel, attno, buf, newitems);
-	}
-	else
-	{
-		zs_split_stack *stack;
-
-		stack = zsbt_unlink_page(rel, attno, buf, 0);
-
-		if (!stack)
-		{
-			/* failed. */
-			Page		newpage = PageGetTempPageCopySpecial(BufferGetPage(buf));
-
-			stack = zs_new_split_stack_entry(buf, newpage);
-		}
-
-		/* apply the changes */
-		zs_apply_split_changes(rel, stack);
-	}
-	ReleaseBuffer(buf); 	/* zsbt_apply_split_changes unlocked 'buf' */
-
-	/*
-	 * We can now free the decompression contexts. The pointers in the 'items' list
-	 * point to decompression buffers, so we cannot free them until after writing out
-	 * the pages.
-	 */
-	list_free(newitems);
-
-	zs_decompress_free(&decompressor);
-
-	tids += tidindex;
-	ntids -= tidindex;
-	if (ntids > 0)
-		goto nextpage;
 }
 
 /* ----------------------------------------------------------------
@@ -1222,13 +1222,13 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 
 /*
  * Remove the values with the given TIDs from an array item,
- * creating new array items. Returns the number of TIDs that were
- * removed.
+ * creating new array items. Returns the next TID that was fetched from the set
+ * that was *not* removed.
  */
-static int
+static zstid
 zsbt_attr_split_item(Form_pg_attribute attr,
 					 ZSAttributeArrayItem *olditem,
-					 zstid *removetids, int ntids,
+					 zstid removetid, IntegerSet *more_removetids,
 					 List **newitems)
 {
 	bool		isnull = (olditem->t_flags & ZSBT_ATTR_NULL) != 0;
@@ -1237,8 +1237,6 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 	char	   *src;
 	ZSAttributeArrayItem *newitem = NULL;
 	char	   *dst;
-	zstid		nextremovetid;
-	int			nextremoveindex;
 
 	/* Only varlenas and fixed-width attributes are supported (not cstrings) */
 	Assert(attr->attlen > 0 || attr->attlen == -1);
@@ -1255,8 +1253,6 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 			aligned_attlen = att_align_nominal(attr->attlen, attr->attalign);
 	}
 
-	nextremovetid = removetids[0];
-	nextremoveindex = 0;
 	src = olditem->t_payload;
 	for (int i = 0; i < olditem->t_nelements; i++)
 	{
@@ -1264,10 +1260,10 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 		bool		align_target = false;
 		int			data_length;
 
-		while (nextremovetid < tid)
+		while (removetid < tid)
 		{
-			nextremoveindex++;
-			nextremovetid = (nextremoveindex < ntids) ? removetids[nextremoveindex] : MaxZSTid;
+			if (!intset_iterate_next(more_removetids, &removetid))
+				removetid = MaxZSTid;
 		}
 
 		/* Walk to the next element in the source */
@@ -1291,7 +1287,7 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 			align_target = true;
 		}
 
-		if (nextremovetid > tid)
+		if (removetid > tid)
 		{
 			/* Need to keep this one. */
 			if (newitem == NULL)
@@ -1328,9 +1324,9 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 		else
 		{
 			/* skip this item, since it's being removed */
-			Assert(nextremovetid == tid);
-			nextremoveindex++;
-			nextremovetid = (nextremoveindex < ntids) ? removetids[nextremoveindex] : MaxZSTid;
+			Assert(removetid == tid);
+			if (!intset_iterate_next(more_removetids, &removetid))
+				removetid = MaxZSTid;
 
 			if (newitem)
 			{
@@ -1350,7 +1346,7 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 		newitem = NULL;
 	}
 
-	return nextremoveindex;
+	return removetid;
 }
 
 

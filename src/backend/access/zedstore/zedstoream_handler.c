@@ -246,24 +246,14 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 								bool succeeded)
 {
 	zstid tid;
-	ZSUndoRecPtr zsUndoRecPtr;
 
-	ZSUndoRecPtrInitialize(&zsUndoRecPtr);
 	tid = ZSTidFromItemPointer(slot->tts_tid);
 	zsbt_tid_clear_speculative_token(relation, tid, spekToken, true /* for complete */);
 	/*
 	 * there is a conflict
 	 */
 	if (!succeeded)
-	{
-		/*
-		 * XXX: these are the same two steps that zsundo_vacuum() must do
-		 * 		maybe abstract into a function (wouldn't save much code now)
-		 */
-		zsbt_tid_mark_dead(relation, tid, zsUndoRecPtr);
-		for (int attno = 1; attno <= RelationGetNumberOfAttributes(relation); attno++)
-			zsbt_attr_remove(relation, attno, &tid, 1);
-	}
+		zsbt_tid_mark_dead(relation, tid);
 }
 
 static void

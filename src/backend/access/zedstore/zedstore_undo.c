@@ -28,17 +28,10 @@
 #include "utils/lsyscache.h"
 
 /*
- * Working area for zsundo_scan().
+ * Working area for zsundo_trim().
  */
 typedef struct ZSUndoTrimStats
 {
-	/* List of TIDs of tuples we intend to delete */
-	/* NB: this list is ordered by TID address */
-	int			num_dead_tuples;	/* current # of entries */
-	int			max_dead_tuples;	/* # slots allocated in array */
-	zstid	   *dead_tuples;		/* array of zstid */
-	bool		dead_tuples_overflowed;
-
 	BlockNumber	deleted_undo_pages;
 
 	bool		can_advance_oldestundorecptr;
@@ -69,7 +62,7 @@ typedef struct ZSVacRelStats
 	double		tuples_deleted;
 	BlockNumber nonempty_pages; /* actually, last nonempty page + 1 */
 
-	ZSUndoTrimStats trimstats;
+	IntegerSet *dead_tids;
 } ZSVacRelStats;
 
 /*
@@ -79,18 +72,15 @@ typedef struct ZSVacRelStats
  */
 #define LAZY_ALLOC_TUPLES		MaxHeapTuplesPerPage
 
-static int zs_vac_cmp_zstid(const void *left, const void *right);
 static bool zs_lazy_tid_reaped(ItemPointer itemptr, void *state);
-static void lazy_space_alloc(ZSVacRelStats *vacrelstats, BlockNumber relblocks);
 static void lazy_vacuum_index(Relation indrel,
 				  IndexBulkDeleteResult **stats,
 				  ZSVacRelStats *vacrelstats);
 static void lazy_cleanup_index(Relation indrel,
 				   IndexBulkDeleteResult *stats,
 				   ZSVacRelStats *vacrelstats);
-static ZSUndoRecPtr zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats, BlockNumber *oldest_undopage, List **unused_pages);
+static ZSUndoRecPtr zsundo_trim(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats, BlockNumber *oldest_undopage, List **unused_pages);
 static void zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumber oldest_undopage, List *unused_pages);
-static void zsundo_record_dead_tuple(ZSUndoTrimStats *trimstats, zstid tid);
 
 /*
  * Insert the given UNDO record to the UNDO log.
@@ -298,33 +288,9 @@ static bool
 zs_lazy_tid_reaped(ItemPointer itemptr, void *state)
 {
 	ZSVacRelStats *vacrelstats = (ZSVacRelStats *) state;
-	ItemPointer res;
 	zstid		tid = ZSTidFromItemPointer(*itemptr);
 
-	res = (ItemPointer) bsearch((void *) &tid,
-								(void *) vacrelstats->trimstats.dead_tuples,
-								vacrelstats->trimstats.num_dead_tuples,
-								sizeof(zstid),
-								zs_vac_cmp_zstid);
-
-	return (res != NULL);
-}
-
-/*
- * Comparator routines for use with qsort() and bsearch().
- */
-static int
-zs_vac_cmp_zstid(const void *left, const void *right)
-{
-	zstid		lefttid = *(zstid *) left;
-	zstid		righttid = *(zstid *) right;
-
-	if (lefttid < righttid)
-		return -1;
-	if (lefttid > righttid)
-		return 1;
-
-	return 0;
+	return intset_is_member(vacrelstats->dead_tids, tid);
 }
 
 void
@@ -332,19 +298,37 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 			  TransactionId OldestXmin)
 {
 	ZSVacRelStats *vacrelstats;
-	ZSUndoTrimStats *trimstats;
 	Relation   *Irel;
 	int			nindexes;
 	IndexBulkDeleteResult **indstats;
 	BlockNumber	nblocks;
 	Form_pg_class pgcform;
+	zstid		starttid;
+	zstid		endtid;
 
 	nblocks = RelationGetNumberOfBlocks(rel);
 	if (nblocks == 0)
 		return;		/* empty table */
 
+	/*
+	 * Scan the UNDO log, and discard what we can.
+	 */
+	{
+		ZSUndoTrimStats trimstats;
+		BlockNumber oldest_undopage;
+		List	   *unused_pages = NIL;
+		ZSUndoRecPtr discard_upto;
+
+		trimstats.deleted_undo_pages = 0;
+		trimstats.can_advance_oldestundorecptr = false;
+
+		discard_upto = zsundo_trim(rel, RecentGlobalXmin, &trimstats, &oldest_undopage, &unused_pages);
+
+		if (trimstats.can_advance_oldestundorecptr)
+			zsundo_update_oldest_ptr(rel, discard_upto, oldest_undopage, unused_pages);
+	}
+
 	vacrelstats = (ZSVacRelStats *) palloc0(sizeof(ZSVacRelStats));
-	trimstats = &vacrelstats->trimstats;
 
 	if (params->options & VACOPT_VERBOSE)
 		vacrelstats->elevel = INFO;
@@ -358,30 +342,22 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 	indstats = (IndexBulkDeleteResult **)
 		palloc0(nindexes * sizeof(IndexBulkDeleteResult *));
 
-	lazy_space_alloc(vacrelstats, nblocks);
-
 	ereport(vacrelstats->elevel,
 			(errmsg("vacuuming \"%s.%s\"",
 					get_namespace_name(RelationGetNamespace(rel)),
 					RelationGetRelationName(rel))));
 
+	starttid = MinZSTid;
 	do
 	{
-		ZSUndoRecPtr reaped_upto;
-		BlockNumber oldest_undopage;
-		List	   *unused_pages = NIL;
+		IntegerSet *dead_tids;
 
-		trimstats->dead_tuples_overflowed = false;
-		trimstats->num_dead_tuples = 0;
-		trimstats->deleted_undo_pages = 0;
+		/* Scan the TID tree, to collect TIDs that have been marked dead. */
+		dead_tids = zsbt_collect_dead_tids(rel, starttid, &endtid);
+		vacrelstats->dead_tids = dead_tids;
 
-		reaped_upto = zsundo_scan(rel, OldestXmin, trimstats, &oldest_undopage, &unused_pages);
-
-		if (trimstats->num_dead_tuples > 0)
+		if (intset_num_entries(dead_tids) > 0)
 		{
-			pg_qsort(trimstats->dead_tuples, trimstats->num_dead_tuples,
-					 sizeof(zstid), zs_vac_cmp_zstid);
-
 			/* Remove index entries */
 			for (int i = 0; i < nindexes; i++)
 				lazy_vacuum_index(Irel[i],
@@ -389,48 +365,21 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 								  vacrelstats);
 
 			/*
-			 * Mark the items as dead in the TID tree, and remove them from the
-			 * attribute b-trees.
-			 *
-			 * We cannot remove them immediately from the TID tree, because we
-			 * must prevent the TIDs from being reused, until we have trimmed
-			 * the UNDO records. Otherwise, this might happen:
-			 *
-			 * 1. We remove items from all the B-trees.
-			 * 2. An inserter reuses the now-unused TID for a new tuple
-			 * 3. We abort the VACUUM, for some reason
-			 * 4. We start VACUUM again. We will now try to remove the item
-			 *    again, but we will remove the new item with the same TID
-			 *    instead.
-			 *
-			 * There would be other ways to deal with it. For example in step
-			 * #4, we could refrain from removing items, whose UNDO pointers
-			 * are newer than expected. But that's tricky, because we scan the
-			 * indexes first, and we must refrain from removing index entries
-			 * for new items, too.
+			 * Remove the attribute data for the dead rows, and finally their
+			 * TID tree entries.
 			 */
-			for (int i = 0; i < trimstats->num_dead_tuples; i++)
-				zsbt_tid_mark_dead(rel,
-								   trimstats->dead_tuples[i],
-								   reaped_upto);
-
 			for (int attno = 1; attno <= RelationGetNumberOfAttributes(rel); attno++)
-				zsbt_attr_remove(rel, attno, trimstats->dead_tuples, trimstats->num_dead_tuples);
+				zsbt_attr_remove(rel, attno, dead_tids);
+			zsbt_tid_remove(rel, dead_tids);
 		}
 
-		/*
-		 * The UNDO records for the tuple versions we just removed are no longer
-		 * interesting to anyone. Advance the UNDO tail, so that the UNDO pages
-		 * can be recycled.
-		 */
-		zsundo_update_oldest_ptr(rel, reaped_upto, oldest_undopage, unused_pages);
-
 		ereport(vacrelstats->elevel,
-				(errmsg("\"%s\": removed %d row versions and %d undo pages",
+				(errmsg("\"%s\": removed " UINT64_FORMAT " row versions",
 						RelationGetRelationName(rel),
-						trimstats->num_dead_tuples,
-						trimstats->deleted_undo_pages)));
-	} while(trimstats->dead_tuples_overflowed);
+						intset_num_entries(dead_tids))));
+
+		starttid = endtid;
+	} while(starttid < MaxZSTid);
 
 	/* Do post-vacuum cleanup and statistics update for each index */
 	for (int i = 0; i < nindexes; i++)
@@ -458,49 +407,6 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 						OldestXmin,
 						InvalidMultiXactId,
 						false);
-}
-
-/*
- * lazy_space_alloc - space allocation decisions for lazy vacuum
- *
- * See the comments at the head of this file for rationale.
- */
-static void
-lazy_space_alloc(ZSVacRelStats *vacrelstats, BlockNumber relblocks)
-{
-	long		maxtuples;
-	int			vac_work_mem = IsAutoVacuumWorkerProcess() &&
-	autovacuum_work_mem != -1 ?
-	autovacuum_work_mem : maintenance_work_mem;
-
-	if (vacrelstats->hasindex)
-	{
-		maxtuples = (vac_work_mem * 1024L) / sizeof(zstid);
-		maxtuples = Min(maxtuples, INT_MAX);
-		maxtuples = Min(maxtuples, MaxAllocSize / sizeof(zstid));
-
-		/* curious coding here to ensure the multiplication can't overflow */
-		if ((BlockNumber) (maxtuples / LAZY_ALLOC_TUPLES) > relblocks)
-			maxtuples = relblocks * LAZY_ALLOC_TUPLES;
-
-		/* stay sane if small maintenance_work_mem */
-		maxtuples = Max(maxtuples, MaxHeapTuplesPerPage);
-	}
-	else
-	{
-		/*
-		 * TODO: In heap vacuum code, this is MaxHeapTuplesPerPage. We have no
-		 * particular reason to size this by that, but the same principle applies:
-		 * without indexes, it's pretty cheap to do multiple iterations, so let's
-		 * avoid making a huge allocation
-		 */
-		maxtuples = 1000;
-	}
-
-	vacrelstats->trimstats.num_dead_tuples = 0;
-	vacrelstats->trimstats.max_dead_tuples = (int) maxtuples;
-	vacrelstats->trimstats.dead_tuples = (zstid *)
-		palloc(maxtuples * sizeof(zstid));
 }
 
 /*
@@ -532,9 +438,9 @@ lazy_vacuum_index(Relation indrel,
 							   zs_lazy_tid_reaped, (void *) vacrelstats);
 
 	ereport(vacrelstats->elevel,
-			(errmsg("scanned index \"%s\" to remove %d row versions",
+			(errmsg("scanned index \"%s\" to remove " UINT64_FORMAT " row versions",
 					RelationGetRelationName(indrel),
-					vacrelstats->trimstats.num_dead_tuples),
+					intset_num_entries(vacrelstats->dead_tids)),
 			 errdetail_internal("%s", pg_rusage_show(&ru0))));
 }
 
@@ -618,7 +524,7 @@ lazy_cleanup_index(Relation indrel,
  * active snapshots.
  */
 static ZSUndoRecPtr
-zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
+zsundo_trim(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 			BlockNumber *oldest_undopage, List **unused_pages)
 {
 	/* Scan the undo log from oldest to newest */
@@ -662,7 +568,7 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 	 */
 	lastblk = firstblk;
 	can_advance_oldestundorecptr = false;
-	while (lastblk != InvalidBlockNumber && !trimstats->dead_tuples_overflowed)
+	while (lastblk != InvalidBlockNumber)
 	{
 		Buffer		buf;
 		Page		page;
@@ -683,7 +589,7 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 		/* loop through all records on the page */
 		endptr = (char *) page + ((PageHeader) page)->pd_lower;
 		ptr = (char *) page + SizeOfPageHeaderData;
-		while (ptr < endptr && !trimstats->dead_tuples_overflowed)
+		while (ptr < endptr)
 		{
 			ZSUndoRec *undorec = (ZSUndoRec *) ptr;
 			bool		did_commit;
@@ -714,12 +620,13 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 			{
 				case ZSUNDO_TYPE_INSERT:
 					if (!did_commit)
-						zsundo_record_dead_tuple(trimstats, undorec->tid);
+						zsbt_tid_mark_dead(rel, undorec->tid);
 					break;
 				case ZSUNDO_TYPE_DELETE:
 					if (did_commit)
 					{
-						zsundo_record_dead_tuple(trimstats, undorec->tid);
+						/* The deletion is now visible to everyone */
+						zsbt_tid_mark_dead(rel, undorec->tid);
 					}
 					else
 					{
@@ -728,28 +635,17 @@ zsundo_scan(Relation rel, TransactionId OldestXmin, ZSUndoTrimStats *trimstats,
 						 * becomes visible to everyone when the UNDO record is trimmed
 						 * away
 						 */
-						/*
-						 * Don't do this if we're called from zsundo_get_oldest_undo_ptr(),
-						 * because we might be holding a lock on the page, and deadlock.
-						 */
-						if (trimstats->max_dead_tuples == 0)
-							trimstats->dead_tuples_overflowed = true;
-						else
-							zsbt_tid_undo_deletion(rel, undorec->tid, undorec->undorecptr);
+						zsbt_tid_undo_deletion(rel, undorec->tid, undorec->undorecptr);
 					}
 					break;
 				case ZSUNDO_TYPE_UPDATE:
 					if (did_commit)
-						zsundo_record_dead_tuple(trimstats, undorec->tid);
+						zsbt_tid_mark_dead(rel, undorec->tid);
 					break;
 			}
 
-			if (!trimstats->dead_tuples_overflowed)
-			{
-				ptr += undorec->size;
-
-				can_advance_oldestundorecptr = true;
-			}
+			ptr += undorec->size;
+			can_advance_oldestundorecptr = true;
 		}
 
 		if (ptr < endptr)
@@ -848,28 +744,6 @@ zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumb
 }
 
 /*
- * zsundo_record_dead_tuple - remember one deletable tuple
- */
-static void
-zsundo_record_dead_tuple(ZSUndoTrimStats *trimstats, zstid tid)
-{
-	/*
-	 * The array shouldn't overflow under normal behavior, but perhaps it
-	 * could if we are given a really small maintenance_work_mem. In that
-	 * case, just forget the last few tuples (we'll get 'em next time).
-	 */
-	if (trimstats->num_dead_tuples < trimstats->max_dead_tuples)
-	{
-		trimstats->dead_tuples[trimstats->num_dead_tuples] = tid;
-		trimstats->num_dead_tuples++;
-		pgstat_progress_update_param(PROGRESS_VACUUM_NUM_DEAD_TUPLES,
-									 trimstats->num_dead_tuples);
-	}
-	else
-		trimstats->dead_tuples_overflowed = true;
-}
-
-/*
  * Return the current "Oldest undo pointer". The effects of any actions with
  * undo pointer older than this is known to be visible to everyone. (i.e.
  * an inserted tuple is known to be visible, and a deleted tuple is known to
@@ -890,9 +764,8 @@ zsundo_get_oldest_undo_ptr(Relation rel)
 	}
 
 	/*
-	 * Call zsundo_scan, with max_dead_tuples = 0. It scans the UNDO log,
-	 * starting from the oldest record, and advances the oldest UNDO pointer
-	 * past as many committed, visible-to-all transactions as possible.
+	 * Scan the UNDO log, to discard as much of it as possible. This
+	 * advances the oldest UNDO pointer past as many transactions as possible.
 	 *
 	 * TODO:
 	 * We could get the latest cached value directly from the metapage, but
@@ -901,12 +774,8 @@ zsundo_get_oldest_undo_ptr(Relation rel)
 	 * so until that is somehow sped up, it is a good tradeoff to be
 	 * aggressive about that.
 	 */
-	trimstats.num_dead_tuples = 0;
-	trimstats.max_dead_tuples = 0;
-	trimstats.dead_tuples = NULL;
-	trimstats.dead_tuples_overflowed = false;
 	trimstats.deleted_undo_pages = 0;
-	result = zsundo_scan(rel, RecentGlobalXmin, &trimstats, &oldest_undopage, &unused_pages);
+	result = zsundo_trim(rel, RecentGlobalXmin, &trimstats, &oldest_undopage, &unused_pages);
 
 	if (trimstats.can_advance_oldestundorecptr)
 		zsundo_update_oldest_ptr(rel, result, oldest_undopage, unused_pages);

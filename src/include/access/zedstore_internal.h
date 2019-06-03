@@ -13,6 +13,7 @@
 #include "access/tableam.h"
 #include "access/zedstore_compression.h"
 #include "access/zedstore_undo.h"
+#include "lib/integerset.h"
 #include "storage/bufmgr.h"
 #include "storage/smgr.h"
 #include "utils/datum.h"
@@ -567,7 +568,9 @@ extern TM_Result zsbt_tid_update(Relation rel, zstid otid,
 								 CommandId cid, bool key_update, Snapshot snapshot, Snapshot crosscheck,
 								 bool wait, TM_FailureData *hufd, zstid *newtid_p);
 extern void zsbt_tid_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete);
-extern void zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr undoptr);
+extern void zsbt_tid_mark_dead(Relation rel, zstid tid);
+extern IntegerSet *zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid);
+extern void zsbt_tid_remove(Relation rel, IntegerSet *tids);
 extern TM_Result zsbt_tid_lock(Relation rel, zstid tid,
 			   TransactionId xid, CommandId cid,
 								LockTupleMode lockmode, Snapshot snapshot, TM_FailureData *hufd, zstid *next_tid);
@@ -590,7 +593,7 @@ extern zs_split_stack *zsbt_newroot(Relation rel, AttrNumber attno, int level, L
 extern zs_split_stack *zsbt_insert_downlinks(Relation rel, AttrNumber attno,
 					  zstid leftlokey, BlockNumber leftblkno, int level,
 					  List *downlinks);
-extern void zsbt_attr_remove(Relation rel, AttrNumber attno, zstid *tids, int num_tids);
+extern void zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids);
 extern zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level);
 extern Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
 extern bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf);
