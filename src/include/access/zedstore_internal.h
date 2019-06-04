@@ -163,14 +163,6 @@ ZSBtreeInternalPageIsFull(Page page)
  *
  * 2. "Compressed item", which can hold multiple single or array items.
  *
- * A single or array item can furthermore be marked as DEAD. A dead item
- * prevents the TID (or TID range, for an array item) from being reused. It's
- * used during VACUUM, to mark items for which there are no index pointers
- * anymore. But it cannot be removed until the undo record has been trimmed
- * away, because if the TID was reused for a new record, vacuum might remove
- * the new tuple version instead. After t_undo_ptr becomes older than "oldest
- * undo ptr", the item can be removed and the TID recycled.
- *
  * TODO: squeeze harder: eliminate padding, use high bits of t_tid for flags or size
  */
 typedef struct ZSAttributeItem
@@ -179,6 +171,8 @@ typedef struct ZSAttributeItem
 	uint16		t_size;
 	uint16		t_flags;
 } ZSAttributeItem;
+
+#define ZSBT_ATTR_COMPRESSED		0x0001
 
 typedef struct ZSAttributeArrayItem
 {
@@ -189,9 +183,29 @@ typedef struct ZSAttributeArrayItem
 
 	uint16		t_nelements;
 
-	uint16		t_padding; /* to make t_payload MAXALIGNed */
-	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
+	uint8		t_bitmap[FLEXIBLE_ARRAY_MEMBER];
+	/* payload follows at next MAXALIGN boundary after the bitmap */
 } ZSAttributeArrayItem;
+
+#define ZSBT_ATTR_BITMAPLEN(nelems)		(((int) (nelems) + 7) / 8)
+
+static inline char *
+zsbt_attr_item_payload(ZSAttributeArrayItem *aitem)
+{
+	return (char *) MAXALIGN(aitem->t_bitmap + ZSBT_ATTR_BITMAPLEN(aitem->t_nelements));
+}
+
+static inline bool
+zsbt_attr_item_isnull(ZSAttributeArrayItem *aitem, int n)
+{
+	return (aitem->t_bitmap[n / 8] & (1 << (n % 8))) != 0;
+}
+
+static inline void
+zsbt_attr_item_setnull(ZSAttributeArrayItem *aitem, int n)
+{
+	aitem->t_bitmap[n / 8] |= (1 << (n % 8));
+}
 
 typedef struct ZSAttributeCompressedItem
 {
@@ -205,9 +219,6 @@ typedef struct ZSAttributeCompressedItem
 
 	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
 } ZSAttributeCompressedItem;
-
-#define ZSBT_ATTR_COMPRESSED		0x0001
-#define ZSBT_ATTR_NULL			0x0010
 
 /*
  * Get the last TID that the given item spans.
@@ -464,9 +475,9 @@ typedef struct ZSBtreeScan
 	ZSUndoRecPtr array_undoptr;
 	int			array_datums_allocated_size;
 	Datum	   *array_datums;
-	Datum	   *array_next_datum;
-	int			array_elements_left;
-	bool		array_isnull;
+	bool	   *array_isnulls;
+	int			array_next_datum;
+	int			array_num_elements;
 
 } ZSBtreeScan;
 
@@ -603,18 +614,17 @@ zsbt_scan_skip(ZSBtreeScan *scan, zstid tid)
 {
 	if (tid > scan->nexttid)
 	{
-		if (scan->array_elements_left > 0)
+		if (scan->array_next_datum < scan->array_num_elements)
 		{
 			int64		skip = tid - scan->nexttid - 1;
 
-			if (skip < scan->array_elements_left)
+			if (skip < scan->array_num_elements - scan->array_next_datum)
 			{
 				scan->array_next_datum += skip;
-				scan->array_elements_left -= skip;
 			}
 			else
 			{
-				scan->array_elements_left = 0;
+				scan->array_next_datum = scan->array_num_elements;
 			}
 		}
 		scan->nexttid = tid;
@@ -650,12 +660,12 @@ zsbt_attr_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 			return false;
 		}
 
-		if (scan->array_elements_left > 0)
+		if (scan->array_next_datum < scan->array_num_elements)
 		{
-			*isnull = scan->array_isnull;
-			*datum = *(scan->array_next_datum++);
+			*isnull = scan->array_isnulls[scan->array_next_datum];
+			*datum = scan->array_datums[scan->array_next_datum];
+			scan->array_next_datum++;
 			scan->nexttid++;
-			scan->array_elements_left--;
 			return true;
 		}
 		/* Advance the scan, and check again. */

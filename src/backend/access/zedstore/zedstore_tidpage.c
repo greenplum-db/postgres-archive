@@ -79,8 +79,10 @@ zsbt_tid_begin_scan(Relation rel, zstid starttid,
 	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 	memset(&scan->array_undoptr, 0, sizeof(scan->array_undoptr));
 	scan->array_datums = palloc(sizeof(Datum));
+	scan->array_isnulls = palloc(sizeof(bool));
 	scan->array_datums_allocated_size = 1;
-	scan->array_elements_left = 0;
+	scan->array_num_elements = 0;
+	scan->array_next_datum = 0;
 
 	buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, starttid, 0, true);
 	if (!BufferIsValid(buf))
@@ -108,7 +110,8 @@ zsbt_tid_reset_scan(ZSBtreeScan *scan, zstid starttid)
 	if (starttid < scan->nexttid)
 	{
 		/* have to restart from scratch. */
-		scan->array_elements_left = 0;
+		scan->array_num_elements = 0;
+		scan->array_next_datum = 0;
 		scan->nexttid = starttid;
 		scan->has_decompressed = false;
 		if (scan->lastbuf != InvalidBuffer)
@@ -130,7 +133,8 @@ zsbt_tid_end_scan(ZSBtreeScan *scan)
 	zs_decompress_free(&scan->decompressor);
 
 	scan->active = false;
-	scan->array_elements_left = 0;
+	scan->array_num_elements = 0;
+	scan->array_next_datum = 0;
 }
 
 /*
@@ -155,7 +159,8 @@ zsbt_tid_scan_extract_array(ZSBtreeScan *scan, ZSTidArrayItem *aitem)
 		nelements = scan->endtid - tid;
 
 	scan->array_undoptr = aitem->t_undo_ptr;
-	scan->array_elements_left = nelements;
+	scan->array_num_elements = nelements;
+	scan->array_next_datum = 0;
 	if (scan->nexttid < tid)
 		scan->nexttid = tid;
 }
@@ -195,7 +200,7 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 		/*
 		 * If we are still processing an array item, return next element from it.
 		 */
-		if (scan->array_elements_left > 0)
+		if (scan->array_next_datum < scan->array_num_elements)
 			goto have_array;
 
 		/*
@@ -294,7 +299,7 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 
 			zsbt_tid_scan_extract_array(scan, aitem);
 
-			if (scan->array_elements_left > 0)
+			if (scan->array_next_datum < scan->array_num_elements)
 			{
 				LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
 				buf_is_locked = false;
@@ -302,7 +307,7 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 			}
 		}
 
-		if (scan->array_elements_left > 0)
+		if (scan->array_next_datum < scan->array_num_elements)
 			continue;
 
 		/* No more items on this page. Walk right, if possible */
@@ -317,7 +322,8 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 		if (next == InvalidBlockNumber || scan->nexttid >= scan->endtid)
 		{
 			scan->active = false;
-			scan->array_elements_left = 0;
+			scan->array_num_elements = 0;
+			scan->array_next_datum = 0;
 			ReleaseBuffer(scan->lastbuf);
 			scan->lastbuf = InvalidBuffer;
 			break;
@@ -332,9 +338,9 @@ have_array:
 	/*
 	 * If we are still processing an array item, return next element from it.
 	 */
-	Assert(scan->array_elements_left > 0);
+	Assert(scan->array_next_datum < scan->array_num_elements);
 
-	scan->array_elements_left--;
+	scan->array_next_datum++;
 	return scan->nexttid++;
 }
 
