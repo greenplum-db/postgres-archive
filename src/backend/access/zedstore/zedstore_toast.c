@@ -42,9 +42,10 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value)
 	int32		total_size;
 	int32		offset;
 
-	/* it's possible that this is the very first insertion to the relation. */
-	if (RelationGetNumberOfBlocks(rel) == 0)
-		zsmeta_initmetapage(rel);
+	/*
+	 * TID btree will always be inserted first, so there must be > 0 blocks
+	 */
+	Assert(RelationGetNumberOfBlocks(rel) != 0);
 
 	/* TODO: try to compress it in place first. Maybe just call toast_compress_datum? */
 
