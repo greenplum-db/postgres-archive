@@ -237,7 +237,14 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 			return InvalidBlockNumber;
 		else
 		{
-			zsmeta_initmetapage(rel);
+			LockRelationForExtension(rel, ExclusiveLock);
+			/*
+			 * Confirm number of blocks is still 0 after taking lock
+			 * before initializing a new metapage
+			 */
+			if (RelationGetNumberOfBlocks(rel) == 0)
+				zsmeta_initmetapage(rel);
+			UnlockRelationForExtension(rel, ExclusiveLock);
 			metacache = zsmeta_populate_cache(rel);
 		}
 	}
