@@ -143,16 +143,17 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
 	int			nelements = aitem->t_nelements;
 	zstid		tid = aitem->t_tid;
 	char	   *p = zsbt_attr_item_payload(aitem);
-	int			elemno;
+	int			firstelem;
 	Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
 	int16		attlen = attr->attlen;
 
 	/* skip over elements that we are not interested in */
+	firstelem = 0;
 	while (tid < scan->nexttid && nelements > 0)
 	{
 		Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
 
-		if (!zsbt_attr_item_isnull(aitem, elemno))
+		if (!zsbt_attr_item_isnull(aitem, firstelem))
 		{
 			if (attr->attlen > 0)
 			{
@@ -173,7 +174,7 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
 		}
 		tid++;
 		nelements--;
-		elemno++;
+		firstelem++;
 	}
 
 	/* leave out elements that are past end of range */
@@ -209,7 +210,7 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
 		{
 			for (int i = 0; i < nelements; i++)
 			{
-				if (zsbt_attr_item_isnull(aitem, i))
+				if (zsbt_attr_item_isnull(aitem, firstelem + i))
 				{
 					scan->array_isnulls[i] = true;
 					scan->array_datums[i] = (Datum) 0;
@@ -226,7 +227,7 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
 		{
 			for (int i = 0; i < nelements; i++)
 			{
-				if (zsbt_attr_item_isnull(aitem, i))
+				if (zsbt_attr_item_isnull(aitem, firstelem + i))
 				{
 					scan->array_isnulls[i] = true;
 					scan->array_datums[i] = (Datum) 0;
@@ -243,7 +244,7 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
 		{
 			for (int i = 0; i < nelements; i++)
 			{
-				if (zsbt_attr_item_isnull(aitem, i))
+				if (zsbt_attr_item_isnull(aitem, firstelem + i))
 				{
 					scan->array_isnulls[i] = true;
 					scan->array_datums[i] = (Datum) 0;
@@ -260,7 +261,7 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
 		{
 			for (int i = 0; i < nelements; i++)
 			{
-				if (zsbt_attr_item_isnull(aitem, i))
+				if (zsbt_attr_item_isnull(aitem, firstelem + i))
 				{
 					scan->array_isnulls[i] = true;
 					scan->array_datums[i] = (Datum) 0;
@@ -280,7 +281,7 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
 	{
 		for (int i = 0; i < nelements; i++)
 		{
-			if (zsbt_attr_item_isnull(aitem, i))
+			if (zsbt_attr_item_isnull(aitem, firstelem + i))
 			{
 				scan->array_isnulls[i] = true;
 				scan->array_datums[i] = (Datum) 0;
@@ -297,7 +298,7 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
 	{
 		for (int i = 0; i < nelements; i++)
 		{
-			if (zsbt_attr_item_isnull(aitem, i))
+			if (zsbt_attr_item_isnull(aitem, firstelem + i))
 			{
 				scan->array_isnulls[i] = true;
 				scan->array_datums[i] = (Datum) 0;
@@ -993,15 +994,11 @@ zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid,
 static ZSAttributeItem *
 zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttributeItem *bitem)
 {
-
-	/* FIXME: this is broken, and as a result, we never merge items */
-#if 0
 	ZSAttributeArrayItem *newitem;
 	Size		adatasz;
 	Size		bdatasz;
 	Size		totaldatasz;
 	Size		newitemsz;
-	bool		isnull;
 	ZSAttributeArrayItem *a_arr_item;
 	ZSAttributeArrayItem *b_arr_item;
 	Size		paddingsz = 0;
@@ -1020,13 +1017,13 @@ zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttribut
 		return NULL;
 
 	/* Create a new item that covers both. */
-	adatasz = aitem->t_size - offsetof(ZSAttributeArrayItem, t_payload);
+	adatasz = (char *) a_arr_item + a_arr_item->t_size - zsbt_attr_item_payload(a_arr_item);
 
 	if (attr->attlen > 0)
 	{
 		Size	alignedsz = att_align_nominal(adatasz, attr->attalign);
 
-		bdatasz = bitem->t_size - offsetof(ZSAttributeArrayItem, t_payload);
+		bdatasz = (char *) b_arr_item + b_arr_item->t_size - zsbt_attr_item_payload(b_arr_item);
 		paddingsz = alignedsz - adatasz;
 		totaldatasz = adatasz + paddingsz + bdatasz;
 	}
@@ -1044,7 +1041,7 @@ zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttribut
 		int			offset;
 
 		offset = adatasz;
-		src = b_arr_item->t_payload;
+		src = zsbt_attr_item_payload(b_arr_item);
 		for (int i = 0; i < b_arr_item->t_nelements; i++)
 		{
 			Size		data_length;
@@ -1080,29 +1077,37 @@ zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttribut
 	else
 		elog(ERROR, "unexpected attlen %d", attr->attlen);
 
+	newitemsz = offsetof(ZSAttributeArrayItem, t_bitmap);
+	newitemsz += ZSBT_ATTR_BITMAPLEN(a_arr_item->t_nelements + b_arr_item->t_nelements);
+	newitemsz = MAXALIGN(newitemsz);
+	newitemsz += totaldatasz;
+
 	/* Like in zsbt_attr_multi_insert(), enforce a practical limit on the
 	 * size of the array tuple. */
-	if (totaldatasz >= MaxZedStoreDatumSize / 4)
+	if (newitemsz >= MaxZedStoreDatumSize / 4)
 		return NULL;
-
-	return NULL;
-	newitemsz = offsetof(ZSAttributeArrayItem, t_payload) + totaldatasz;
 
 	newitem = palloc(newitemsz);
 	newitem->t_tid = aitem->t_tid;
 	newitem->t_size = newitemsz;
 	newitem->t_flags = 0;
-	if (isnull)
-		newitem->t_flags |= ZSBT_ATTR_NULL;
 	newitem->t_nelements = a_arr_item->t_nelements + b_arr_item->t_nelements;
-	newitem->t_padding = 0; /* zero padding */
 
-	if (!isnull)
+
+	memset(newitem->t_bitmap, 0, (char *) zsbt_attr_item_payload(newitem) - (char *) newitem->t_bitmap);
+	/* copy a's null bitmap */
+	memcpy(newitem->t_bitmap, a_arr_item->t_bitmap, ZSBT_ATTR_BITMAPLEN(a_arr_item->t_nelements));
+	/* copy b's null bitmap */
+	for (int i = 0; i < b_arr_item->t_nelements; i++)
 	{
-		char	   *p = newitem->t_payload;
+		if (zsbt_attr_item_isnull(b_arr_item, i))
+			zsbt_attr_item_setnull(newitem, a_arr_item->t_nelements + i);
+	}
 
-		memcpy(p, a_arr_item->t_payload, adatasz);
+	{
+		char	   *p = zsbt_attr_item_payload(newitem);
 
+		memcpy(p, zsbt_attr_item_payload(a_arr_item), adatasz);
 		p += adatasz;
 
 		if (attr->attlen > 0)
@@ -1110,7 +1115,7 @@ zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttribut
 			memset(p, 0, paddingsz);
 			p += paddingsz;
 
-			memcpy(newitem->t_payload + adatasz, b_arr_item->t_payload, bdatasz);
+			memcpy(p, zsbt_attr_item_payload(b_arr_item), bdatasz);
 			p += bdatasz;
 		}
 		else
@@ -1120,10 +1125,13 @@ zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttribut
 			/* clear alignment padding */
 			memset(p, 0, bdatasz);
 
-			src = b_arr_item->t_payload;
+			src = zsbt_attr_item_payload(b_arr_item);
 			for (int i = 0; i < b_arr_item->t_nelements; i++)
 			{
 				Size		data_length;
+
+				if (zsbt_attr_item_isnull(b_arr_item, i))
+					continue;
 
 				/* Walk to the next element in the source */
 				src = (Pointer) att_align_pointer(src, attr->attalign, attr->attlen, src);
@@ -1152,9 +1160,6 @@ zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttribut
 	}
 
 	return (ZSAttributeItem *) newitem;
-#else
-	return NULL;
-#endif
 }
 
 /*
@@ -1302,8 +1307,8 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 					 zstid removetid, IntegerSet *more_removetids,
 					 List **newitems)
 {
-	size_t		attlen;
-	size_t		aligned_attlen = -1;
+	int16		attlen;
+	int16		aligned_attlen = -1;
 	char	   *src;
 	ZSAttributeArrayItem *newitem = NULL;
 	char	   *dst;
@@ -1400,6 +1405,10 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 				newitem->t_flags = 0;
 				newitem->t_nelements = keep_tids[i];
 				dst = zsbt_attr_item_payload(newitem);
+
+				memset(newitem->t_bitmap, 0, dst - (char *) newitem->t_bitmap);
+
+				cnt = 0;
 			}
 			else
 				Assert(keep_tids[i] == -1);
@@ -1416,6 +1425,10 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 
 			memcpy(dst, src, data_length);
 			dst += data_length;
+
+			if (zsbt_attr_item_isnull(olditem, i))
+				zsbt_attr_item_setnull(newitem, cnt);
+			cnt++;
 		}
 		else
 		{
@@ -1425,6 +1438,7 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 			 */
 			if (newitem)
 			{
+				Assert(cnt == newitem->t_nelements);
 				newitem->t_size = dst - (char *) newitem;
 				*newitems = lappend(*newitems, newitem);
 				newitem = NULL;
@@ -1436,6 +1450,7 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 
 	if (newitem)
 	{
+		Assert(cnt == newitem->t_nelements);
 		newitem->t_size = dst - (char *) newitem;
 		*newitems = lappend(*newitems, newitem);
 		newitem = NULL;

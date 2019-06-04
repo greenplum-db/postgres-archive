@@ -616,7 +616,7 @@ zsbt_scan_skip(ZSBtreeScan *scan, zstid tid)
 	{
 		if (scan->array_next_datum < scan->array_num_elements)
 		{
-			int64		skip = tid - scan->nexttid - 1;
+			int64		skip = tid - scan->nexttid;
 
 			if (skip < scan->array_num_elements - scan->array_next_datum)
 			{
