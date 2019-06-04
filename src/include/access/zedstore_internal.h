@@ -157,9 +157,7 @@ ZSBtreeInternalPageIsFull(Page page)
  *
  * 1. "Array item", holds multiple datums, with consecutive TIDs and the same
  *    visibility information. An array item saves space compared to multiple
- *    single items, by leaving out repetitive UNDO and TID fields. An array
- *    item cannot mix NULLs and non-NULLs, so the ZSBT_NULL flag applies to
- *    all elements.
+ *    single items, by leaving out repetitive UNDO and TID fields.
  *
  * 2. "Compressed item", which can hold multiple single or array items.
  *
@@ -183,7 +181,7 @@ typedef struct ZSAttributeArrayItem
 
 	uint16		t_nelements;
 
-	uint8		t_bitmap[FLEXIBLE_ARRAY_MEMBER];
+	uint8		t_bitmap[FLEXIBLE_ARRAY_MEMBER];	/* null bitmap */
 	/* payload follows at next MAXALIGN boundary after the bitmap */
 } ZSAttributeArrayItem;
 

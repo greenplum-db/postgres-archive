@@ -43,10 +43,10 @@ static ZSAttributeItem *zsbt_attr_copy_item(ZSAttributeItem *item);
 static ZSAttributeItem *zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid,
 														  int nelements, Datum *datums, bool *isnulls,
 														  Size datasz);
-static zstid zsbt_attr_split_item(Form_pg_attribute atti,
-								  ZSAttributeArrayItem *olditem,
-								  zstid removetid, IntegerSet *more_removetids,
-								  List **newitems);
+static zstid zsbt_attr_item_remove_elements(Form_pg_attribute atti,
+											ZSAttributeArrayItem *olditem,
+											zstid removetid, IntegerSet *more_removetids,
+											List **newitems);
 
 /* ----------------------------------------------------------------
  *						 Public interface
@@ -703,10 +703,12 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 			}
 
 			/*
-			 * If we don't find an item containing the given TID, just skip over it.
+			 * If we don't find an item containing the given TID, just skip
+			 * over it.
 			 *
-			 * XXX: This can legitimately happen, if e.g. VACUUM is interrupted, after it has already
-			 * removed the attribute data for the dead tuples. And in fact, zsbt_attr_split_item()
+			 * XXX: This can legitimately happen, if e.g. VACUUM is
+			 * interrupted, after it has already removed the attribute data for
+			 * the dead tuples. And in fact, zsbt_attr_item_remove_elements()
 			 * won't emit warnings like this.
 			 */
 			while (nexttid != MaxZSTid && nexttid < item->t_tid)
@@ -738,12 +740,14 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 			}
 
 			/*
-			 * We now have an array item at hand, that contains at least one of the TIDs we
-			 * want to remove. Split the array, removing all the target tids.
+			 * We now have an array item at hand, that contains at least one
+			 * of the TIDs we want to remove. Split the array, removing all
+			 * the target tids.
 			 */
-			nexttid = zsbt_attr_split_item(attr, (ZSAttributeArrayItem *) item,
-										   nexttid, tids,
-										   &newitems);
+			nexttid = zsbt_attr_item_remove_elements(attr,
+													 (ZSAttributeArrayItem *) item,
+													 nexttid, tids,
+													 &newitems);
 		}
 
 		/* Now pass the list to the recompressor. */
@@ -878,7 +882,10 @@ zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid,
 
 	databegin = zsbt_attr_item_payload(newitem);
 
-	/* Clear the NULL bitmap. Also make sure all padding bits in the bitmap are 0. */
+	/*
+	 * Zero the null bitmap. This also zeros all padding bytes between the
+	 * bitmap and the beginning of the payload are 0.
+	 */
 	memset(newitem->t_bitmap, 0, databegin - (char *) newitem->t_bitmap);
 
 	/*
@@ -991,8 +998,15 @@ zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid,
 	return (ZSAttributeItem *) newitem;
 }
 
+/*
+ * Try to merge two array items, if they happen to have consecutive TIDs.
+ *
+ * On success, returns a merged item that contains the elements of both
+ * inputs. if they could not be merged, returns null.
+ */
 static ZSAttributeItem *
-zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttributeItem *bitem)
+zsbt_attr_merge_items(Form_pg_attribute attr,
+					 ZSAttributeItem *aitem, ZSAttributeItem *bitem)
 {
 	ZSAttributeArrayItem *newitem;
 	Size		adatasz;
@@ -1002,6 +1016,7 @@ zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttribut
 	ZSAttributeArrayItem *a_arr_item;
 	ZSAttributeArrayItem *b_arr_item;
 	Size		paddingsz = 0;
+	char	   *dst;
 
 	/* don't bother trying to merge compressed items */
 	if ((aitem->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
@@ -1016,7 +1031,10 @@ zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttribut
 	if (b_arr_item->t_tid != a_arr_item->t_tid + a_arr_item->t_nelements)
 		return NULL;
 
-	/* Create a new item that covers both. */
+	/*
+	 * Compute the sizes of the data portions of both inputs, and the space
+	 * needed for the result.
+	 */
 	adatasz = (char *) a_arr_item + a_arr_item->t_size - zsbt_attr_item_payload(a_arr_item);
 
 	if (attr->attlen > 0)
@@ -1082,8 +1100,10 @@ zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttribut
 	newitemsz = MAXALIGN(newitemsz);
 	newitemsz += totaldatasz;
 
-	/* Like in zsbt_attr_multi_insert(), enforce a practical limit on the
-	 * size of the array tuple. */
+	/*
+	 * Like in zsbt_attr_multi_insert(), enforce a practical limit on the
+	 * size of the array tuple.
+	 */
 	if (newitemsz >= MaxZedStoreDatumSize / 4)
 		return NULL;
 
@@ -1093,71 +1113,79 @@ zsbt_attr_merge_items(Form_pg_attribute attr, ZSAttributeItem *aitem, ZSAttribut
 	newitem->t_flags = 0;
 	newitem->t_nelements = a_arr_item->t_nelements + b_arr_item->t_nelements;
 
-
+	/*
+	 * Create combined null bitmap.
+	 *
+	 * The first input's bitmap can be copied as is, while the second bitmap
+	 * needs to be copied bit by bit. (TODO: We could optimize that by shifting
+	 * the bytes in the second bitmap as we copy it, but this will do for now.)
+	 */
 	memset(newitem->t_bitmap, 0, (char *) zsbt_attr_item_payload(newitem) - (char *) newitem->t_bitmap);
-	/* copy a's null bitmap */
 	memcpy(newitem->t_bitmap, a_arr_item->t_bitmap, ZSBT_ATTR_BITMAPLEN(a_arr_item->t_nelements));
-	/* copy b's null bitmap */
 	for (int i = 0; i < b_arr_item->t_nelements; i++)
 	{
 		if (zsbt_attr_item_isnull(b_arr_item, i))
 			zsbt_attr_item_setnull(newitem, a_arr_item->t_nelements + i);
 	}
 
+	/*
+	 * Combine the payloads.
+	 *
+	 * Begin by copying the first item's payload. Then append the second item's
+	 * payload.
+	 */
+	dst = zsbt_attr_item_payload(newitem);
+	memcpy(dst, zsbt_attr_item_payload(a_arr_item), adatasz);
+	dst += adatasz;
+
+	if (attr->attlen > 0)
 	{
-		char	   *p = zsbt_attr_item_payload(newitem);
+		/* clear alignment padding */
+		memset(dst, 0, paddingsz);
+		dst += paddingsz;
 
-		memcpy(p, zsbt_attr_item_payload(a_arr_item), adatasz);
-		p += adatasz;
-
-		if (attr->attlen > 0)
-		{
-			memset(p, 0, paddingsz);
-			p += paddingsz;
-
-			memcpy(p, zsbt_attr_item_payload(b_arr_item), bdatasz);
-			p += bdatasz;
-		}
-		else
-		{
-			char	   *src;
-
-			/* clear alignment padding */
-			memset(p, 0, bdatasz);
-
-			src = zsbt_attr_item_payload(b_arr_item);
-			for (int i = 0; i < b_arr_item->t_nelements; i++)
-			{
-				Size		data_length;
-
-				if (zsbt_attr_item_isnull(b_arr_item, i))
-					continue;
-
-				/* Walk to the next element in the source */
-				src = (Pointer) att_align_pointer(src, attr->attalign, attr->attlen, src);
-
-				/* Write it to dest, with proper alignment */
-				if (VARATT_IS_EXTERNAL(src) && VARTAG_EXTERNAL(src) == VARTAG_ZEDSTORE)
-				{
-					data_length = sizeof(varatt_zs_toastptr);
-				}
-				else if (VARATT_IS_SHORT(src))
-				{
-					data_length = VARSIZE_SHORT(src);
-				}
-				else
-				{
-					/* full 4-byte header varlena */
-					p = (char *) att_align_nominal(p, attr->attalign);
-					data_length = VARSIZE(src);
-				}
-				memcpy(p, src, data_length);
-				p += data_length;
-				src += data_length;
-			}
-		}
-		Assert(p == (char *) newitem + newitem->t_size);
+		memcpy(dst, zsbt_attr_item_payload(b_arr_item), bdatasz);
+		dst += bdatasz;
 	}
+	else
+	{
+		char	   *src;
+
+		/* clear alignment padding */
+		memset(dst, 0, bdatasz);
+
+		src = zsbt_attr_item_payload(b_arr_item);
+		for (int i = 0; i < b_arr_item->t_nelements; i++)
+		{
+			Size		data_length;
+
+			if (zsbt_attr_item_isnull(b_arr_item, i))
+				continue;
+
+			/* Walk to the next element in the source */
+			src = (Pointer) att_align_pointer(src, attr->attalign, attr->attlen, src);
+
+			/* Write it to dest, with proper alignment */
+			if (VARATT_IS_EXTERNAL(src) && VARTAG_EXTERNAL(src) == VARTAG_ZEDSTORE)
+			{
+				data_length = sizeof(varatt_zs_toastptr);
+			}
+			else if (VARATT_IS_SHORT(src))
+			{
+				data_length = VARSIZE_SHORT(src);
+			}
+			else
+			{
+				/* full 4-byte header varlena */
+				dst = (char *) att_align_nominal(dst, attr->attalign);
+				data_length = VARSIZE(src);
+			}
+			memcpy(dst, src, data_length);
+			dst += data_length;
+			src += data_length;
+		}
+	}
+	Assert(dst == (char *) newitem + newitem->t_size);
 
 	return (ZSAttributeItem *) newitem;
 }
@@ -1302,10 +1330,10 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
  * that was *not* removed.
  */
 static zstid
-zsbt_attr_split_item(Form_pg_attribute attr,
-					 ZSAttributeArrayItem *olditem,
-					 zstid removetid, IntegerSet *more_removetids,
-					 List **newitems)
+zsbt_attr_item_remove_elements(Form_pg_attribute attr,
+							   ZSAttributeArrayItem *olditem,
+							   zstid removetid, IntegerSet *more_removetids,
+							   List **newitems)
 {
 	int16		attlen;
 	int16		aligned_attlen = -1;
@@ -1324,6 +1352,14 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 	if (attr->attlen >= 0)
 		aligned_attlen = att_align_nominal(attr->attlen, attr->attalign);
 
+	/*
+	 * Construct an array, 'keep_tids', to indicate what to do at each
+	 * item. A 0 means that the TID needs to be removed, and should be left
+	 * out from the result. A positive number means that a new array should
+	 * be created starting with the TID at that position, covering the N
+	 * consecutive TIDs. The non-first TIDs that are included in the array
+	 * are marked with -1.
+	 */
 	keep_tids = (int *) palloc(olditem->t_nelements * sizeof(int));
 	num_keep_tids = 0;
 	k = &keep_tids[0];
@@ -1357,8 +1393,11 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 		}
 	}
 
+	/*
+	 * Now that we know what arrays we need to build, build them, following
+	 * the instructions in 'keep_tids'.
+	 */
 	src = zsbt_attr_item_payload(olditem);
-
 	for (int i = 0; i < olditem->t_nelements; i++)
 	{
 		zstid		tid = olditem->t_tid + i;
@@ -1395,8 +1434,10 @@ zsbt_attr_split_item(Form_pg_attribute attr,
 			/* Need to keep this one. */
 			if (newitem == NULL)
 			{
-				/* Allocate an item that's guaranteed to be big enough. This is almost
-				 * certainly overkill, but we don't know how much we need yet.
+				/*
+				 * Allocate an item that's guaranteed to be big enough.
+				 * FIXME: This is almost certainly overkill, but we don't
+				 * know how much we need yet.
 				 */
 				Assert(keep_tids[i] > 0);
 				newitem = palloc(olditem->t_size);
@@ -1619,9 +1660,6 @@ zsbt_attr_recompress_flush(zsbt_attr_recompress_context *cxt, bool last)
  *
  * On entry, 'oldbuf' must be pinned and exclusive-locked. On exit, the lock
  * is released, but it's still pinned.
- *
- * TODO: Try to combine single items, and existing array-items, into new array
- * items.
  */
 static void
 zsbt_attr_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *items)

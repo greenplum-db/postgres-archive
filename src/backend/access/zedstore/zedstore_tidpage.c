@@ -1027,9 +1027,6 @@ zsbt_tid_remove(Relation rel, IntegerSet *tids)
 	if (!intset_iterate_next(tids, &nexttid))
 		nexttid = MaxZSTid;
 
-	/*
-	 * TODO: this removes the TIDs one by one, which is pretty inefficient.
-	 */
 	while (nexttid < MaxZSTid)
 	{
 		Buffer		buf;
@@ -1039,9 +1036,16 @@ zsbt_tid_remove(Relation rel, IntegerSet *tids)
 		int			ntiditems;
 		int			i;
 
+		/*
+		 * Find the leaf page containing the next item to remove
+		 */
 		buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, nexttid, 0, false);
 		page = BufferGetPage(buf);
 
+		/*
+		 * Rewrite the items on the page, removing all TIDs that need to be
+		 * removed from the page.
+		 */
 		tiditems = PageGetZSTidArray(page);
 		ntiditems = PageGetNumZSTidItems(page);
 		newitems = NIL;
