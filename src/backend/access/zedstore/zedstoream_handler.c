@@ -2291,16 +2291,18 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			fetchtid = ZSTidFromItemPointer(*itemptr);
 			zsbt_tid_reset_scan(&meta_scan, fetchtid);
 			old_tid = zsbt_tid_scan_next(&meta_scan);
+			if (old_tid == InvalidZSTid)
+				continue;
 		}
 		else
 		{
 			old_tid = zsbt_tid_scan_next(&meta_scan);
+			if (old_tid == InvalidZSTid)
+				break;
 			fetchtid = old_tid;
 		}
-		if (old_tid == InvalidZSTid)
-			break;
 		if (old_tid != fetchtid)
-			break;
+			continue;
 		old_undoptr = meta_scan.array_undoptr;
 
 		new_tid = zs_cluster_process_tuple(OldHeap, NewHeap,
