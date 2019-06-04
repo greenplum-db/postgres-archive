@@ -402,7 +402,7 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	ZSUndoRec_Insert undorec;
 	List	   *newitems;
 	ZSUndoRecPtr undorecptr;
-	zstid		lasttid;
+	zstid		endtid;
 	zstid		tid;
 	ZSTidArrayItem  *newitem;
 
@@ -426,15 +426,13 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	{
 		ZSTidArrayItem *lastitem = &PageGetZSTidArray(page)[ntiditems - 1];
 
-		lasttid = zsbt_tid_item_lasttid(lastitem);
-		tid = lasttid + 1;
+		endtid = lastitem->t_tid + lastitem->t_nelements;
 	}
 	else
 	{
-		lasttid = opaque->zs_lokey;
-		tid = lasttid;
+		endtid = opaque->zs_lokey;
 	}
-	Assert(tid != InvalidZSTid);
+	tid = endtid;
 
 	/* Form an undo record */
 	if (xid != FrozenTransactionId)
@@ -970,7 +968,8 @@ zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid)
 /*
  * Mark item with given TID as dead.
  *
- * This is used during VACUUM.
+ * This is used when UNDO actions are performed, after a transaction becomes
+ * old enough.
  */
 void
 zsbt_tid_mark_dead(Relation rel, zstid tid)
@@ -1009,7 +1008,7 @@ zsbt_tid_mark_dead(Relation rel, zstid tid)
 
 
 /*
- * Collect all TIDs marked as dead in the TID tree.
+ * Remove items for the given TIDs from the TID tree.
  *
  * This is used during VACUUM.
  */
@@ -1028,13 +1027,91 @@ zsbt_tid_remove(Relation rel, IntegerSet *tids)
 	while (nexttid < MaxZSTid)
 	{
 		Buffer		buf;
+		Page		page;
+		List	   *newitems;
+		ZSTidArrayItem *tiditems;
+		int			ntiditems;
+		int			i;
 
 		buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, nexttid, 0, false);
-		zsbt_tid_replace_item(rel, buf, nexttid, NULL);
-		ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
+		page = BufferGetPage(buf);
 
-		if (!intset_iterate_next(tids, &nexttid))
-			nexttid = MaxZSTid;
+		tiditems = PageGetZSTidArray(page);
+		ntiditems = PageGetNumZSTidItems(page);
+		newitems = NIL;
+
+		for (i = 0; i < ntiditems; i++)
+		{
+			ZSTidArrayItem *item = &tiditems[i];
+			zstid		old_firsttid = item->t_tid;
+			int			old_nelements = item->t_nelements;
+
+			if (item->t_tid <= nexttid && nexttid < old_firsttid + old_nelements)
+			{
+				while (old_nelements > 0)
+				{
+					/* skip any to-be-removed items from the beginning. */
+					while (old_nelements > 0 && old_firsttid == nexttid)
+					{
+						old_firsttid++;
+						old_nelements--;
+						if (!intset_iterate_next(tids, &nexttid))
+							nexttid = MaxZSTid;
+					}
+
+					if (old_nelements > 0)
+					{
+						ZSTidArrayItem *newitem;
+						zstid		endtid;
+						int			new_nelements;
+
+						/* add as many TIDs as we can to this item */
+						endtid = Min(old_firsttid + old_nelements, nexttid);
+						new_nelements = endtid - old_firsttid;
+
+						newitem = zsbt_tid_create_item(old_firsttid, item->t_undo_ptr, new_nelements);
+						newitem->t_flags = item->t_flags;
+						newitems = lappend(newitems, newitem);
+
+						old_firsttid += new_nelements;
+						old_nelements -= new_nelements;
+					}
+				}
+			}
+			else
+			{
+				/* keep this item unmodified */
+				newitems = lappend(newitems, item);
+			}
+		}
+
+		/* Pass the list to the recompressor. */
+		IncrBufferRefCount(buf);
+		if (newitems)
+		{
+			zsbt_tid_recompress_replace(rel, buf, newitems);
+		}
+		else
+		{
+			zs_split_stack *stack;
+
+			stack = zsbt_unlink_page(rel, ZS_META_ATTRIBUTE_NUM, buf, 0);
+
+			if (!stack)
+			{
+				/* failed. */
+				Page		newpage = PageGetTempPageCopySpecial(BufferGetPage(buf));
+
+				stack = zs_new_split_stack_entry(buf, newpage);
+			}
+
+			/* apply the changes */
+			zs_apply_split_changes(rel, stack);
+		}
+
+		list_free(newitems);
+
+		ReleaseBuffer(buf);
 	}
 }
 
@@ -1129,12 +1206,9 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoRecPtr *undoptr_p, 
 	tiditems = PageGetZSTidArray(page);
 	for (int i = 0; i < ntiditems; i++)
 	{
-		zstid		lasttid;
-
 		item = &tiditems[i];
-		lasttid = zsbt_tid_item_lasttid(item);
 
-		if (item->t_tid <= tid && lasttid >= tid)
+		if (item->t_tid <= tid && item->t_tid + item->t_nelements > tid)
 		{
 			found = true;
 			break;
