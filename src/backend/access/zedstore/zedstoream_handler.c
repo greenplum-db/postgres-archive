@@ -199,7 +199,6 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, attno - 1);
-		Datum		toastptr = (Datum) 0;
 		datum = d[attno - 1];
 		isnull = isnulls[attno - 1];
 
@@ -210,14 +209,11 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 		if (!isnull && attr->attlen < 0 &&
 			VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
 		{
-			toastptr = datum = zedstore_toast_datum(relation, attno, datum);
+			datum = zedstore_toast_datum(relation, attno, datum, tid);
 		}
 
 		zsbt_attr_multi_insert(relation, attno,
 						  &datum, &isnull, &tid, 1);
-
-		if (toastptr != (Datum) 0)
-			zedstore_toast_finish(relation, attno, toastptr, tid);
 	}
 
 	slot->tts_tableOid = RelationGetRelid(relation);
@@ -264,13 +260,11 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	int			i;
 	bool		slotgetandset = true;
 	TransactionId xid = GetCurrentTransactionId();
-	int		   *tupletoasted;
 	Datum	   *datums;
 	bool	   *isnulls;
 	zstid	   *tids;
 	ZSUndoRecPtr prevundoptr;
 
-	tupletoasted = palloc(ntuples * sizeof(int));
 	datums = palloc0(ntuples * sizeof(Datum));
 	isnulls = palloc(ntuples * sizeof(bool));
 	tids = palloc0(ntuples * sizeof(zstid));
@@ -293,7 +287,6 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
 		Form_pg_attribute attr = TupleDescAttr((slots[0])->tts_tupleDescriptor, attno - 1);
-		int			ntupletoasted = 0;
 
 		for (i = 0; i < ntuples; i++)
 		{
@@ -309,8 +302,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			if (!isnull && attr->attlen < 0 &&
 				VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
 			{
-				datum = zedstore_toast_datum(relation, attno, datum);
-				tupletoasted[ntupletoasted++] = i;
+				datum = zedstore_toast_datum(relation, attno, datum, tids[i]);
 			}
 			datums[i] = datum;
 			isnulls[i] = isnull;
@@ -318,13 +310,6 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		zsbt_attr_multi_insert(relation, attno,
 							   datums, isnulls, tids, ntuples);
-
-		for (i = 0; i < ntupletoasted; i++)
-		{
-			int		idx = tupletoasted[i];
-
-			zedstore_toast_finish(relation, attno, datums[idx], tids[idx]);
-		}
 
 		slotgetandset = false;
 	}
@@ -338,7 +323,6 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	pgstat_count_heap_insert(relation, ntuples);
 
 	pfree(tids);
-	pfree(tupletoasted);
 	pfree(datums);
 	pfree(isnulls);
 }
@@ -847,7 +831,6 @@ retry:
 			Form_pg_attribute attr = TupleDescAttr(relation->rd_att, attno - 1);
 			Datum		newdatum = d[attno - 1];
 			bool		newisnull = isnulls[attno - 1];
-			Datum		toastptr = (Datum) 0;
 
 			if (!newisnull && attr->attlen < 0 && VARATT_IS_EXTERNAL(newdatum))
 				newdatum = PointerGetDatum(heap_tuple_fetch_attr((struct varlena *) DatumGetPointer(newdatum)));
@@ -856,14 +839,11 @@ retry:
 			if (!newisnull && attr->attlen < 0 &&
 				VARSIZE_ANY_EXHDR(newdatum) > MaxZedStoreDatumSize)
 			{
-				toastptr = newdatum = zedstore_toast_datum(relation, attno, newdatum);
+				newdatum = zedstore_toast_datum(relation, attno, newdatum, newtid);
 			}
 
 			zsbt_attr_multi_insert(relation, attno,
 								   &newdatum, &newisnull, &newtid, 1);
-
-			if (toastptr != (Datum) 0)
-				zedstore_toast_finish(relation, attno, toastptr, newtid);
 		}
 
 		slot->tts_tableOid = RelationGetRelid(relation);
@@ -2315,7 +2295,6 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			for (attno = 1; attno <= olddesc->natts; attno++)
 			{
 				Form_pg_attribute att = TupleDescAttr(olddesc, attno - 1);
-				Datum		toastptr = (Datum) 0;
 
 				if (att->attisdropped)
 				{
@@ -2341,14 +2320,11 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 					if (VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
 					{
-						toastptr = datum = zedstore_toast_datum(NewHeap, attno, datum);
+						datum = zedstore_toast_datum(NewHeap, attno, datum, new_tid);
 					}
 				}
 
 				zsbt_attr_multi_insert(NewHeap, attno, &datum, &isnull, &new_tid, 1);
-
-				if (toastptr != (Datum) 0)
-					zedstore_toast_finish(NewHeap, attno, toastptr, new_tid);
 			}
 		}
 	}

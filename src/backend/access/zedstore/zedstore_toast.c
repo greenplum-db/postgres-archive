@@ -23,13 +23,9 @@
  * heap, the datum is stored within the same ZedStore file as all the btrees and
  * stuff. A chain of "toast-pages" is allocated for the datum, and each page is filled
  * with as much of the datum as possible.
- *
- *
- * Note: You must call zedstore_toast_finish() after this,
- * to set the TID in the toast-chain's first block. Otherwise, it's considered recyclable.
  */
 Datum
-zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value)
+zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid)
 {
 	varatt_zs_toastptr *toastptr;
 	BlockNumber firstblk = InvalidBlockNumber;
@@ -41,6 +37,8 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value)
 	char	   *ptr;
 	int32		total_size;
 	int32		offset;
+
+	Assert(tid != InvalidZSTid);
 
 	/*
 	 * TID btree will always be inserted first, so there must be > 0 blocks
@@ -72,7 +70,7 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value)
 
 		opaque = (ZSToastPageOpaque *) PageGetSpecialPointer(page);
 		opaque->zs_attno = attno;
-		opaque->zs_tid = InvalidZSTid;
+		opaque->zs_tid = tid;
 		opaque->zs_total_size = total_size;
 		opaque->zs_slice_offset = offset;
 		opaque->zs_prev = BufferIsValid(prevbuf) ? BufferGetBlockNumber(prevbuf) : InvalidBlockNumber;
@@ -107,33 +105,6 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value)
 	toastptr->zst_block = firstblk;
 
 	return PointerGetDatum(toastptr);
-}
-
-void
-zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, zstid tid)
-{
-	varatt_zs_toastptr *toastptr = (varatt_zs_toastptr *) DatumGetPointer(toasted);
-	Buffer		buf;
-	Page		page;
-	ZSToastPageOpaque *opaque;
-
-	Assert(toastptr->va_tag == VARTAG_ZEDSTORE);
-
-	buf = ReadBuffer(rel, toastptr->zst_block);
-	page = BufferGetPage(buf);
-	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-	opaque = (ZSToastPageOpaque *) PageGetSpecialPointer(page);
-
-	Assert(opaque->zs_tid == InvalidZSTid);
-	Assert(opaque->zs_attno == attno);
-	Assert(opaque->zs_prev == InvalidBlockNumber);
-
-	opaque->zs_tid = tid;
-
-	/* TODO: WAL-log */
-	MarkBufferDirty(buf);
-
-	UnlockReleaseBuffer(buf);
 }
 
 Datum

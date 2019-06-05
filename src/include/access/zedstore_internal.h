@@ -691,8 +691,7 @@ extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr,
 								   TransactionId *obsoleting_xid, zstid *next_tid);
 
 /* prototypes for functions in zedstore_toast.c */
-extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value);
-extern void zedstore_toast_finish(Relation rel, AttrNumber attno, Datum toasted, zstid tid);
+extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid);
 extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted);
 
 /* prototypes for functions in zedstore_freepagemap.c */
