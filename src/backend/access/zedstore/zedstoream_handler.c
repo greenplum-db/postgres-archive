@@ -170,7 +170,21 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 	bool        isnull;
 	Datum       datum;
 	ZSUndoRecPtr prevundoptr;
+	MemoryContext oldcontext;
+	MemoryContext insert_mcontext;
 
+	/*
+	 * insert code performs allocations for creating items and merging
+	 * items. These are small allocations but add-up based on number of
+	 * columns and rows being inserted. Hence, creating context to track them
+	 * and wholesale free instead of retail freeing them. TODO: in long term
+	 * try if can avoid creating context here, retail free in normal case and
+	 * only create context for page splits maybe.
+	 */
+	insert_mcontext = AllocSetContextCreate(CurrentMemoryContext,
+											   "ZedstoreAMContext",
+											   ALLOCSET_DEFAULT_SIZES);
+	oldcontext = MemoryContextSwitchTo(insert_mcontext);
 	ZSUndoRecPtrInitialize(&prevundoptr);
 
 	if (slot->tts_tupleDescriptor->natts != relation->rd_att->natts)
@@ -218,6 +232,9 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 
 	slot->tts_tableOid = RelationGetRelid(relation);
 	slot->tts_tid = ItemPointerFromZSTid(tid);
+
+	MemoryContextSwitchTo(oldcontext);
+	MemoryContextDelete(insert_mcontext);
 
 	/* Note: speculative insertions are counted too, even if aborted later */
 	pgstat_count_heap_insert(relation, 1);
@@ -781,7 +798,21 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	TupleTableSlot *oldslot;
 	IndexFetchTableData *fetcher;
 	ZSUndoRecPtr prevundoptr;
+	MemoryContext oldcontext;
+	MemoryContext insert_mcontext;
 
+	/*
+	 * insert code performs allocations for creating items and merging
+	 * items. These are small allocations but add-up based on number of
+	 * columns and rows being inserted. Hence, creating context to track them
+	 * and wholesale free instead of retail freeing them. TODO: in long term
+	 * try if can avoid creating context here, retail free in normal case and
+	 * only create context for page splits maybe.
+	 */
+	insert_mcontext = AllocSetContextCreate(CurrentMemoryContext,
+											   "ZedstoreAMContext",
+											   ALLOCSET_DEFAULT_SIZES);
+	oldcontext = MemoryContextSwitchTo(insert_mcontext);
 	ZSUndoRecPtrInitialize(&prevundoptr);
 
 	slot_getallattrs(slot);
@@ -872,6 +903,9 @@ retry:
 
 	zedstoream_end_index_fetch(fetcher);
 	ExecDropSingleTupleTableSlot(oldslot);
+
+	MemoryContextSwitchTo(oldcontext);
+	MemoryContextDelete(insert_mcontext);
 
 	return result;
 }
