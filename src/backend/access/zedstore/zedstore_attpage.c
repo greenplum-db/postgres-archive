@@ -1027,6 +1027,14 @@ zsbt_attr_merge_items(Form_pg_attribute attr,
 	a_arr_item = (ZSAttributeArrayItem *) aitem;
 	b_arr_item = (ZSAttributeArrayItem *) bitem;
 
+	/*
+	 * Attribute btrees shouldn't be storing duplicate TIDs. Hence, add
+	 * assertion to make sure inserting TID doesn't conflict with existing
+	 * TID.
+	 */
+	Assert((b_arr_item->t_tid < a_arr_item->t_tid) ||
+		   (b_arr_item->t_tid >= a_arr_item->t_tid + a_arr_item->t_nelements));
+
 	/* The arrays must have consecutive TIDs */
 	if (b_arr_item->t_tid != a_arr_item->t_tid + a_arr_item->t_nelements)
 		return NULL;
@@ -1313,6 +1321,24 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 
 			items = lappend(items, item);
 		}
+
+		/*
+		 * Attribute btree should not have Duplicate TIDs. Plus, based on how
+		 * below code works, new TIDs should be greater than existing
+		 * TIDs. Hence, check to make sure the new items don't have
+		 * conflicting TIDs with existing items. The code here performs
+		 * minimal checking to avoid duplicates.  It doesn't perform
+		 * exhaustive checking for array item full ranges don't overlap and
+		 * all, which seems little unnecessary.
+		 */
+#ifdef USE_ASSERT_CHECKING
+		if (items && newitems)
+		{
+			ZSAttributeItem *last_old_item = linitial(items);
+			ZSAttributeItem *first_new_item = linitial(newitems);
+			Assert(last_old_item->t_tid < first_new_item->t_tid);
+		}
+#endif
 		items = list_concat(items, newitems);
 
 		/* Now pass the list to the recompressor. */
