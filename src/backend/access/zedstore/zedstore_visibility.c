@@ -610,7 +610,10 @@ fetch_undo_record:
 			 * transactions could still see the tuple.
 			 */
 			if (!TransactionIdPrecedes(undorec->xid, OldestXmin))
+			{
+				scan->nonvacuumable_status = ZSNV_RECENTLY_DEAD;
 				return true;
+			}
 
 			return false;
 		}

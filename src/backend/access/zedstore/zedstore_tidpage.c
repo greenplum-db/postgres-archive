@@ -83,6 +83,7 @@ zsbt_tid_begin_scan(Relation rel, zstid starttid,
 	scan->array_datums_allocated_size = 1;
 	scan->array_num_elements = 0;
 	scan->array_next_datum = 0;
+	scan->nonvacuumable_status = ZSNV_NONE;
 
 	buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, starttid, 0, true);
 	if (!BufferIsValid(buf))

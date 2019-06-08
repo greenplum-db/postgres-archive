@@ -112,6 +112,9 @@ static bool zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
 									  zstid *start, zstid *end);
 static void zsbt_fill_missing_attribute_value(ZSBtreeScan *scan, Datum *datum, bool *isnull);
 
+/* Typedef for callback function for getnextslot() */
+typedef void (*GetNextSlotCallback) (ZSBtreeScan *scan, zstid tid, void *state);
+
 /* ----------------------------------------------------------------
  *				storage AM support routines for zedstoream
  * ----------------------------------------------------------------
@@ -1128,7 +1131,9 @@ zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
 }
 
 static bool
-zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
+zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
+								TupleTableSlot *slot, GetNextSlotCallback callback,
+								void *callback_state)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 	ZedStoreProjectData *scan_proj = &scan->proj_data;
@@ -1221,6 +1226,9 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		{
 			Assert (this_tid < scan->cur_range_end);
 
+			if (callback)
+				callback(&scan_proj->btree_scans[0], this_tid, callback_state);
+
 			/* Note: We don't need to predicate-lock tuples in Serializable mode,
 			 * because in a sequential scan, we predicate-locked the whole table.
 			 */
@@ -1280,6 +1288,12 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 	ExecClearTuple(slot);
 	return false;
+}
+
+static bool
+zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
+{
+	return zedstoream_getnextslot_internal(sscan, direction, slot, NULL, NULL);
 }
 
 static bool
@@ -1667,6 +1681,42 @@ zedstoream_index_validate_scan(Relation baseRelation,
 	indexInfo->ii_PredicateState = NULL;
 }
 
+/*
+ * This is called by getnextslot function after checking visibility of TID
+ * item based on passed snapshot. We have info available to help us set
+ * tupleIsAlive, which helps control if the tuple should be excluded from
+ * unique-checking or not.
+ */
+static void
+index_build_getnextslot_callback(ZSBtreeScan *scan, zstid tid, void *state)
+{
+	bool *tupleIsAlive = (bool*)state;
+
+	Assert(tid != InvalidZSTid);
+	Assert(scan->attno == ZS_META_ATTRIBUTE_NUM);
+
+	/*
+	 * This callback is called after checking visibility based on passed in
+	 * snapshot to scan.
+	 */
+	*tupleIsAlive = true;
+
+	/*
+	 * If NonVacuumableSnapshot snapshot used for scanning then we need to
+	 * check for recenetly dead tuples.
+	 *
+	 * TODO: Heap checks for DELETE_IN_PROGRESS do we need as well?
+	 */
+	if (scan->nonvacuumable_status == ZSNV_RECENTLY_DEAD)
+	{
+		Assert(scan->snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE);
+		*tupleIsAlive = false;
+		return;
+	}
+
+	Assert(scan->nonvacuumable_status == ZSNV_NONE);
+}
+
 static double
 zedstoream_index_build_range_scan(Relation baseRelation,
 								  Relation indexRelation,
@@ -1691,6 +1741,7 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	SnapshotData NonVacuumableSnapshot;
 	bool		need_unregister_snapshot = false;
 	TransactionId OldestXmin;
+	bool        tupleIsAlive;
 
 #ifdef USE_ASSERT_CHECKING
 	bool		checking_uniqueness;
@@ -1737,9 +1788,6 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	if (!IsBootstrapProcessingMode() && !indexInfo->ii_Concurrent)
 		OldestXmin = GetOldestXmin(baseRelation, PROCARRAY_FLAGS_VACUUM);
 
-	/*
-	 * TODO: It would be very good to fetch only the columns we need.
-	 */
 	if (!scan)
 	{
 		bool	   *proj;
@@ -1853,9 +1901,9 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	/*
 	 * Scan all tuples in the base relation.
 	 */
-	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+	while (zedstoream_getnextslot_internal(scan, ForwardScanDirection, slot,
+										   &index_build_getnextslot_callback, &tupleIsAlive))
 	{
-		bool		tupleIsAlive;
 		HeapTuple	heapTuple;
 
 		if (numblocks != InvalidBlockNumber &&
@@ -1865,8 +1913,8 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 		CHECK_FOR_INTERRUPTS();
 
 		/* table_scan_getnextslot did the visibility check */
-		tupleIsAlive = true;
-		reltuples += 1;
+		if (tupleIsAlive)
+			reltuples += 1;
 
 		/*
 		 * TODO: Once we have in-place updates, like HOT, this will need

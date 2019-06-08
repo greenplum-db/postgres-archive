@@ -79,6 +79,7 @@ zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid star
 	scan->array_datums_allocated_size = 1;
 	scan->array_num_elements = 0;
 	scan->array_next_datum = 0;
+	scan->nonvacuumable_status = ZSNV_NONE;
 
 	buf = zsbt_descend(rel, attno, starttid, 0, true);
 	if (!BufferIsValid(buf))

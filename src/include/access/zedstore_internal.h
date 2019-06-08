@@ -426,6 +426,15 @@ typedef struct ZSMetaPageOpaque
 	uint16		zs_page_id;
 } ZSMetaPageOpaque;
 
+/*
+ * Codes populated by zs_SatisfiesNonVacuumable. This has minimum values
+ * defined based on what's needed. Heap equivalent has more states.
+ */
+typedef enum
+{
+	ZSNV_NONE,
+	ZSNV_RECENTLY_DEAD	/* tuple is dead, but not deletable yet */
+} ZSNV_Result;
 
 /*
  * Holds the state of an in-progress scan on a zedstore btree.
@@ -477,6 +486,7 @@ typedef struct ZSBtreeScan
 	int			array_next_datum;
 	int			array_num_elements;
 
+	ZSNV_Result nonvacuumable_status;
 } ZSBtreeScan;
 
 static inline Form_pg_attribute
