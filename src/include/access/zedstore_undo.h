@@ -145,19 +145,21 @@ typedef struct
 	uint16		zs_page_id; /* ZS_UNDO_PAGE_ID */
 } ZSUndoPageOpaque;
 
-static inline void
-ZSUndoRecPtrInitialize(ZSUndoRecPtr *uptr)
-{
-	uptr->blkno = InvalidBlockNumber;
-	uptr->offset = InvalidOffsetNumber;
-	uptr->counter = 0;
-}
+/*
+ * "invalid" undo pointer. The value is chosen so that an invalid pointer
+ * is less than any real UNDO pointer value. Therefore, a tuple with an
+ * invalid UNDO pointer is considered visible to everyone.
+ */
+static const ZSUndoRecPtr InvalidUndoPtr = {
+	.blkno = InvalidBlockNumber,
+	.offset = InvalidOffsetNumber,
+	.counter = 0
+};
 
 static inline bool
 IsZSUndoRecPtrValid(ZSUndoRecPtr *uptr)
 {
-	return (uptr->blkno != InvalidBlockNumber &&
-			uptr->offset != InvalidOffsetNumber);
+	return uptr->counter != 0;
 }
 
 /* prototypes for functions in zstore_undo.c */

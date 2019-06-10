@@ -499,7 +499,7 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 	List	   *unused_pages = NIL;
 	BlockNumber deleted_undo_pages = 0;
 
-	ZSUndoRecPtrInitialize(&oldest_undorecptr);
+	oldest_undorecptr = InvalidUndoPtr;
 
 	/*
 	 * Ensure that only one process discards at a time. We use a page lock on the
@@ -726,7 +726,6 @@ zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumb
 ZSUndoRecPtr
 zsundo_get_oldest_undo_ptr(Relation rel)
 {
-	ZSUndoRecPtr result;
 	ZSMetaCacheData *metacache;
 
 	/* do nothing if the table is completely empty. */
@@ -737,8 +736,7 @@ zsundo_get_oldest_undo_ptr(Relation rel)
 			metacache = zsmeta_populate_cache(rel);
 		else
 		{
-			ZSUndoRecPtrInitialize(&result);
-			return result;
+			return InvalidUndoPtr;
 		}
 	}
 
@@ -753,7 +751,5 @@ zsundo_get_oldest_undo_ptr(Relation rel)
 	 * so until that is somehow sped up, it is a good tradeoff to be
 	 * aggressive about that.
 	 */
-	result = zsundo_trim(rel, RecentGlobalXmin);
-
-	return result;
+	return zsundo_trim(rel, RecentGlobalXmin);
 }

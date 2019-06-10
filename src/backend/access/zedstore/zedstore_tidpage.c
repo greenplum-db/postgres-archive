@@ -457,7 +457,7 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	}
 	else
 	{
-		ZSUndoRecPtrInitialize(&undorecptr);
+		undorecptr = InvalidUndoPtr;
 	}
 
 	/*
@@ -557,7 +557,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 		if (keep_old_undo_ptr)
 			undorec.rec.prevundorec = item_undoptr;
 		else
-			ZSUndoRecPtrInitialize(&undorec.rec.prevundorec);
+			undorec.rec.prevundorec = InvalidUndoPtr;
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
@@ -808,7 +808,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 		if (keep_old_undo_ptr)
 			undorec.rec.prevundorec = olditem_undoptr;
 		else
-			ZSUndoRecPtrInitialize(&undorec.rec.prevundorec);
+			undorec.rec.prevundorec = InvalidUndoPtr;
 		undorec.newtid = newtid;
 		undorec.key_update = key_update;
 
@@ -875,7 +875,7 @@ zsbt_tid_lock(Relation rel, zstid tid,
 		if (keep_old_undo_ptr)
 			undorec.rec.prevundorec = item_undoptr;
 		else
-			ZSUndoRecPtrInitialize(&undorec.rec.prevundorec);
+			undorec.rec.prevundorec = InvalidUndoPtr;
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
@@ -1006,7 +1006,7 @@ zsbt_tid_mark_dead(Relation rel, zstid tid)
 	memset(&deaditem, 0, sizeof(ZSTidArrayItem));
 	deaditem.t_tid = tid;
 	deaditem.t_flags = ZSBT_TID_DEAD;
-	ZSUndoRecPtrInitialize(&deaditem.t_undo_ptr);
+	deaditem.t_undo_ptr = InvalidUndoPtr;
 	deaditem.t_nelements = 1;
 
 	zsbt_tid_replace_item(rel, buf, tid, &deaditem);
@@ -1150,10 +1150,7 @@ zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr)
 
 	if (ZSUndoRecPtrEquals(item_undoptr, undoptr))
 	{
-		ZSUndoRecPtr new_undoptr;
-
-		ZSUndoRecPtrInitialize(&new_undoptr);
-		copy = zsbt_tid_create_item(tid, new_undoptr, 1);
+		copy = zsbt_tid_create_item(tid, InvalidUndoPtr, 1);
 		zsbt_tid_replace_item(rel, buf, tid, copy);
 		ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 	}
@@ -1207,7 +1204,7 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoRecPtr *undoptr_p, 
 	if (buf == InvalidBuffer)
 	{
 		*buf_p = InvalidBuffer;
-		ZSUndoRecPtrInitialize(undoptr_p);
+		*undoptr_p = InvalidUndoPtr;
 		return false;
 	}
 	page = BufferGetPage(buf);

@@ -172,7 +172,6 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 	TransactionId xid = GetCurrentTransactionId();
 	bool        isnull;
 	Datum       datum;
-	ZSUndoRecPtr prevundoptr;
 	MemoryContext oldcontext;
 	MemoryContext insert_mcontext;
 
@@ -188,7 +187,6 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 											   "ZedstoreAMContext",
 											   ALLOCSET_DEFAULT_SIZES);
 	oldcontext = MemoryContextSwitchTo(insert_mcontext);
-	ZSUndoRecPtrInitialize(&prevundoptr);
 
 	if (slot->tts_tupleDescriptor->natts != relation->rd_att->natts)
 		elog(ERROR, "slot's attribute count doesn't match relcache entry");
@@ -200,10 +198,9 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 	tid = InvalidZSTid;
 
 	isnull = true;
-	ZSUndoRecPtrInitialize(&prevundoptr);
 	zsbt_tid_multi_insert(relation,
 						  &tid, 1,
-						  xid, cid, speculative_token, prevundoptr);
+						  xid, cid, speculative_token, InvalidUndoPtr);
 
 	/*
 	 * We only need to check for table-level SSI locks. Our
@@ -283,7 +280,6 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	Datum	   *datums;
 	bool	   *isnulls;
 	zstid	   *tids;
-	ZSUndoRecPtr prevundoptr;
 
 	datums = palloc0(ntuples * sizeof(Datum));
 	isnulls = palloc(ntuples * sizeof(bool));
@@ -292,9 +288,8 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	for (i = 0; i < ntuples; i++)
 		isnulls[i] = true;
 
-	ZSUndoRecPtrInitialize(&prevundoptr);
 	zsbt_tid_multi_insert(relation, tids, ntuples,
-						  xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
+						  xid, cid, INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
 
 	/*
 	 * We only need to check for table-level SSI locks. Our
@@ -800,7 +795,6 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	zstid		newtid;
 	TupleTableSlot *oldslot;
 	IndexFetchTableData *fetcher;
-	ZSUndoRecPtr prevundoptr;
 	MemoryContext oldcontext;
 	MemoryContext insert_mcontext;
 
@@ -816,7 +810,6 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 											   "ZedstoreAMContext",
 											   ALLOCSET_DEFAULT_SIZES);
 	oldcontext = MemoryContextSwitchTo(insert_mcontext);
-	ZSUndoRecPtrInitialize(&prevundoptr);
 
 	slot_getallattrs(slot);
 	d = slot->tts_values;
@@ -2209,17 +2202,15 @@ zs_cluster_process_tuple(Relation OldHeap, Relation NewHeap,
 	if (this_xmin != InvalidTransactionId)
 	{
 		/* Insert the first version of the row. */
-		ZSUndoRecPtr prevundoptr;
 		zstid		newtid = InvalidZSTid;
 
 		/* First, insert the tuple. */
-		ZSUndoRecPtrInitialize(&prevundoptr);
 		zsbt_tid_multi_insert(NewHeap,
 							  &newtid, 1,
 							  this_xmin,
 							  this_cmin,
 							  INVALID_SPECULATIVE_TOKEN,
-							  prevundoptr);
+							  InvalidUndoPtr);
 
 		/* And if the tuple was deleted/updated away, do the same in the new table. */
 		if (this_xmax != InvalidTransactionId)
