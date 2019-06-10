@@ -246,11 +246,9 @@ zsbt_attr_item_lasttid(ZSAttributeItem *item)
  * a range of tuples, starting at 't_tid'.
  *
  * An item can be marked DEAD. A dead item prevents the TID (or TID range) from
- * being reused. It's used during VACUUM, to mark items for which there are no
- * index pointers anymore. But it cannot be removed until the undo record has been
- * trimmed away, because if the TID was reused for a new record, vacuum might remove
- * the new tuple version instead. After t_undo_ptr becomes older than "oldest
- * undo ptr", the item can be removed and the TID recycled.
+ * being reused. A dead item is not visible to anyone, but there might still be
+ * index pointers to them, so the TIDs cannot be reused until VACUUM has removed
+ * the index pointers.
  *
  * The page uses the standard page layout, but does *not* use standard line pointers.
  * Each item has a fixed size, so we store an array of them directly after the
