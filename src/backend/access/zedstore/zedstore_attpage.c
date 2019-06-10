@@ -38,7 +38,7 @@ static void zsbt_attr_recompress_replace(Relation rel, AttrNumber attno,
 										 Buffer oldbuf, List *items);
 static void zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf,
 								List *newitems);
-static Size zsbt_compute_data_size(Form_pg_attribute atti, Datum val, bool isnull);
+static Size zsbt_add_data_size(Form_pg_attribute atti, Size datasz, Datum val, bool isnull);
 static ZSAttributeItem *zsbt_attr_copy_item(ZSAttributeItem *item);
 static ZSAttributeItem *zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid,
 														  int nelements, Datum *datums, bool *isnulls,
@@ -584,7 +584,7 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 		 * isn't too large to be stored on a single leaf page. Scan the
 		 * arrays, checking those conditions.
 		 */
-		datasz = zsbt_compute_data_size(attr, datums[i], isnulls[i]);
+		datasz = zsbt_add_data_size(attr, 0, datums[i], isnulls[i]);
 		for (j = i + 1; j < nitems; j++)
 		{
 			if (tids[j] != tids[j - 1] + 1)
@@ -605,12 +605,9 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 			if (!isnulls[j])
 			{
 				Datum		val = datums[j];
-				Size		datum_sz;
 				Size		newdatasz;
 
-				datum_sz = zsbt_compute_data_size(attr, val, false);
-
-				newdatasz = att_align_datum(newdatasz, attr->attalign, attr->attlen, val) + datum_sz;
+				newdatasz = zsbt_add_data_size(attr, datasz, val, false);
 
 				if (newdatasz > MaxZedStoreDatumSize / 4)
 					break;
@@ -803,9 +800,9 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
  * This is very similar to heap_compute_data_size()
  */
 static Size
-zsbt_compute_data_size(Form_pg_attribute atti, Datum val, bool isnull)
+zsbt_add_data_size(Form_pg_attribute atti, Size datasz, Datum val, bool isnull)
 {
-	Size		data_length = 0;
+	Size		data_length = datasz;
 
 	if (isnull)
 		return data_length;
@@ -971,8 +968,15 @@ zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid,
 			else
 			{
 				/* full 4-byte header varlena */
+				char		*p = data;
+
 				data = (char *) att_align_nominal(data,
 												  att->attalign);
+
+				/* clear padding bytes */
+				while (p < data)
+					*(p++) = 0;
+
 				data_length = VARSIZE(val);
 				memcpy(data, val, data_length);
 			}
@@ -987,7 +991,13 @@ zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid,
 		else
 		{
 			/* fixed-length pass-by-reference */
+			char		*p = data;
+
 			data = (char *) att_align_nominal(data, att->attalign);
+
+			/* clear padding bytes */
+			while (p < data)
+				*(p++) = 0;
 			Assert(att->attlen > 0);
 			data_length = att->attlen;
 			memcpy(data, DatumGetPointer(datum), data_length);
