@@ -1545,7 +1545,8 @@ typedef struct
 	zs_split_stack *stack_head;
 	zs_split_stack *stack_tail;
 
-	int			total_items;
+	int			num_pages;
+	int			free_space_per_page;
 
 	zstid		hikey;
 } zsbt_tid_recompress_context;
@@ -1593,17 +1594,78 @@ zsbt_tid_recompress_add_to_page(zsbt_tid_recompress_context *cxt, ZSTidArrayItem
 {
 	ZSTidArrayItem *tiditems;
 	int			ntiditems;
+	Size		freespc;
 
-	if (PageGetFreeSpace(cxt->currpage) < MAXALIGN(sizeof(ZSTidArrayItem)))
+	freespc = PageGetExactFreeSpace(cxt->currpage);
+	if (freespc < MAXALIGN(sizeof(ZSTidArrayItem)) ||
+		freespc < cxt->free_space_per_page)
+	{
 		zsbt_tid_recompress_newpage(cxt, item->t_tid, 0);
+	}
 
 	tiditems = PageGetZSTidArray(cxt->currpage);
 	ntiditems = PageGetNumZSTidItems(cxt->currpage);
 
 	tiditems[ntiditems] = *item;
 	((PageHeader) cxt->currpage)->pd_lower += sizeof(ZSTidArrayItem);
+}
 
-	cxt->total_items++;
+/*
+ * Subroutine of zsbt_tid_recompress_replace.  Compute how much space the
+ * items will take, and compute how many pages will be needed for them, and
+ * decide how to distribute any free space thats's left over among the
+ * pages.
+ *
+ * Like in B-tree indexes, we aim for 50/50 splits, except for the
+ * rightmost page where aim for 90/10, so that most of the free space is
+ * left to the end of the index, where it's useful for new inserts. The
+ * 90/10 splits ensure that the we don't waste too much space on a table
+ * that's loaded at the end, and never updated.
+ */
+static void
+zsbt_tid_recompress_picksplit(zsbt_tid_recompress_context *cxt, List *items)
+{
+	int			total_items = list_length(items);
+	size_t		total_sz;
+	int			num_pages;
+	int			space_on_empty_page;
+	Size		free_space_per_page;
+
+	space_on_empty_page = BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(ZSBtreePageOpaque));
+
+	/* Compute total space needed for all the items. */
+	total_sz = total_items * sizeof(ZSTidArrayItem);
+
+	/* How many pages will we need for them? */
+	num_pages = (total_sz + space_on_empty_page - 1) / space_on_empty_page;
+
+	/* If everything fits on one page, don't split */
+	if (num_pages == 1)
+	{
+		free_space_per_page = 0;
+	}
+	/* If this is the rightmost page, do a 90/10 split */
+	else if (cxt->hikey == MaxPlusOneZSTid)
+	{
+		/*
+		 * What does 90/10 mean if we have to use more than two pages? It means
+		 * that 10% of the items go to the last page, and 90% are distributed to
+		 * all the others.
+		 */
+		double		total_free_space;
+
+		total_free_space = space_on_empty_page * num_pages - total_sz;
+
+		free_space_per_page = total_free_space * 0.1 / (num_pages - 1);
+	}
+	/* Otherwise, aim for an even 50/50 split */
+	else
+	{
+		free_space_per_page = (space_on_empty_page * num_pages - total_sz) / num_pages;
+	}
+
+	cxt->num_pages = num_pages;
+	cxt->free_space_per_page = free_space_per_page;
 }
 
 /*
@@ -1640,8 +1702,7 @@ zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items)
 	cxt.stack_head = cxt.stack_tail = NULL;
 	cxt.hikey = oldopaque->zs_hikey;
 
-	cxt.total_items = 0;
-
+	zsbt_tid_recompress_picksplit(&cxt, items);
 	zsbt_tid_recompress_newpage(&cxt, oldopaque->zs_lokey, (oldopaque->zs_flags & ZSBT_ROOT));
 
 	foreach(lc, items)
@@ -1685,6 +1746,13 @@ zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items)
 	}
 	/* last one in the chain */
 	ZSBtreePageGetOpaque(stack->page)->zs_next = orignextblk;
+
+	/*
+	 * zsbt_tid_recompress_picksplit() calculated that we'd need
+	 * 'cxt.num_pages' pages. Check that it matches with how many pages we
+	 * actually created.
+	 */
+	Assert(list_length(downlinks) + 1 == cxt.num_pages);
 
 	/* If we had to split, insert downlinks for the new pages. */
 	if (cxt.stack_head->next)
