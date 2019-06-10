@@ -435,13 +435,11 @@ typedef enum
 } ZSNV_Result;
 
 /*
- * Holds the state of an in-progress scan on a zedstore btree.
+ * Holds the state of an in-progress scan on a zedstore Tid tree.
  */
-typedef struct ZSBtreeScan
+typedef struct ZSTidTreeScan
 {
 	Relation	rel;
-	AttrNumber	attno;
-	TupleDesc   tupledesc;
 
 	/*
 	 * memory context that should be used for any allocations that go with the scan,
@@ -466,6 +464,42 @@ typedef struct ZSBtreeScan
 	bool		acquire_predicate_tuple_locks;
 
 	/*
+	 * These fields are used, if the scan is processing an array tuple.
+	 * And also for a single-item tuple - it works just like a single-element
+	 * array tuple.
+	 */
+	ZSUndoRecPtr array_undoptr;
+	int			array_next_datum;
+	int			array_num_elements;
+
+	ZSNV_Result nonvacuumable_status;
+
+} ZSTidTreeScan;
+
+/*
+ * Holds the state of an in-progress scan on a zedstore attribute tree.
+ */
+typedef struct ZSAttrTreeScan
+{
+	Relation	rel;
+	AttrNumber	attno;
+	Form_pg_attribute attdesc;
+
+	/*
+	 * memory context that should be used for any allocations that go with the scan,
+	 * like the decompression buffers. This isn't a dedicated context, you must still
+	 * free everything to avoid leaking! We need this because the getnext function
+	 * might be called in a short-lived memory context that is reset between calls.
+	 */
+	MemoryContext context;
+
+	bool		active;
+	Buffer		lastbuf;
+	OffsetNumber lastoff;
+	zstid		nexttid;
+	zstid		endtid;
+
+	/*
 	 * if we have remaining items from a compressed container tuple, they
 	 * are kept in the decompressor context, and 'has_decompressed' is true.
 	 */
@@ -477,21 +511,13 @@ typedef struct ZSBtreeScan
 	 * And also for a single-item tuple - it works just like a single-element
 	 * array tuple.
 	 */
-	ZSUndoRecPtr array_undoptr;
 	int			array_datums_allocated_size;
 	Datum	   *array_datums;
 	bool	   *array_isnulls;
 	int			array_next_datum;
 	int			array_num_elements;
 
-	ZSNV_Result nonvacuumable_status;
-} ZSBtreeScan;
-
-static inline Form_pg_attribute
-ZSBtreeScanGetAttInfo(ZSBtreeScan *scan)
-{
-	return TupleDescAttr(scan->tupledesc, scan->attno - 1);
-}
+} ZSAttrTreeScan;
 
 /*
  * We keep a cached copy of the information in the metapage in
@@ -568,10 +594,10 @@ struct zs_split_stack
 
 /* prototypes for functions in zedstore_tidpage.c */
 extern void zsbt_tid_begin_scan(Relation rel,
-								zstid starttid, zstid endtid, Snapshot snapshot, ZSBtreeScan *scan);
-extern void zsbt_tid_reset_scan(ZSBtreeScan *scan, zstid starttid);
-extern void zsbt_tid_end_scan(ZSBtreeScan *scan);
-extern zstid zsbt_tid_scan_next(ZSBtreeScan *scan);
+								zstid starttid, zstid endtid, Snapshot snapshot, ZSTidTreeScan *scan);
+extern void zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid);
+extern void zsbt_tid_end_scan(ZSTidTreeScan *scan);
+extern zstid zsbt_tid_scan_next(ZSTidTreeScan *scan);
 
 extern void zsbt_tid_multi_insert(Relation rel,
 							  zstid *tids, int ndatums,
@@ -597,10 +623,10 @@ extern void zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot);
 
 /* prototypes for functions in zedstore_attrpage.c */
 extern void zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
-								zstid starttid, zstid endtid, ZSBtreeScan *scan);
-extern void zsbt_attr_reset_scan(ZSBtreeScan *scan, zstid starttid);
-extern void zsbt_attr_end_scan(ZSBtreeScan *scan);
-extern bool zsbt_attr_scan_next(ZSBtreeScan *scan);
+								zstid starttid, zstid endtid, ZSAttrTreeScan *scan);
+extern void zsbt_attr_reset_scan(ZSAttrTreeScan *scan, zstid starttid);
+extern void zsbt_attr_end_scan(ZSAttrTreeScan *scan);
+extern bool zsbt_attr_scan_next(ZSAttrTreeScan *scan);
 
 extern void zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 							  Datum *datums, bool *isnulls, zstid *tids, int ndatums);
@@ -615,8 +641,31 @@ extern zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer b
 extern Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
 extern bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf);
 
+
 static inline void
-zsbt_scan_skip(ZSBtreeScan *scan, zstid tid)
+zsbt_tid_scan_skip(ZSTidTreeScan *scan, zstid tid)
+{
+	if (tid > scan->nexttid)
+	{
+		if (scan->array_next_datum < scan->array_num_elements)
+		{
+			int64		skip = tid - scan->nexttid;
+
+			if (skip < scan->array_num_elements - scan->array_next_datum)
+			{
+				scan->array_next_datum += skip;
+			}
+			else
+			{
+				scan->array_next_datum = scan->array_num_elements;
+			}
+		}
+		scan->nexttid = tid;
+	}
+}
+
+static inline void
+zsbt_attr_scan_skip(ZSAttrTreeScan *scan, zstid tid)
 {
 	if (tid > scan->nexttid)
 	{
@@ -646,13 +695,13 @@ zsbt_scan_skip(ZSBtreeScan *scan, zstid tid)
  * a false return, it's OK to call this again with another greater TID.
  */
 static inline bool
-zsbt_attr_fetch(ZSBtreeScan *scan, Datum *datum, bool *isnull, zstid tid)
+zsbt_attr_fetch(ZSAttrTreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 {
 	if (!scan->active)
 		return false;
 
 	/* skip to the given tid. */
-	zsbt_scan_skip(scan, tid);
+	zsbt_attr_scan_skip(scan, tid);
 
 	/*
 	 * Fetch the next item from the scan. The item we're looking for might
@@ -695,7 +744,7 @@ extern TM_Result zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 									LockTupleMode mode,
 									bool *undo_record_needed,
 									TM_FailureData *tmfd, zstid *next_tid);
-extern bool zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr,
+extern bool zs_SatisfiesVisibility(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 								   TransactionId *obsoleting_xid, zstid *next_tid);
 
 /* prototypes for functions in zedstore_toast.c */

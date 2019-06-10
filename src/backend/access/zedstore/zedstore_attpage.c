@@ -58,28 +58,24 @@ static zstid zsbt_attr_item_remove_elements(Form_pg_attribute atti,
  */
 void
 zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,
-					 zstid endtid, ZSBtreeScan *scan)
+					 zstid endtid, ZSAttrTreeScan *scan)
 {
 	Buffer		buf;
 
 	scan->rel = rel;
 	scan->attno = attno;
-	scan->tupledesc = tdesc;
+	scan->attdesc = TupleDescAttr(tdesc, attno - 1);
 
-	scan->snapshot = NULL;
 	scan->context = CurrentMemoryContext;
 	scan->lastoff = InvalidOffsetNumber;
 	scan->has_decompressed = false;
 	scan->nexttid = starttid;
 	scan->endtid = endtid;
-	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
-	memset(&scan->array_undoptr, 0, sizeof(scan->array_undoptr));
 	scan->array_datums = MemoryContextAlloc(scan->context, sizeof(Datum));
 	scan->array_isnulls = MemoryContextAlloc(scan->context, sizeof(bool));
 	scan->array_datums_allocated_size = 1;
 	scan->array_num_elements = 0;
 	scan->array_next_datum = 0;
-	scan->nonvacuumable_status = ZSNV_NONE;
 
 	buf = zsbt_descend(rel, attno, starttid, 0, true);
 	if (!BufferIsValid(buf))
@@ -95,14 +91,13 @@ zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid star
 	scan->lastbuf = buf;
 
 	zs_decompress_init(&scan->decompressor);
-	scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 }
 
 /*
  * Reset the 'next' TID in a scan to the given TID.
  */
 void
-zsbt_attr_reset_scan(ZSBtreeScan *scan, zstid starttid)
+zsbt_attr_reset_scan(ZSAttrTreeScan *scan, zstid starttid)
 {
 	if (starttid < scan->nexttid)
 	{
@@ -116,11 +111,11 @@ zsbt_attr_reset_scan(ZSBtreeScan *scan, zstid starttid)
 		scan->lastbuf = InvalidBuffer;
 	}
 	else
-		zsbt_scan_skip(scan, starttid);
+		zsbt_attr_scan_skip(scan, starttid);
 }
 
 void
-zsbt_attr_end_scan(ZSBtreeScan *scan)
+zsbt_attr_end_scan(ZSAttrTreeScan *scan)
 {
 	if (!scan->active)
 		return;
@@ -139,21 +134,19 @@ zsbt_attr_end_scan(ZSBtreeScan *scan)
  * array item into the scan->array_* fields.
  */
 static void
-zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
+zsbt_attr_scan_extract_array(ZSAttrTreeScan *scan, ZSAttributeArrayItem *aitem)
 {
 	int			nelements = aitem->t_nelements;
 	zstid		tid = aitem->t_tid;
 	char	   *p = zsbt_attr_item_payload(aitem);
 	int			firstelem;
-	Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
+	Form_pg_attribute attr = scan->attdesc;
 	int16		attlen = attr->attlen;
 
 	/* skip over elements that we are not interested in */
 	firstelem = 0;
 	while (tid < scan->nexttid && nelements > 0)
 	{
-		Form_pg_attribute attr = ZSBtreeScanGetAttInfo(scan);
-
 		if (!zsbt_attr_item_isnull(aitem, firstelem))
 		{
 			if (attr->attlen > 0)
@@ -339,7 +332,7 @@ zsbt_attr_scan_extract_array(ZSBtreeScan *scan, ZSAttributeArrayItem *aitem)
  * zsbt_scan_next_fetch() wrappers, instead.
  */
 bool
-zsbt_attr_scan_next(ZSBtreeScan *scan)
+zsbt_attr_scan_next(ZSAttrTreeScan *scan)
 {
 	Buffer		buf;
 	bool		buf_is_locked = false;

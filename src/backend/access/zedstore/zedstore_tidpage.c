@@ -62,25 +62,19 @@ static int zsbt_binsrch_tidpage(zstid key, ZSTidArrayItem *arr, int arr_elems);
  */
 void
 zsbt_tid_begin_scan(Relation rel, zstid starttid,
-					zstid endtid, Snapshot snapshot, ZSBtreeScan *scan)
+					zstid endtid, Snapshot snapshot, ZSTidTreeScan *scan)
 {
 	Buffer		buf;
 
 	scan->rel = rel;
-	scan->attno = ZS_META_ATTRIBUTE_NUM;
-	scan->tupledesc = NULL;
 
 	scan->snapshot = snapshot;
 	scan->context = CurrentMemoryContext;
 	scan->lastoff = InvalidOffsetNumber;
-	scan->has_decompressed = false;
 	scan->nexttid = starttid;
 	scan->endtid = endtid;
 	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 	memset(&scan->array_undoptr, 0, sizeof(scan->array_undoptr));
-	scan->array_datums = palloc(sizeof(Datum));
-	scan->array_isnulls = palloc(sizeof(bool));
-	scan->array_datums_allocated_size = 1;
 	scan->array_num_elements = 0;
 	scan->array_next_datum = 0;
 	scan->nonvacuumable_status = ZSNV_NONE;
@@ -98,7 +92,6 @@ zsbt_tid_begin_scan(Relation rel, zstid starttid,
 	scan->active = true;
 	scan->lastbuf = buf;
 
-	zs_decompress_init(&scan->decompressor);
 	scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 }
 
@@ -106,7 +99,7 @@ zsbt_tid_begin_scan(Relation rel, zstid starttid,
  * Reset the 'next' TID in a scan to the given TID.
  */
 void
-zsbt_tid_reset_scan(ZSBtreeScan *scan, zstid starttid)
+zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid)
 {
 	if (starttid < scan->nexttid)
 	{
@@ -114,24 +107,22 @@ zsbt_tid_reset_scan(ZSBtreeScan *scan, zstid starttid)
 		scan->array_num_elements = 0;
 		scan->array_next_datum = 0;
 		scan->nexttid = starttid;
-		scan->has_decompressed = false;
 		if (scan->lastbuf != InvalidBuffer)
 			ReleaseBuffer(scan->lastbuf);
 		scan->lastbuf = InvalidBuffer;
 	}
 	else
-		zsbt_scan_skip(scan, starttid);
+		zsbt_tid_scan_skip(scan, starttid);
 }
 
 void
-zsbt_tid_end_scan(ZSBtreeScan *scan)
+zsbt_tid_end_scan(ZSTidTreeScan *scan)
 {
 	if (!scan->active)
 		return;
 
 	if (scan->lastbuf != InvalidBuffer)
 		ReleaseBuffer(scan->lastbuf);
-	zs_decompress_free(&scan->decompressor);
 
 	scan->active = false;
 	scan->array_num_elements = 0;
@@ -143,7 +134,7 @@ zsbt_tid_end_scan(ZSBtreeScan *scan)
  * array item into the scan->array_* fields.
  */
 static void
-zsbt_tid_scan_extract_array(ZSBtreeScan *scan, ZSTidArrayItem *aitem)
+zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 {
 	int			nelements = aitem->t_nelements;
 	zstid		tid = aitem->t_tid;
@@ -177,7 +168,7 @@ zsbt_tid_scan_extract_array(ZSBtreeScan *scan, ZSTidArrayItem *aitem)
  * zsbt_scan_next_fetch() wrappers, instead.
  */
 zstid
-zsbt_tid_scan_next(ZSBtreeScan *scan)
+zsbt_tid_scan_next(ZSTidTreeScan *scan)
 {
 	Buffer		buf;
 	bool		buf_is_locked = false;
@@ -220,14 +211,14 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 				 * another backend (or ourselves). Have to re-check that the page is
 				 * still valid.
 				 */
-				if (!zsbt_page_is_expected(scan->rel, scan->attno, scan->nexttid, 0, buf))
+				if (!zsbt_page_is_expected(scan->rel, ZS_META_ATTRIBUTE_NUM, scan->nexttid, 0, buf))
 				{
 					/*
 					 * It's not valid for the TID we're looking for, but maybe it was the
 					 * right page for the previous TID. In that case, we don't need to
 					 * restart from the root, we can follow the right-link instead.
 					 */
-					if (zsbt_page_is_expected(scan->rel, scan->attno, scan->nexttid - 1, 0, buf))
+					if (zsbt_page_is_expected(scan->rel, ZS_META_ATTRIBUTE_NUM, scan->nexttid - 1, 0, buf))
 					{
 						page = BufferGetPage(buf);
 						opaque = ZSBtreePageGetOpaque(page);
@@ -250,7 +241,7 @@ zsbt_tid_scan_next(ZSBtreeScan *scan)
 
 			if (!BufferIsValid(buf))
 			{
-				buf = scan->lastbuf = zsbt_descend(scan->rel, scan->attno, scan->nexttid, 0, true);
+				buf = scan->lastbuf = zsbt_descend(scan->rel, ZS_META_ATTRIBUTE_NUM, scan->nexttid, 0, true);
 				buf_is_locked = true;
 			}
 		}
@@ -526,7 +517,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 		{
 			/* Perform additional check for transaction-snapshot mode RI updates */
 			/* FIXME: dummmy scan */
-			ZSBtreeScan scan;
+			ZSTidTreeScan scan;
 			TransactionId obsoleting_xid;
 
 			memset(&scan, 0, sizeof(scan));
@@ -598,7 +589,7 @@ zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot)
 		if (snapshot)
 		{
 			/* FIXME: dummmy scan */
-			ZSBtreeScan scan;
+			ZSTidTreeScan scan;
 			TransactionId obsoleting_xid;
 
 			memset(&scan, 0, sizeof(scan));
@@ -712,7 +703,7 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 	{
 		/* Perform additional check for transaction-snapshot mode RI updates */
 		/* FIXME: dummmy scan */
-		ZSBtreeScan scan;
+		ZSTidTreeScan scan;
 		TransactionId obsoleting_xid;
 
 		memset(&scan, 0, sizeof(scan));

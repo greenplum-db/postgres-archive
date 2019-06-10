@@ -273,7 +273,7 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesAny
  */
 static bool
-zs_SatisfiesAny(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr)
+zs_SatisfiesAny(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr)
 {
 	return true;
 }
@@ -311,7 +311,7 @@ xid_is_visible(Snapshot snapshot, TransactionId xid, CommandId cid, bool *aborte
  * Like HeapTupleSatisfiesMVCC
  */
 static bool
-zs_SatisfiesMVCC(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr,
+zs_SatisfiesMVCC(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 				 TransactionId *obsoleting_xid, zstid *next_tid)
 {
 	Relation	rel = scan->rel;
@@ -386,7 +386,7 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesSelf
  */
 static bool
-zs_SatisfiesSelf(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr, zstid *next_tid)
+zs_SatisfiesSelf(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr, zstid *next_tid)
 {
 	Relation	rel = scan->rel;
 	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
@@ -466,7 +466,7 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesDirty
  */
 static bool
-zs_SatisfiesDirty(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr, zstid *next_tid)
+zs_SatisfiesDirty(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr, zstid *next_tid)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -561,7 +561,7 @@ fetch_undo_record:
  * surely dead to everyone, ie, vacuumable.
  */
 static bool
-zs_SatisfiesNonVacuumable(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr)
+zs_SatisfiesNonVacuumable(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr)
 {
 	Relation	rel = scan->rel;
 	TransactionId OldestXmin = scan->snapshot->xmin;
@@ -658,7 +658,7 @@ fetch_undo_record:
  * UPDATEd. *next_tid_p is set to the TID of the new row version.
  */
 bool
-zs_SatisfiesVisibility(ZSBtreeScan *scan, ZSUndoRecPtr item_undoptr,
+zs_SatisfiesVisibility(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 					   TransactionId *obsoleting_xid, zstid *next_tid)
 {
 	ZSUndoRecPtr undo_ptr;
