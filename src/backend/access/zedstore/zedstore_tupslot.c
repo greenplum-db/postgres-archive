@@ -128,6 +128,7 @@ tts_zedstore_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
 		attnum == MinCommandIdAttributeNumber)
 	{
 		zstid		tid = ZSTidFromItemPointer(slot->tts_tid);
+		ZSUndoRecPtr undoptr;
 		ZSTidTreeScan tid_scan;
 		bool		found;
 		Relation	rel;
@@ -161,7 +162,11 @@ tts_zedstore_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
 			elog(ERROR, "could not find zedstore tuple (%u, %u)",
 				 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid));
 
-		zs_get_xmin_cmin(rel, recent_oldest_undo, tid, tid_scan.array_undoptr, &xmin, &cmin);
+		undoptr = tid_scan.array_iter.undoslots[
+			tid_scan.array_iter.tid_undoslotnos[tid_scan.array_iter.next_idx - 1]
+			];
+
+		zs_get_xmin_cmin(rel, recent_oldest_undo, tid, undoptr, &xmin, &cmin);
 
 		zsbt_tid_end_scan(&tid_scan);
 

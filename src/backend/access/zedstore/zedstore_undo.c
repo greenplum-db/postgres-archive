@@ -591,13 +591,13 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 			{
 				case ZSUNDO_TYPE_INSERT:
 					if (!did_commit)
-						zsbt_tid_mark_dead(rel, undorec->tid);
+						zsbt_tid_mark_dead(rel, undorec->tid, oldest_undorecptr);
 					break;
 				case ZSUNDO_TYPE_DELETE:
 					if (did_commit)
 					{
 						/* The deletion is now visible to everyone */
-						zsbt_tid_mark_dead(rel, undorec->tid);
+						zsbt_tid_mark_dead(rel, undorec->tid, oldest_undorecptr);
 					}
 					else
 					{
@@ -606,12 +606,13 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 						 * becomes visible to everyone when the UNDO record is trimmed
 						 * away.
 						 */
-						zsbt_tid_undo_deletion(rel, undorec->tid, undorec->undorecptr);
+						zsbt_tid_undo_deletion(rel, undorec->tid, undorec->undorecptr,
+											   oldest_undorecptr);
 					}
 					break;
 				case ZSUNDO_TYPE_UPDATE:
 					if (did_commit)
-						zsbt_tid_mark_dead(rel, undorec->tid);
+						zsbt_tid_mark_dead(rel, undorec->tid, oldest_undorecptr);
 					break;
 			}
 
@@ -657,7 +658,8 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 
 /* Update metapage with the oldest value */
 static void
-zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumber oldest_undopage, List *unused_pages)
+zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr,
+						 BlockNumber oldest_undopage, List *unused_pages)
 {
 	/* Scan the undo log from oldest to newest */
 	Buffer		metabuf;

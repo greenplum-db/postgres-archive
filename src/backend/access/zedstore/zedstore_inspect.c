@@ -390,21 +390,22 @@ pg_zs_btree_pages(PG_FUNCTION_ARGS)
 		if (opaque->zs_level == 0)
 		{
 			/* leaf page */
-			if (opaque->zs_attno == ZS_META_ATTRIBUTE_NUM)
+			maxoff = PageGetMaxOffsetNumber(page);
+			for (off = FirstOffsetNumber; off <= maxoff; off++)
 			{
-				int			this_nitems = PageGetNumZSTidItems(page);
+				ItemId		iid = PageGetItemId(page, off);
 
-				nitems += this_nitems;
-				totalsz += this_nitems * sizeof(ZSTidArrayItem);
-				uncompressedsz += this_nitems * sizeof(ZSTidArrayItem);
-			}
-			else
-			{
-				maxoff = PageGetMaxOffsetNumber(page);
-				for (off = FirstOffsetNumber; off <= maxoff; off++)
+				if (opaque->zs_attno == ZS_META_ATTRIBUTE_NUM)
 				{
-					ItemId		iid = PageGetItemId(page, off);
+					ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
 
+					nitems++;
+					totalsz += item->t_size;
+
+					uncompressedsz += item->t_size;
+				}
+				else
+				{
 					ZSAttributeItem	*item = (ZSAttributeItem *) PageGetItem(page, iid);
 
 					nitems++;

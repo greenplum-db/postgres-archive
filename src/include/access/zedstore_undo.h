@@ -156,6 +156,16 @@ static const ZSUndoRecPtr InvalidUndoPtr = {
 	.counter = 0
 };
 
+/*
+ * A special value used on TID items, to mean that a tuple is not visible to
+ * anyone
+ */
+static const ZSUndoRecPtr DeadUndoPtr = {
+	.blkno = InvalidBlockNumber,
+	.offset = InvalidOffsetNumber,
+	.counter = 1
+};
+
 static inline bool
 IsZSUndoRecPtrValid(ZSUndoRecPtr *uptr)
 {

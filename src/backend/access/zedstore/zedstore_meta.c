@@ -171,7 +171,7 @@ zsmeta_initmetapage(Relation rel)
 	opaque->zs_page_id = ZS_META_PAGE_ID;
 
 	/* UNDO-related fields */
-	opaque->zs_undo_counter = 1; /* start at 1, so that 0 is always "old" */
+	opaque->zs_undo_counter = 2; /* start at 2, so that 0 is always "old", and 1 means "dead" */
 	opaque->zs_undo_head = InvalidBlockNumber;
 	opaque->zs_undo_tail = InvalidBlockNumber;
 	opaque->zs_undo_oldestptr.counter = 1;

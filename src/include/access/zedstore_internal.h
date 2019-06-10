@@ -243,30 +243,120 @@ zsbt_attr_item_lasttid(ZSAttributeItem *item)
  * TID B-tree leaf page layout
  *
  * Leaf pages are packed with ZSTidArrayItems. Each ZSTidArrayItem represents
- * a range of tuples, starting at 't_tid'.
+ * a range of tuples, starting at 't_firsttid', up to 't_endtid' - 1. For each
+ * tuple, we its TID and the UNDO pointer. The TIDs and UNDO pointers are specially
+ * encoded, so that they take less space.
  *
- * An item can be marked DEAD. A dead item prevents the TID (or TID range) from
- * being reused. A dead item is not visible to anyone, but there might still be
- * index pointers to them, so the TIDs cannot be reused until VACUUM has removed
- * the index pointers.
+ * Item format:
  *
- * The page uses the standard page layout, but does *not* use standard line pointers.
- * Each item has a fixed size, so we store an array of them directly after the
- * standard page header.
+ * We make use of some assumptions / observations on the TIDs and UNDO pointers
+ * to pack them tightly:
  *
- * TODO: squeeze harder: eliminate padding, use high bits of t_tid for flags etc.
+ * - TIDs are kept in ascending order, and the gap between two TIDs
+ *   is usually very small. On a newly loaded table, all TIDs are
+ *   consecutive.
+ *
+ * - It's common for the UNDO pointer to be old so that the tuple is
+ *   visible to everyone. In that case we don't need to keep the exact value.
+ *
+ * - Nearby TIDs are likely to have only a few distinct UNDO pointer values.
+ *
+ *
+ * Each item looks like this:
+ *
+ *  Header  |  0-2 UNDO pointers | 1-16 Codewords
+ *
+ * The fixed-sized header contains the start and end of the TID range that
+ * this item represents, and information on how many UNDO slots and codewords
+ * follow in the variable-size part.
+ *
+ * After the header, are so called "UNDO slots". They represent all the
+ * distinct UNDO pointers in the group of TIDs that this item covers.
+ * Logically, there are 4 slots. Slots 0 and 1 are special, representing
+ * all-visible "old" TIDs, and "dead" TIDs. They are not stored in the item
+ * itself, to save space, but logically, they can be thought to be part of
+ * every item. They are included in 't_num_undo_slots', so the number of UNDO
+ * pointers physically stored on an item is actually 't_num_undo_slots - 2'.
+ *
+ * With the 4 UNDO slots, we can represent an UNDO pointer using a 2-bit
+ * slot number. If you update a tuple with a new UNDO pointer, and all four
+ * slots are already in use, the item needs to be split. Hopefully that doesn't
+ * happen too often (see assumptions above).
+ *
+ * After the UNDO slots come the actual TIDs, and their UNDO slot numbers.
+ * They are encoded in Simple-8b codewords. Simple-8b is an encoding scheme
+ * to pack multiple integers in 64-bit codewords. A single codeword can pack
+ * e.g. three 20-bit integers, or 20 3-bit integers, or a number of different
+ * combinations. Therefore, small integers pack more tightly than larger
+ * integers. The low two bits of each encoded integer store the UNDO slot
+ * number, and the higher bits store the difference to the previous TID. For
+ * the very first tuple in the item, the difference is always zero, because
+ * the first TID is stored explicitly in t_firsttid.
+ *
+ * (TODO: This means that we never make use of the most compact Simple-8b
+ * "modes", because the integers (except for the very first one) are always >=
+ * 4, because the difference to the previous TID is always at least one, and
+ * the two lowest bits are used for the UNDO slot number. We could pack more
+ * tightly if we stored the "diff - 1" instead of "diff" to the previous TID,
+ * because then a tuple whose TID is previous TID + 1, would not have any of
+ * the the higher bits set.)
+ *
+ * The size of an item depends on how many UNDO slots are in use, and the
+ * number of codewords. The maximum size with the current constants is 184
+ * bytes.
+ *
+ * Representing UNDO pointers as distinct slots also has the advantage that
+ * when we're scanning the TID array, we can check the UNDO pointers against
+ * the current snapshot, instead of checking every UNDO pointer separately.
+ * That considerably speeds up visibility checks when reading. That's one
+ * advantage of this special encoding scheme, compared to e.g. using a
+ * general-purpose compression algorithm on an array of TIDs and UNDO pointers.
  */
 typedef struct
 {
-	zstid		t_tid;
-	uint32		t_nelements;
-	uint16		t_flags;
+	uint16		t_size;
+	uint16		t_num_tids;
+	uint16		t_num_undo_slots;
+	uint16		t_num_codewords;
 
-	ZSUndoRecPtr t_undo_ptr;
+	zstid		t_firsttid;
+	zstid		t_endtid;
+
+	/* Followed by UNDO slots, and then followed by codewords */
+	uint64		t_payload[FLEXIBLE_ARRAY_MEMBER];
 
 } ZSTidArrayItem;
 
-#define ZSBT_TID_DEAD			0x0001
+#define ZSBT_ITEM_UNDO_SLOT_BITS	2
+#define ZSBT_MAX_ITEM_UNDO_SLOTS	(1 << (ZSBT_ITEM_UNDO_SLOT_BITS))
+#define ZSBT_ITEM_UNDO_SLOT_MASK	(ZSBT_MAX_ITEM_UNDO_SLOTS - 1)
+
+#define MAX_ITEM_CODEWORDS			16
+
+#define ZSBT_OLD_UNDO_SLOT			0
+#define ZSBT_DEAD_UNDO_SLOT			1
+#define ZSBT_FIRST_NORMAL_UNDO_SLOT	2
+
+static inline size_t
+SizeOfZSTidArrayItem(int num_undo_slots, int num_codewords)
+{
+	return offsetof(ZSTidArrayItem, t_payload) +
+		MAXALIGN((num_undo_slots - ZSBT_FIRST_NORMAL_UNDO_SLOT) * sizeof(ZSUndoRecPtr)) +
+		num_codewords * sizeof(uint64);
+}
+
+static inline ZSUndoRecPtr *
+ZSTidArrayItemGetUndoSlots(ZSTidArrayItem *item)
+{
+	return (ZSUndoRecPtr *) item->t_payload;
+}
+
+static inline uint64 *
+ZSTidArrayItemGetCodewords(ZSTidArrayItem *item)
+{
+	return (uint64 *) ((char *) item->t_payload +
+					   MAXALIGN((item->t_num_undo_slots - ZSBT_FIRST_NORMAL_UNDO_SLOT) * sizeof(ZSUndoRecPtr)));
+}
 
 /*
  * Get the last TID that the given item spans.
@@ -274,21 +364,7 @@ typedef struct
 static inline zstid
 zsbt_tid_item_lasttid(ZSTidArrayItem *item)
 {
-	return item->t_tid + item->t_nelements - 1;
-}
-
-static inline ZSTidArrayItem *
-PageGetZSTidArray(Page page)
-{
-	return (ZSTidArrayItem *) PageGetContents(page);
-}
-
-static inline int
-PageGetNumZSTidItems(Page page)
-{
-	PageHeader phdr = (PageHeader) page;
-
-	return (phdr->pd_lower - MAXALIGN(SizeOfPageHeaderData))  / sizeof(ZSTidArrayItem);
+	return item->t_endtid - 1;
 }
 
 /*
@@ -434,6 +510,18 @@ typedef enum
 	ZSNV_RECENTLY_DEAD	/* tuple is dead, but not deletable yet */
 } ZSNV_Result;
 
+typedef struct ZSTidItemIterator
+{
+	int			tids_allocated_size;
+	zstid	   *tids;
+	uint8	   *tid_undoslotnos;
+	int			next_idx;
+	int			num_tids;
+	MemoryContext context;
+
+	ZSUndoRecPtr	undoslots[4];
+} ZSTidItemIterator;
+
 /*
  * Holds the state of an in-progress scan on a zedstore Tid tree.
  */
@@ -468,9 +556,7 @@ typedef struct ZSTidTreeScan
 	 * And also for a single-item tuple - it works just like a single-element
 	 * array tuple.
 	 */
-	ZSUndoRecPtr array_undoptr;
-	int			array_next_datum;
-	int			array_num_elements;
+	ZSTidItemIterator array_iter;
 
 	ZSNV_Result nonvacuumable_status;
 
@@ -611,15 +697,23 @@ extern TM_Result zsbt_tid_update(Relation rel, zstid otid,
 								 CommandId cid, bool key_update, Snapshot snapshot, Snapshot crosscheck,
 								 bool wait, TM_FailureData *hufd, zstid *newtid_p);
 extern void zsbt_tid_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete);
-extern void zsbt_tid_mark_dead(Relation rel, zstid tid);
+extern void zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo);
 extern IntegerSet *zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid);
 extern void zsbt_tid_remove(Relation rel, IntegerSet *tids);
 extern TM_Result zsbt_tid_lock(Relation rel, zstid tid,
 			   TransactionId xid, CommandId cid,
 								LockTupleMode lockmode, Snapshot snapshot, TM_FailureData *hufd, zstid *next_tid);
-extern void zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr);
+extern void zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr, ZSUndoRecPtr recent_oldest_undo);
 extern zstid zsbt_get_last_tid(Relation rel);
 extern void zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot);
+
+/* prototypes for functions in zedstore_tiditem.c */
+extern List *zsbt_tid_pack_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements);
+extern void zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter);
+extern List *zsbt_tid_item_change_undoptr(ZSTidArrayItem *orig, zstid target_tid, ZSUndoRecPtr undoptr, ZSUndoRecPtr recent_oldest_undo);
+extern List *zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remove_tids,
+									   ZSUndoRecPtr recent_oldest_undo);
+
 
 /* prototypes for functions in zedstore_attrpage.c */
 extern void zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
@@ -647,20 +741,14 @@ zsbt_tid_scan_skip(ZSTidTreeScan *scan, zstid tid)
 {
 	if (tid > scan->nexttid)
 	{
-		if (scan->array_next_datum < scan->array_num_elements)
+		while (scan->array_iter.next_idx < scan->array_iter.num_tids)
 		{
-			int64		skip = tid - scan->nexttid;
-
-			if (skip < scan->array_num_elements - scan->array_next_datum)
-			{
-				scan->array_next_datum += skip;
-			}
+			scan->array_iter.next_idx++;
+			if (scan->array_iter.next_idx < scan->array_iter.num_tids)
+				scan->nexttid = scan->array_iter.tids[scan->array_iter.next_idx];
 			else
-			{
-				scan->array_next_datum = scan->array_num_elements;
-			}
+				scan->nexttid++;
 		}
-		scan->nexttid = tid;
 	}
 }
 

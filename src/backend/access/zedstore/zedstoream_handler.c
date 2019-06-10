@@ -267,7 +267,11 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 	 * there is a conflict
 	 */
 	if (!succeeded)
-		zsbt_tid_mark_dead(relation, tid);
+	{
+		ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(relation);
+
+		zsbt_tid_mark_dead(relation, tid, recent_oldest_undo);
+	}
 }
 
 static void
@@ -2358,7 +2362,10 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		}
 		if (old_tid != fetchtid)
 			continue;
-		old_undoptr = tid_scan.array_undoptr;
+
+		old_undoptr = tid_scan.array_iter.undoslots[
+			tid_scan.array_iter.tid_undoslotnos[tid_scan.array_iter.next_idx - 1]
+			];
 
 		new_tid = zs_cluster_process_tuple(OldHeap, NewHeap,
 										   old_tid, old_undoptr,
