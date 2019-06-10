@@ -1590,7 +1590,6 @@ zedstoream_index_validate_scan(Relation baseRelation,
 	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
 	{
 		ItemPointerData tup_ptr = slot->tts_tid;
-		HeapTuple	heapTuple;
 		int			cmp;
 
 		CHECK_FOR_INTERRUPTS();
@@ -1658,13 +1657,10 @@ zedstoream_index_validate_scan(Relation baseRelation,
 						   isnull);
 
 			/* Call the AM's callback routine to process the tuple */
-			heapTuple = ExecCopySlotHeapTuple(slot);
-			heapTuple->t_self = slot->tts_tid;
 			index_insert(indexRelation, values, isnull, &tup_ptr, baseRelation,
 						 indexInfo->ii_Unique ?
 						 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
 						 indexInfo);
-			pfree(heapTuple);
 
 			state->tups_inserted += 1;
 		}
