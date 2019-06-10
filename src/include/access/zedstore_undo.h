@@ -81,6 +81,8 @@ typedef struct
 
 } ZSUndoRec_Insert;
 
+#define ZSUNDO_NUM_TIDS_PER_DELETE	10
+
 typedef struct
 {
 	ZSUndoRec	rec;
@@ -88,9 +90,16 @@ typedef struct
 	bool		changedPart;	/* tuple was moved to a different partition by UPDATE */
 
 	/*
+	 * One deletion record can represent deleting up to
+	 * ZSUNDO_NUM_TIDS_PER_DELETE tuples. The 'rec.tid' field is unused.
+	 */
+	uint16		num_tids;
+	zstid		tids[ZSUNDO_NUM_TIDS_PER_DELETE];
+
+	/*
 	 * TODO: It might be good to move the deleted tuple to the undo-log, so
 	 * that the space can immediately be reused. But currently, we don't do
-	 * that. (or even better, move the old tuple to the undo-log lazily, if
+	 * that. Or even better, move the old tuple to the undo-log lazily, if
 	 * the space is needed for a new insertion, before the old tuple becomes
 	 * recyclable.
 	 */
@@ -179,5 +188,7 @@ extern void zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr);
 extern void zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy,
 			  TransactionId OldestXmin);
 extern ZSUndoRecPtr zsundo_get_oldest_undo_ptr(Relation rel);
+extern ZSUndoRecPtr zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid tid,
+									  bool changedPart, ZSUndoRecPtr prev_undo_ptr);
 
 #endif							/* ZEDSTORE_UNDO_H */

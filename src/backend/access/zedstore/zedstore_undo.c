@@ -60,6 +60,7 @@ static void lazy_cleanup_index(Relation indrel,
 				   ZSVacRelStats *vacrelstats);
 static ZSUndoRecPtr zsundo_trim(Relation rel, TransactionId OldestXmin);
 static void zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumber oldest_undopage, List *unused_pages);
+static ZSUndoRec *zsundo_fetch_lock(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode);
 
 /*
  * Insert the given UNDO record to the UNDO log.
@@ -189,18 +190,34 @@ retry_lock_tail:
 ZSUndoRec *
 zsundo_fetch(Relation rel, ZSUndoRecPtr undoptr)
 {
+	ZSUndoRec  *undorec_copy;
+	ZSUndoRec  *undorec;
+	Buffer		buf;
+
+	undorec = zsundo_fetch_lock(rel, undoptr, &buf, BUFFER_LOCK_SHARE);
+
+	undorec_copy = palloc(undorec->size);
+	memcpy(undorec_copy, undorec, undorec->size);
+
+	UnlockReleaseBuffer(buf);
+
+	return undorec_copy;
+}
+
+static ZSUndoRec *
+zsundo_fetch_lock(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode)
+{
 	Buffer		buf;
 	Page		page;
 	PageHeader	pagehdr;
 	ZSUndoPageOpaque *opaque;
 	ZSUndoRec  *undorec;
-	ZSUndoRec  *undorec_copy;
 
 	buf = ReadBuffer(rel, undoptr.blkno);
 	page = BufferGetPage(buf);
 	pagehdr = (PageHeader) page;
 
-	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	LockBuffer(buf, lockmode);
 	if (PageIsNew(page))
 		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u; not an UNDO page",
 			 undoptr.counter, undoptr.blkno, undoptr.offset);
@@ -220,45 +237,23 @@ zsundo_fetch(Relation rel, ZSUndoRecPtr undoptr)
 	if (memcmp(&undorec->undorecptr, &undoptr, sizeof(ZSUndoRecPtr)) != 0)
 		elog(ERROR, "could not find UNDO record");
 
-	undorec_copy = palloc(undorec->size);
-	memcpy(undorec_copy, undorec, undorec->size);
-
-	UnlockReleaseBuffer(buf);
-
-	return undorec_copy;
+	*buf_p = buf;
+	return undorec;
 }
 
 void
 zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr)
 {
-	Buffer		buf;
-	Page		page;
-	PageHeader	pagehdr;
-	ZSUndoPageOpaque *opaque;
 	ZSUndoRec  *undorec;
+	Buffer		buf;
 
-	buf = ReadBuffer(rel, undoptr.blkno);
-	page = BufferGetPage(buf);
-	pagehdr = (PageHeader) page;
-
-	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-	opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(page);
-	if (opaque->zs_page_id != ZS_UNDO_PAGE_ID)
-		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u; not an UNDO page",
-			undoptr.counter, undoptr.blkno, undoptr.offset);
-
-	/* Sanity check that the pointer pointed to a valid place */
-	if (undoptr.offset < SizeOfPageHeaderData ||
-		undoptr.offset + sizeof(ZSUndoRec) > pagehdr->pd_lower)
-		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
-			undoptr.counter, undoptr.blkno, undoptr.offset);
-
-	undorec = (ZSUndoRec *) (((char *) page) + undoptr.offset);
+	undorec = zsundo_fetch_lock(rel, undoptr, &buf, BUFFER_LOCK_EXCLUSIVE);
 
 	if (undorec->type != ZSUNDO_TYPE_INSERT)
 		elog(ERROR, "unexpected undo record type %d on speculatively inserted row", undorec->type);
 
 	undorec->speculative_token = INVALID_SPECULATIVE_TOKEN;
+
 	MarkBufferDirty(buf);
 	UnlockReleaseBuffer(buf);
 }
@@ -594,20 +589,26 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 						zsbt_tid_mark_dead(rel, undorec->tid, oldest_undorecptr);
 					break;
 				case ZSUNDO_TYPE_DELETE:
-					if (did_commit)
 					{
-						/* The deletion is now visible to everyone */
-						zsbt_tid_mark_dead(rel, undorec->tid, oldest_undorecptr);
-					}
-					else
-					{
-						/*
-						 * must clear the item's UNDO pointer, otherwise the deletion
-						 * becomes visible to everyone when the UNDO record is trimmed
-						 * away.
-						 */
-						zsbt_tid_undo_deletion(rel, undorec->tid, undorec->undorecptr,
-											   oldest_undorecptr);
+						ZSUndoRec_Delete *deleterec  = (ZSUndoRec_Delete *) undorec;
+
+						if (did_commit)
+						{
+							/* The deletion is now visible to everyone */
+							for (int i = 0; i < deleterec->num_tids; i++)
+								zsbt_tid_mark_dead(rel, deleterec->tids[i], oldest_undorecptr);
+						}
+						else
+						{
+							/*
+							 * must clear the item's UNDO pointer, otherwise the deletion
+							 * becomes visible to everyone when the UNDO record is trimmed
+							 * away.
+							 */
+							for (int i = 0; i < deleterec->num_tids; i++)
+								zsbt_tid_undo_deletion(rel, deleterec->tids[i], undorec->undorecptr,
+									oldest_undorecptr);
+						}
 					}
 					break;
 				case ZSUNDO_TYPE_UPDATE:
@@ -754,4 +755,87 @@ zsundo_get_oldest_undo_ptr(Relation rel)
 	 * aggressive about that.
 	 */
 	return zsundo_trim(rel, RecentGlobalXmin);
+}
+
+
+
+
+/*
+ * Higher-level functions for constructing UNDO records, with caching.
+ *
+ * If you perform multiple operations in the same transaction and command, we
+ * reuse the same UNDO record for it. There's a one-element cache of each
+ * operation type, so this only takes effect in simple cases.
+ *
+ * TODO: make the caching work in more cases. A hash table or something..
+ * Also, we could do this for INSERTs, too. Maybe for UPDATEs as well, although
+ * they're more tricky, as we need to also store the 'ctid' pointer to the new
+ * tuple in an UPDATE.
+ */
+ZSUndoRecPtr
+zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid tid,
+						 bool changedPart, ZSUndoRecPtr prev_undo_ptr)
+{
+	ZSUndoRec_Delete undorec;
+	ZSUndoRecPtr undoptr;
+
+	static RelFileNode cached_relfilenode;
+	static TransactionId cached_xid;
+	static CommandId cached_cid;
+	static bool		cached_changedPart;
+	static ZSUndoRecPtr cached_prev_undo_ptr;
+	static ZSUndoRecPtr cached_undo_ptr;
+
+	if (RelFileNodeEquals(rel->rd_node, cached_relfilenode) &&
+		xid == cached_xid &&
+		cid == cached_cid &&
+		changedPart == cached_changedPart &&
+		prev_undo_ptr.counter == cached_prev_undo_ptr.counter)
+	{
+		Buffer		buf;
+		ZSUndoRec_Delete *undorec_p;
+
+		undorec_p = (ZSUndoRec_Delete *) zsundo_fetch_lock(rel, cached_undo_ptr,
+														   &buf, BUFFER_LOCK_EXCLUSIVE);
+
+		if (undorec_p->rec.type != ZSUNDO_TYPE_DELETE)
+			elog(ERROR, "unexpected undo record type %d, expected DELETE", undorec_p->rec.type);
+
+		/* Is there space for a new TID in the record? */
+		if (undorec_p->num_tids < ZSUNDO_NUM_TIDS_PER_DELETE)
+		{
+			undorec_p->tids[undorec_p->num_tids] = tid;
+			undorec_p->num_tids++;
+
+			MarkBufferDirty(buf);
+			UnlockReleaseBuffer(buf);
+
+			return cached_undo_ptr;
+		}
+		UnlockReleaseBuffer(buf);
+	}
+
+	/*
+	 * Cache miss. Create a new UNDO record.
+	 */
+	undorec.rec.size = sizeof(ZSUndoRec_Delete);
+	undorec.rec.type = ZSUNDO_TYPE_DELETE;
+	undorec.rec.xid = xid;
+	undorec.rec.cid = cid;
+	undorec.rec.tid = InvalidZSTid;	/* the TIDs are stored in 'tids' array */
+	undorec.changedPart = changedPart;
+	undorec.rec.prevundorec = prev_undo_ptr;
+	undorec.tids[0] = tid;
+	undorec.num_tids = 1;
+
+	undoptr = zsundo_insert(rel, &undorec.rec);
+
+	cached_relfilenode = rel->rd_node;
+	cached_xid = xid;
+	cached_cid = cid;
+	cached_changedPart = changedPart;
+	cached_prev_undo_ptr = prev_undo_ptr;
+	cached_undo_ptr = undoptr;
+
+	return undoptr;
 }

@@ -537,23 +537,8 @@ zsbt_tid_delete(Relation rel, zstid tid,
 	}
 
 	/* Create UNDO record. */
-	{
-		ZSUndoRec_Delete undorec;
-
-		undorec.rec.size = sizeof(ZSUndoRec_Delete);
-		undorec.rec.type = ZSUNDO_TYPE_DELETE;
-		undorec.rec.xid = xid;
-		undorec.rec.cid = cid;
-		undorec.rec.tid = tid;
-		undorec.changedPart = changingPart;
-
-		if (keep_old_undo_ptr)
-			undorec.rec.prevundorec = item_undoptr;
-		else
-			undorec.rec.prevundorec = InvalidUndoPtr;
-
-		undorecptr = zsundo_insert(rel, &undorec.rec);
-	}
+	undorecptr = zsundo_create_for_delete(rel, xid, cid, tid, changingPart,
+										  keep_old_undo_ptr ? item_undoptr : InvalidUndoPtr);
 
 	/* Update the tid with the new UNDO pointer. */
 	page = BufferGetPage(buf);
