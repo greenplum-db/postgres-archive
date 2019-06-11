@@ -520,7 +520,7 @@ typedef struct ZSTidItemIterator
 	int			num_tids;
 	MemoryContext context;
 
-	ZSUndoRecPtr	undoslots[4];
+	ZSUndoRecPtr  undoslots[ZSBT_MAX_ITEM_UNDO_SLOTS];
 } ZSTidItemIterator;
 
 /*
@@ -558,6 +558,13 @@ typedef struct ZSTidTreeScan
 	 * array tuple.
 	 */
 	ZSTidItemIterator array_iter;
+	/*
+	 * If 'snapshot' is SnapshotDirty, these are filled for each undo slot in the
+	 * iterator, so that they can be returned to the caller of zsbt_tid_scan_next().
+	 */
+	TransactionId undoslot_xmin[ZSBT_MAX_ITEM_UNDO_SLOTS];
+	TransactionId undoslot_xmax[ZSBT_MAX_ITEM_UNDO_SLOTS];
+	uint32		undoslot_speculativeToken[ZSBT_MAX_ITEM_UNDO_SLOTS];
 
 	ZSNV_Result nonvacuumable_status;
 

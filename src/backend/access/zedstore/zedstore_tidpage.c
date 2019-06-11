@@ -177,6 +177,10 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 	slots_visible[ZSBT_OLD_UNDO_SLOT] = true;
 	slots_visible[ZSBT_DEAD_UNDO_SLOT] = false;
 
+	scan->undoslot_xmin[ZSBT_OLD_UNDO_SLOT] = InvalidTransactionId;
+	scan->undoslot_xmax[ZSBT_OLD_UNDO_SLOT] = InvalidTransactionId;
+	scan->undoslot_speculativeToken[ZSBT_OLD_UNDO_SLOT] = INVALID_SPECULATIVE_TOKEN;
+
 	for (int i = 2; i < aitem->t_num_undo_slots; i++)
 	{
 		ZSUndoRecPtr undoptr = scan->array_iter.undoslots[i];
@@ -186,6 +190,16 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 		if (!slots_visible[i] && scan->serializable && TransactionIdIsValid(obsoleting_xid))
 			CheckForSerializableConflictOut(scan->rel, obsoleting_xid, scan->snapshot);
 		scan->array_iter.undoslots[i] = undoptr;
+		/*
+		 * Remember the special xmin/xmax/speculativeToken return values on a
+		 * SnapshotDirty.
+		 */
+		if (scan->snapshot->snapshot_type == SNAPSHOT_DIRTY)
+		{
+			scan->undoslot_xmin[i] = scan->snapshot->xmin;
+			scan->undoslot_xmax[i] = scan->snapshot->xmax;
+			scan->undoslot_speculativeToken[i] = scan->snapshot->speculativeToken;
+		}
 	}
 
 	j = 0;
@@ -364,8 +378,16 @@ have_array:
 	Assert(scan->array_iter.next_idx < scan->array_iter.num_tids);
 
 	result = scan->array_iter.tids[scan->array_iter.next_idx];
-	scan->array_iter.next_idx++;
+	if (scan->snapshot->snapshot_type == SNAPSHOT_DIRTY)
+	{
+		int			slotno = scan->array_iter.tid_undoslotnos[scan->array_iter.next_idx];
+
+		scan->snapshot->xmin = scan->undoslot_xmin[slotno];
+		scan->snapshot->xmax = scan->undoslot_xmax[slotno];
+		scan->snapshot->speculativeToken = scan->undoslot_speculativeToken[slotno];
+	}
 	scan->nexttid = result + 1;
+	scan->array_iter.next_idx++;
 	return result;
 }
 
