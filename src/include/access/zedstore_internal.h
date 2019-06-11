@@ -306,9 +306,10 @@ zsbt_attr_item_lasttid(ZSAttributeItem *item)
  * bytes.
  *
  * Representing UNDO pointers as distinct slots also has the advantage that
- * when we're scanning the TID array, we can check the UNDO pointers against
- * the current snapshot, instead of checking every UNDO pointer separately.
- * That considerably speeds up visibility checks when reading. That's one
+ * when we're scanning the TID array, we can check the few UNDO pointers in
+ * the slots against the current snapshot, and remember the visibility of
+ * each slot, instead of checking every UNDO pointer separately. That
+ * considerably speeds up visibility checks when reading. That's one
  * advantage of this special encoding scheme, compared to e.g. using a
  * general-purpose compression algorithm on an array of TIDs and UNDO pointers.
  */
