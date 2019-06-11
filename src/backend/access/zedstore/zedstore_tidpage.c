@@ -431,7 +431,6 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	ZSBtreePageOpaque *opaque;
 	OffsetNumber maxoff;
 	zstid		insert_target_key;
-	ZSUndoRec_Insert undorec;
 	List	   *newitems;
 	ZSUndoRecPtr undorecptr;
 	zstid		endtid;
@@ -469,16 +468,8 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	/* Form an undo record */
 	if (xid != FrozenTransactionId)
 	{
-		undorec.rec.size = sizeof(ZSUndoRec_Insert);
-		undorec.rec.type = ZSUNDO_TYPE_INSERT;
-		undorec.rec.xid = xid;
-		undorec.rec.cid = cid;
-		undorec.firsttid = tid;
-		undorec.endtid = tid + nitems;
-		undorec.speculative_token = speculative_token;
-		undorec.rec.prevundorec = prevundoptr;
-
-		undorecptr = zsundo_insert(rel, &undorec.rec);
+		undorecptr = zsundo_create_for_insert(rel, xid, cid, tid, nitems,
+											  speculative_token, prevundoptr);
 	}
 	else
 	{

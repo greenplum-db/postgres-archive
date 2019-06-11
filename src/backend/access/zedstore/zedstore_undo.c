@@ -768,8 +768,6 @@ zsundo_get_oldest_undo_ptr(Relation rel)
 }
 
 
-
-
 /*
  * Higher-level functions for constructing UNDO records, with caching.
  *
@@ -778,9 +776,9 @@ zsundo_get_oldest_undo_ptr(Relation rel)
  * operation type, so this only takes effect in simple cases.
  *
  * TODO: make the caching work in more cases. A hash table or something..
- * Also, we could do this for INSERTs, too. Maybe for UPDATEs as well, although
- * they're more tricky, as we need to also store the 'ctid' pointer to the new
- * tuple in an UPDATE.
+ * Currently, we do this for DELETEs and INSERTs. We could perhaps do this
+ * for UPDATEs as well, although they're more a bit more tricky, as we need
+ * to also store the 'ctid' pointer to the new tuple in an UPDATE.
  */
 ZSUndoRecPtr
 zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid tid,
@@ -845,6 +843,76 @@ zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid t
 	cached_changedPart = changedPart;
 	cached_prev_undo_ptr = prev_undo_ptr;
 	cached_undo_ptr = undoptr;
+
+	return undoptr;
+}
+
+ZSUndoRecPtr
+zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid, zstid tid,
+						 int nitems, uint32 speculative_token, ZSUndoRecPtr prev_undo_ptr)
+{
+	ZSUndoRec_Insert undorec;
+	ZSUndoRecPtr undoptr;
+
+	static RelFileNode cached_relfilenode;
+	static TransactionId cached_xid;
+	static CommandId cached_cid;
+	static zstid	cached_endtid;
+	static ZSUndoRecPtr cached_prev_undo_ptr;
+	static ZSUndoRecPtr cached_undo_ptr;
+
+	if (speculative_token == INVALID_SPECULATIVE_TOKEN &&
+		RelFileNodeEquals(rel->rd_node, cached_relfilenode) &&
+		xid == cached_xid &&
+		cid == cached_cid &&
+		tid == cached_endtid &&
+		prev_undo_ptr.counter == cached_prev_undo_ptr.counter)
+	{
+		Buffer		buf;
+		ZSUndoRec_Insert *undorec_p;
+
+		undorec_p = (ZSUndoRec_Insert *) zsundo_fetch_lock(rel, cached_undo_ptr,
+														   &buf, BUFFER_LOCK_EXCLUSIVE);
+
+		if (undorec_p->rec.type != ZSUNDO_TYPE_INSERT)
+			elog(ERROR, "unexpected undo record type %d, expected INSERT", undorec_p->rec.type);
+
+		/* Extend the range of the old record to cover the new TID */
+		Assert(undorec_p->endtid == tid);
+		Assert(undorec_p->speculative_token == INVALID_SPECULATIVE_TOKEN);
+		undorec_p->endtid = tid + nitems;
+
+		MarkBufferDirty(buf);
+		UnlockReleaseBuffer(buf);
+
+		cached_endtid = tid + nitems;
+		return cached_undo_ptr;
+	}
+
+	/*
+	 * Cache miss. Create a new UNDO record.
+	 */
+	undorec.rec.size = sizeof(ZSUndoRec_Insert);
+	undorec.rec.type = ZSUNDO_TYPE_INSERT;
+	/* undorecptr will be filed in by zsundo_insert() */
+	undorec.rec.xid = xid;
+	undorec.rec.cid = cid;
+	undorec.rec.prevundorec = prev_undo_ptr;
+	undorec.firsttid = tid;
+	undorec.endtid = tid + nitems;
+	undorec.speculative_token = speculative_token;
+
+	undoptr = zsundo_insert(rel, &undorec.rec);
+
+	if (speculative_token == INVALID_SPECULATIVE_TOKEN)
+	{
+		cached_relfilenode = rel->rd_node;
+		cached_xid = xid;
+		cached_cid = cid;
+		cached_endtid = tid + nitems;
+		cached_prev_undo_ptr = prev_undo_ptr;
+		cached_undo_ptr = undoptr;
+	}
 
 	return undoptr;
 }

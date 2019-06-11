@@ -192,5 +192,8 @@ extern void zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrate
 extern ZSUndoRecPtr zsundo_get_oldest_undo_ptr(Relation rel);
 extern ZSUndoRecPtr zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid tid,
 									  bool changedPart, ZSUndoRecPtr prev_undo_ptr);
+extern ZSUndoRecPtr zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid,
+											 zstid tid, int nitems,
+											 uint32 speculative_token, ZSUndoRecPtr prev_undo_ptr);
 
 #endif							/* ZEDSTORE_UNDO_H */
