@@ -40,64 +40,87 @@ full rewrite of the table.
 Highlevel design of zedStore - B-trees for the win!
 ---------------------------------------------------
 
-To start simple, let's ignore column store aspect and consider it as
-compressed row store. The column store is natural externsion of this
-concept, explained in next section.
+ZedStore consists of multiple B-trees. There is one B-tree, called the
+TID tree, which contains the visibility information of each tuple, but
+no user data. In addition to that, there is one B-tree for each
+attribute, called the attribute trees, to store the user data. Note that
+these B-tree implementations are completely unrelated to PostgreSQL's
+B-tree indexes.
 
-The basic on-disk data structure leveraged is a B-tree, indexed by
-TID. BTree being a great data structure, fast and versatile. Note this
-is not refering to existing Btree indexes, but instead net new BTree
-for table data storage.
+The TID tree, and all the attribute trees, use the TID as the key. The
+TID is used as a logical row identifier. Internally, ZedStore passed
+TIDs around as 64-bit integers (zstid), but for interfacing with the
+rest of the system, they are converted to/from ItemPointers. When
+converted to an ItemPointer, the conversion ensures that the ItemPointer
+looks valid, i.e. offset 0 is never used. However, the TID is just a
+48-bit row identifier, the traditional division into block and offset
+numbers is meaningless. There is locality of access, though; TIDs that
+are close to each other, will probably also reside close to each other
+on disk. So, for example, bitmap index scans or BRIN indexes, which
+work with block numbers, still make some sense, even though the "block
+number" stored in a zedstore ItemPointer doesn't correspond to a
+physical block.
 
-TID - used as a logical row identifier:
-TID is just a 48-bit row identifier. The traditional division into
-block and offset numbers is meaningless. In order to find a tuple with
-a given TID, one must always descend the B-tree. Having logical TID
-provides flexibility to move the tuples around different pages on page
-splits or page merges can be performed.
+The internal pages of the B-trees are super simple and boring. The internal
+pages of the TID and attribute trees look identical. Functions that work
+with either the TID or attribute tree use ZS_META_ATTRIBUTE_NUM as the
+"attribute number", when working with the TID tree.
 
-The internal pages of the B-tree are super simple and boring. Each
-internal page just stores an array of TID/downlink pairs. Let's focus
-on the leaf level. Leaf blocks have short uncompressed header,
-followed by btree items. It contains three kind of items:
 
-- plain item, holds one tuple or one datum, uncompressed payload
 
-- array item, holds multiple datums, with consecutive TIDs and the
-same visibility information. An array item saves space compared to
-multiple single items, by leaving out repetitive UNDO and TID
-fields. An array item cannot mix NULLs and non-NULLs, so the ZSBT_NULL
-flag applies to all elements.
+The leaf pages look different TID tree and the attribute trees. Let's
+look at the TID tree first:
 
-- a "container item", holds multiple plain items, compressed payload
+TID tree
+--------
 
-+-----------------------------
-| Fixed-size page header:
-|
-|   LSN
-|   TID low and hi key (for Lehman & Yao B-tree operations)
-|   left and right page pointers
-|
-| Items:
-|
-|   TID | size | flags | uncompressed size | lastTID | payload (container item)
-|   TID | size | flags | uncompressed size | lastTID | payload (container item)
-|   TID | size | flags | undo pointer | payload (plain item)
-|   TID | size | flags | undo pointer | payload (plain item)
-|   ...
-|
-+----------------------------
+A TID tree page consists of multiple ZSTidArrayItems. Each ZSTidArrayItem
+represents a group of tuples, with TIDs in a particular range. The TID
+ranges of ZSTidArrayItems never overlap. For each tuple, we logically
+store the TID, and its UNDO pointer. The actual visibility information
+is stored in the UNDO log, if the tuple was recently modified.
 
-Row store
----------
+A tuple can also be marked as dead, which means that the tuple is not
+visible to anyone. Dead tuples are marked with a special constant
+UNDO pointer value, DeadUndoPtr. The TIDs of dead tuples cannot be
+reused, until all index pointers to the tuples have been removed, by
+VACUUM. VACUUM scans the TID tree to collect all the dead TIDs. (Note
+that VACUUM does not need to scan the attribute trees, and the TID tree
+is hopefully just a small fraction of the table. Vacuum on zedstore is
+therefore hopefully much faster than on heap. (Although the freeze map
+can be pretty effective on the heap, too))
 
-The tuples are stored one after another, sorted by TID. For each
-tuple, we store its 48-bit TID, a undo record pointer, and the actual
-tuple data uncompressed.
+So logically, the TID tree item stores the TID and UNDO pointer for every
+tuple. However, that would take a lot of space. To reduce disk usage,
+the TID tree consists of ZSTidArrayItems, which contain the TIDs and
+their UNDO pointers in a specially encoded format. The encoded format
+is optimized for the common cases, where the gaps between TIDs are
+small, and most tuples are visible to everyone. See comments
+ZSTidArrayItem in zedstore_internal.h for details.
 
-In uncompressed form, the page can be arbitrarily large. But after
-compression, it must fit into a physical 8k block. If on insert or
-update of a tuple, the page cannot be compressed below 8k anymore, the
+Having a TID tree that's separate from the attributes helps to support
+zero column tables (which can be result of ADD COLUMN DROP COLUMN actions
+as well). Plus, having meta-data stored separately from data, helps to get
+better compression ratios. And also helps to simplify the overall
+design/implementation as for deletes just need to edit the TID tree
+and avoid touching the attribute btrees.
+
+
+Attribute trees
+---------------
+
+The leaf pages on the attribute tree also consist of items, which pack
+data from multiple tuples in one item. In the attribute tree, the items
+can furthermore be compressed using LZ4, if the server has been
+configured with "configure --with-lz4". (If you don't use --with-lz4,
+PostgreSQL's built-in pglz algorithm is used, but it is *much* slower).
+Each item (ZSAttributeArrayItem) contains data for tuples with a range
+of consecutive TIDs. Multiple ZSAttributeArrayItems can be compressed
+together, into a single ZSAttributeCompressedItem item.
+
+In uncompressed form, an attribute tree page can be arbitrarily large.
+But after compression, it must fit into a physical 8k block. If on insert
+or update of a tuple, the page cannot be compressed below 8k anymore, the
 page is split. Note that because TIDs are logical rather than physical
 identifiers, we can freely move tuples from one physical page to
 another during page split. A tuple's TID never changes.
@@ -108,30 +131,53 @@ on-the-fly, as and when needed in backend-private memory, when
 reading. For some compressions like rel encoding or delta encoding
 tuples can be constructed directly from compressed data.
 
-Column store
-------------
 
-A column store uses the same structure but we have *multiple* B-trees,
-one for each column plus one for storing meta-data
-(a.k.a. meta-column), all indexed by TID. Imagine zedstore as a forest
-of B-trees. The B-trees for all columns are stored in the same
-physical file.
+To reconstruct a row with given TID, scan descends down the B-trees for
+all the columns using that TID, and fetches all attributes. Likewise, a
+sequential scan walks all the B-trees in lockstep.
 
-A metapage at block 0, has links to the roots of the B-trees. Leaf
-pages look the same, but instead of storing the whole tuple, stores
-just a single attribute. To reconstruct a row with given TID, scan
-descends down the B-trees for all the columns using that TID, and
-fetches all attributes. Likewise, a sequential scan walks all the
-B-trees in lockstep.
 
-The special or first btree for meta-column is used to allocate TIDs
-for tuples, track the UNDO location which provides visibility
-information. Also this special btree, which always exists, helps to
-support zero column tables (which can be result of ADD COLUMN DROP
-COLUMN actions as well). Plus, having meta-data stored separately from
-data, helps to get better compression ratios. And also helps to
-simplify the overall design/implementation as for deletes just need to
-edit the meta-column and avoid touching the actual data btrees.
+TODO: Currently, each attribute is stored in a separate attribute
+B-tree. But a hybrid row-column store would also be possible, where some
+columns were stored together in the same tree. Or even a row store, where
+all the user data was stored in a single tree, or even combined with the
+TID tree.
+
+Metapage
+--------
+
+A metapage at block 0, has links to the roots of the B-trees.
+
+
+Low-level locking / concurrency issues
+------------------------------- ------
+Design principles:
+
+* Every page is self-identifying. Every page has a page type ID,
+  which indicates what kind of a page it is. For a B-tree page,
+  the page header contains the attribute number and lo/hi key.
+  That is enough information to find the downlink to the page, so
+  that it can be deleted if necessary. There is enough information
+  on each leaf page to easily re-build the internal pages from
+  scratch, in case of corruption, for example.
+
+* Concurrency control: When traversing the B-tree, or walking UNDO
+  or TOAST pages, it's possible that a concurrent process splits or
+  moves a page just when we're about to step on it. There is enough
+  information on each page to detect that case. For example, if a
+  B-tree page is split just when you are about to step on it, you
+  can detect that by looking at the lo/hi key. If a page is deleted,
+  that can be detected too, because the attribute number or lo/hikey
+  are not what you expected. In that case, start the scan from the
+  root.
+
+* Any page can be fairly easily be moved, starting with just the
+  page itself. When you have a B-tree page at hand, you can re-find
+  its parent using its lokey, and modify the downlink. A toast page
+  contains the attno/TID, which can be used to find the pointer to
+  it in the b-tree. An UNDO page cannot currently be moved because
+  UNDO pointers contain the physical block number, but as soon as an
+  UNDO page expires, it can be deleted.
 
 
 MVCC
@@ -219,12 +265,24 @@ UNDO Page:
 TOAST Page:
 
 
-Free Space Map
+Free Pages Map
 --------------
 
+There is a simple Free Pages Map, which is just a linked list of unused
+blocks. The block number of the first unused page in the list is stored
+in the metapage. Each unused block contains link to the next unused
+block in the chain. When a block comes unused, it is added to the
+head of the list.
 
-Enhancements
-------------
+TODO: That doesn't scale very well, and the pages are reused in LIFO
+order. We'll probably want to do something smarter to avoid making the
+metapage a bottleneck for this, as well as try to batch the page
+allocations so that each attribute B-tree would get contiguous ranges
+of blocks, to allow I/O readahead to be effective.
+
+
+Enhancement ideas / alternative designs
+---------------------------------------
 
 Instead of compressing all the tuples on a page in one batch, store a
 small "dictionary", e.g. in page header or meta page or separate
