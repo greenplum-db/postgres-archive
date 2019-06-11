@@ -20,6 +20,61 @@ static ZSTidArrayItem *remap_slots(zstid firsttid, uint64 *vals, int num_vals,
 static uint64 simple8b_encode(const uint64 *ints, int num_ints, int *num_encoded);
 static int simple8b_decode(uint64 codeword, uint64 *decoded);
 
+/*
+ * Extract TIDs from an item into iterator.
+ */
+void
+zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter)
+{
+	int			total_decoded = 0;
+	zstid		prev_tid;
+	uint64	   *codewords;
+	ZSUndoRecPtr *slotptr;
+
+	if (iter->tids_allocated_size < item->t_num_tids)
+	{
+		if (iter->tids)
+			pfree(iter->tids);
+		if (iter->tid_undoslotnos)
+			pfree(iter->tid_undoslotnos);
+		iter->tids = MemoryContextAlloc(iter->context, item->t_num_tids * sizeof(zstid));
+		iter->tid_undoslotnos = MemoryContextAlloc(iter->context, item->t_num_tids * sizeof(uint8));
+		iter->tids_allocated_size = item->t_num_tids;
+	}
+
+	/* decode all the codewords */
+	codewords = ZSTidArrayItemGetCodewords(item);
+	for (int i = 0; i < item->t_num_codewords; i++)
+	{
+		int			num_decoded;
+
+		num_decoded = simple8b_decode(codewords[i],
+									  &iter->tids[total_decoded]);
+		total_decoded += num_decoded;
+	}
+	Assert(total_decoded == item->t_num_tids);
+
+	/* convert the deltas to TIDs and undo slot numbers */
+	prev_tid = item->t_firsttid;
+	for (int i = 0; i < total_decoded; i++)
+	{
+		uint64		val = iter->tids[i];
+
+		iter->tid_undoslotnos[i] = val & ZSBT_ITEM_UNDO_SLOT_MASK;
+		prev_tid = iter->tids[i] = (val >> ZSBT_ITEM_UNDO_SLOT_BITS) + prev_tid;
+	}
+	iter->num_tids = total_decoded;
+
+	Assert(iter->tids[total_decoded - 1] == item->t_endtid - 1);
+
+	/* also copy out the slots to the iterator */
+	iter->undoslots[ZSBT_OLD_UNDO_SLOT] = InvalidUndoPtr;
+	iter->undoslots[ZSBT_DEAD_UNDO_SLOT] = DeadUndoPtr;
+
+	slotptr = ZSTidArrayItemGetUndoSlots(item);
+	for (int i = ZSBT_FIRST_NORMAL_UNDO_SLOT; i < item->t_num_undo_slots; i++)
+		iter->undoslots[i] = slotptr[i - ZSBT_FIRST_NORMAL_UNDO_SLOT];
+}
 
 /*
  * Create a ZSTidArrayItem (or items), to represent a contiguous range of
@@ -97,62 +152,6 @@ zsbt_tid_item_create_for_range(zstid tid, int nelements, ZSUndoRecPtr undo_ptr)
 	pfree(vals);
 
 	return newitems;
-}
-
-/*
- * Extract TIDs from an item into iterator.
- */
-void
-zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter)
-{
-	int			total_decoded = 0;
-	zstid		prev_tid;
-	uint64	   *codewords;
-	ZSUndoRecPtr *slotptr;
-
-	if (iter->tids_allocated_size < item->t_num_tids)
-	{
-		if (iter->tids)
-			pfree(iter->tids);
-		if (iter->tid_undoslotnos)
-			pfree(iter->tid_undoslotnos);
-		iter->tids = MemoryContextAlloc(iter->context, item->t_num_tids * sizeof(zstid));
-		iter->tid_undoslotnos = MemoryContextAlloc(iter->context, item->t_num_tids * sizeof(uint8));
-		iter->tids_allocated_size = item->t_num_tids;
-	}
-
-	/* decode all the codewords */
-	codewords = ZSTidArrayItemGetCodewords(item);
-	for (int i = 0; i < item->t_num_codewords; i++)
-	{
-		int			num_decoded;
-
-		num_decoded = simple8b_decode(codewords[i],
-									  &iter->tids[total_decoded]);
-		total_decoded += num_decoded;
-	}
-	Assert(total_decoded == item->t_num_tids);
-
-	/* convert the deltas to TIDs and undo slot numbers */
-	prev_tid = item->t_firsttid;
-	for (int i = 0; i < total_decoded; i++)
-	{
-		uint64		val = iter->tids[i];
-
-		iter->tid_undoslotnos[i] = val & ZSBT_ITEM_UNDO_SLOT_MASK;
-		prev_tid = iter->tids[i] = (val >> ZSBT_ITEM_UNDO_SLOT_BITS) + prev_tid;
-	}
-	iter->num_tids = total_decoded;
-
-	Assert(iter->tids[total_decoded - 1] == item->t_endtid - 1);
-
-	/* also copy out the slots to the iterator */
-	iter->undoslots[ZSBT_OLD_UNDO_SLOT] = InvalidUndoPtr;
-	iter->undoslots[ZSBT_DEAD_UNDO_SLOT] = DeadUndoPtr;
-
-	slotptr = ZSTidArrayItemGetUndoSlots(item);
-	for (int i = ZSBT_FIRST_NORMAL_UNDO_SLOT; i < item->t_num_undo_slots; i++)
-		iter->undoslots[i] = slotptr[i - ZSBT_FIRST_NORMAL_UNDO_SLOT];
 }
 
 /*
