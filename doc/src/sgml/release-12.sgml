@@ -157,7 +157,7 @@ Author: Peter Eisentraut <peter@eisentraut.org>
      </para>
 
      <para>
-      Specifically, <xref linkend="guc-recovery-target-time"/> now
+      Specifically, <xref linkend="guc-recovery-target-timeline"/> now
       defaults to <literal>latest</literal>.  Previously, it defaulted
       to <literal>current</literal>.
      </para>
@@ -1788,7 +1788,7 @@ Author: Peter Eisentraut <peter@eisentraut.org>
 
       <para>
        Add an explicit value of <literal>current</literal> for <xref
-       linkend="guc-recovery-target-time"/> (Peter Eisentraut)
+       linkend="guc-recovery-target-timeline"/> (Peter Eisentraut)
       </para>
      </listitem>
 
@@ -2611,7 +2611,7 @@ Author: Michael Paquier <michael@paquier.xyz>
 -->
 
       <para>
-       Add vacuumdb to disable waiting for locks or skipping all-visible
+       Allow vacuumdb to disable waiting for locks or skipping all-visible
        pages (Nathan Bossart)
       </para>
 
@@ -2864,7 +2864,7 @@ existin
       <para>
        Add <xref linkend="sql-create-access-method"/> command to create
        new table types (Andres Freund, Haribabu Kommi, Álvaro Herrera,
-       Alexander Korotkov, Dimitri Golgov)
+       Alexander Korotkov, Dmitry Dolgov)
       </para>
 
       <para>

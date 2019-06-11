@@ -61,7 +61,7 @@
  *   (https://doi.org/10.1002/spe.948)
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -236,7 +236,7 @@ struct IntegerSet
 	 *
 	 * 'iter_values' is an array of integers ready to be returned to the
 	 * caller; 'iter_num_values' is the length of that array, and
-	 * 'iter_valueno' is the next index.  'iter_node' and 'item_itemno' point
+	 * 'iter_valueno' is the next index.  'iter_node' and 'iter_itemno' point
 	 * to the leaf node, and item within the leaf node, to get the next batch
 	 * of values from.
 	 *

@@ -33,7 +33,6 @@ extern bool synchronize_seqscans;
 
 struct BulkInsertStateData;
 struct IndexInfo;
-struct IndexBuildCallback;
 struct SampleScanState;
 struct TBMIterateResult;
 struct VacuumParams;
@@ -101,9 +100,9 @@ typedef enum TM_Result
 } TM_Result;
 
 /*
- * When table_update, table_delete, or table_lock_tuple fail because the target
- * tuple is already outdated, they fill in this struct to provide information
- * to the caller about what happened.
+ * When table_tuple_update, table_tuple_delete, or table_tuple_lock fail
+ * because the target tuple is already outdated, they fill in this struct to
+ * provide information to the caller about what happened.
  *
  * ctid is the target's ctid link: it is the same as the target's TID if the
  * target was deleted, or the location of the replacement tuple if the target
@@ -127,13 +126,13 @@ typedef struct TM_FailureData
 	bool		traversed;
 } TM_FailureData;
 
-/* "options" flag bits for table_insert */
+/* "options" flag bits for table_tuple_insert */
 #define TABLE_INSERT_SKIP_WAL		0x0001
 #define TABLE_INSERT_SKIP_FSM		0x0002
 #define TABLE_INSERT_FROZEN			0x0004
 #define TABLE_INSERT_NO_LOGICAL		0x0008
 
-/* flag bits for table_lock_tuple */
+/* flag bits for table_tuple_lock */
 /* Follow tuples whose update is in progress if lock modes don't conflict  */
 #define TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS	(1 << 0)
 /* Follow update chain and lock latest version of tuple */
@@ -367,12 +366,12 @@ typedef struct TableAmRoutine
 	 * ------------------------------------------------------------------------
 	 */
 
-	/* see table_insert() for reference about parameters */
+	/* see table_tuple_insert() for reference about parameters */
 	void		(*tuple_insert) (Relation rel, TupleTableSlot *slot,
 								 CommandId cid, int options,
 								 struct BulkInsertStateData *bistate);
 
-	/* see table_insert_speculative() for reference about parameters */
+	/* see table_tuple_insert_speculative() for reference about parameters */
 	void		(*tuple_insert_speculative) (Relation rel,
 											 TupleTableSlot *slot,
 											 CommandId cid,
@@ -380,7 +379,7 @@ typedef struct TableAmRoutine
 											 struct BulkInsertStateData *bistate,
 											 uint32 specToken);
 
-	/* see table_complete_speculative() for reference about parameters */
+	/* see table_tuple_complete_speculative() for reference about parameters */
 	void		(*tuple_complete_speculative) (Relation rel,
 											   TupleTableSlot *slot,
 											   uint32 specToken,
@@ -390,7 +389,7 @@ typedef struct TableAmRoutine
 	void		(*multi_insert) (Relation rel, TupleTableSlot **slots, int nslots,
 								 CommandId cid, int options, struct BulkInsertStateData *bistate);
 
-	/* see table_delete() for reference about parameters */
+	/* see table_tuple_delete() for reference about parameters */
 	TM_Result	(*tuple_delete) (Relation rel,
 								 ItemPointer tid,
 								 CommandId cid,
@@ -400,7 +399,7 @@ typedef struct TableAmRoutine
 								 TM_FailureData *tmfd,
 								 bool changingPart);
 
-	/* see table_update() for reference about parameters */
+	/* see table_tuple_update() for reference about parameters */
 	TM_Result	(*tuple_update) (Relation rel,
 								 ItemPointer otid,
 								 TupleTableSlot *slot,
@@ -412,7 +411,7 @@ typedef struct TableAmRoutine
 								 LockTupleMode *lockmode,
 								 bool *update_indexes);
 
-	/* see table_lock_tuple() for reference about parameters */
+	/* see table_tuple_lock() for reference about parameters */
 	TM_Result	(*tuple_lock) (Relation rel,
 							   ItemPointer tid,
 							   Snapshot snapshot,
@@ -486,8 +485,8 @@ typedef struct TableAmRoutine
 									   const RelFileNode *newrnode);
 
 	/* See table_relation_copy_for_cluster() */
-	void		(*relation_copy_for_cluster) (Relation NewHeap,
-											  Relation OldHeap,
+	void		(*relation_copy_for_cluster) (Relation NewTable,
+											  Relation OldTable,
 											  Relation OldIndex,
 											  bool use_sort,
 											  TransactionId OldestXmin,
@@ -552,20 +551,20 @@ typedef struct TableAmRoutine
 											TupleTableSlot *slot);
 
 	/* see table_index_build_range_scan for reference about parameters */
-	double		(*index_build_range_scan) (Relation heap_rel,
+	double		(*index_build_range_scan) (Relation table_rel,
 										   Relation index_rel,
-										   struct IndexInfo *index_nfo,
+										   struct IndexInfo *index_info,
 										   bool allow_sync,
 										   bool anyvisible,
 										   bool progress,
 										   BlockNumber start_blockno,
-										   BlockNumber end_blockno,
+										   BlockNumber numblocks,
 										   IndexBuildCallback callback,
 										   void *callback_state,
 										   TableScanDesc scan);
 
 	/* see table_index_validate_scan for reference about parameters */
-	void		(*index_validate_scan) (Relation heap_rel,
+	void		(*index_validate_scan) (Relation table_rel,
 										Relation index_rel,
 										struct IndexInfo *index_info,
 										Snapshot snapshot,
@@ -706,7 +705,7 @@ typedef struct TableAmRoutine
 	 * block using the TsmRoutine's NextSampleTuple() callback.
 	 *
 	 * The callback needs to perform visibility checks, and only return
-	 * visible tuples. That obviously can mean calling NextSampletuple()
+	 * visible tuples. That obviously can mean calling NextSampleTuple()
 	 * multiple times.
 	 *
 	 * The TsmRoutine interface assumes that there's a maximum offset on a
@@ -1017,7 +1016,7 @@ table_index_fetch_set_column_projection(struct IndexFetchTableData *scan,
  * supports storing multiple row versions reachable via a single index entry
  * (like heap's HOT). Whereas table_fetch_row_version only evaluates the
  * tuple exactly at `tid`. Outside of index entry ->table tuple lookups,
- * table_fetch_row_version is what's usually needed.
+ * table_tuple_fetch_row_version is what's usually needed.
  */
 static inline bool
 table_index_fetch_tuple(struct IndexFetchTableData *scan,
@@ -1060,10 +1059,10 @@ extern bool table_index_fetch_tuple_check(Relation rel,
  * index entry->table tuple lookups.
  */
 static inline bool
-table_fetch_row_version(Relation rel,
-						ItemPointer tid,
-						Snapshot snapshot,
-						TupleTableSlot *slot)
+table_tuple_fetch_row_version(Relation rel,
+							  ItemPointer tid,
+							  Snapshot snapshot,
+							  TupleTableSlot *slot)
 {
 	return rel->rd_tableam->tuple_fetch_row_version(rel, tid, snapshot, slot);
 }
@@ -1086,7 +1085,7 @@ table_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
  * Return the latest version of the tuple at `tid`, by updating `tid` to
  * point at the newest version.
  */
-extern void table_get_latest_tid(TableScanDesc scan, ItemPointer tid);
+extern void table_tuple_get_latest_tid(TableScanDesc scan, ItemPointer tid);
 
 /*
  * Return true iff tuple in slot satisfies the snapshot.
@@ -1163,8 +1162,8 @@ table_compute_xid_horizon_for_tuples(Relation rel,
  * reflected in the slots contents.
  */
 static inline void
-table_insert(Relation rel, TupleTableSlot *slot, CommandId cid,
-			 int options, struct BulkInsertStateData *bistate)
+table_tuple_insert(Relation rel, TupleTableSlot *slot, CommandId cid,
+				   int options, struct BulkInsertStateData *bistate)
 {
 	rel->rd_tableam->tuple_insert(rel, slot, cid, options,
 								  bistate);
@@ -1179,12 +1178,13 @@ table_insert(Relation rel, TupleTableSlot *slot, CommandId cid,
  *
  * A transaction having performed a speculative insertion has to either abort,
  * or finish the speculative insertion with
- * table_complete_speculative(succeeded = ...).
+ * table_tuple_complete_speculative(succeeded = ...).
  */
 static inline void
-table_insert_speculative(Relation rel, TupleTableSlot *slot, CommandId cid,
-						 int options, struct BulkInsertStateData *bistate,
-						 uint32 specToken)
+table_tuple_insert_speculative(Relation rel, TupleTableSlot *slot,
+							   CommandId cid, int options,
+							   struct BulkInsertStateData *bistate,
+							   uint32 specToken)
 {
 	rel->rd_tableam->tuple_insert_speculative(rel, slot, cid, options,
 											  bistate, specToken);
@@ -1195,8 +1195,8 @@ table_insert_speculative(Relation rel, TupleTableSlot *slot, CommandId cid,
  * succeeded is true, the tuple is fully inserted, if false, it's removed.
  */
 static inline void
-table_complete_speculative(Relation rel, TupleTableSlot *slot,
-						   uint32 specToken, bool succeeded)
+table_tuple_complete_speculative(Relation rel, TupleTableSlot *slot,
+								 uint32 specToken, bool succeeded)
 {
 	rel->rd_tableam->tuple_complete_speculative(rel, slot, specToken,
 												succeeded);
@@ -1211,7 +1211,7 @@ table_complete_speculative(Relation rel, TupleTableSlot *slot,
  *
  * Except for taking `nslots` tuples as input, as an array of TupleTableSlots
  * in `slots`, the parameters for table_multi_insert() are the same as for
- * table_insert().
+ * table_tuple_insert().
  *
  * Note: this leaks memory into the current memory context. You can create a
  * temporary context before calling this, if that's a problem.
@@ -1228,7 +1228,7 @@ table_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
  * Delete a tuple.
  *
  * NB: do not call this directly unless prepared to deal with
- * concurrent-update conditions.  Use simple_table_delete instead.
+ * concurrent-update conditions.  Use simple_table_tuple_delete instead.
  *
  * Input parameters:
  *	relation - table to be modified (caller must hold suitable lock)
@@ -1251,9 +1251,9 @@ table_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
  * struct TM_FailureData for additional info.
  */
 static inline TM_Result
-table_delete(Relation rel, ItemPointer tid, CommandId cid,
-			 Snapshot snapshot, Snapshot crosscheck, bool wait,
-			 TM_FailureData *tmfd, bool changingPart)
+table_tuple_delete(Relation rel, ItemPointer tid, CommandId cid,
+				   Snapshot snapshot, Snapshot crosscheck, bool wait,
+				   TM_FailureData *tmfd, bool changingPart)
 {
 	return rel->rd_tableam->tuple_delete(rel, tid, cid,
 										 snapshot, crosscheck,
@@ -1264,7 +1264,7 @@ table_delete(Relation rel, ItemPointer tid, CommandId cid,
  * Update a tuple.
  *
  * NB: do not call this directly unless you are prepared to deal with
- * concurrent-update conditions.  Use simple_table_update instead.
+ * concurrent-update conditions.  Use simple_table_tuple_update instead.
  *
  * Input parameters:
  *	relation - table to be modified (caller must hold suitable lock)
@@ -1295,10 +1295,10 @@ table_delete(Relation rel, ItemPointer tid, CommandId cid,
  * for additional info.
  */
 static inline TM_Result
-table_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
-			 CommandId cid, Snapshot snapshot, Snapshot crosscheck, bool wait,
-			 TM_FailureData *tmfd, LockTupleMode *lockmode,
-			 bool *update_indexes)
+table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
+				   CommandId cid, Snapshot snapshot, Snapshot crosscheck,
+				   bool wait, TM_FailureData *tmfd, LockTupleMode *lockmode,
+				   bool *update_indexes)
 {
 	return rel->rd_tableam->tuple_update(rel, otid, slot,
 										 cid, snapshot, crosscheck,
@@ -1340,7 +1340,7 @@ table_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
  * comments for struct TM_FailureData for additional info.
  */
 static inline TM_Result
-table_lock_tuple(Relation rel, ItemPointer tid, Snapshot snapshot,
+table_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
 				 TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
 				 LockWaitPolicy wait_policy, uint8 flags,
 				 TM_FailureData *tmfd)
@@ -1371,7 +1371,7 @@ table_finish_bulk_insert(Relation rel, int options)
  */
 
 /*
- * Create storage for `rel` in `newrode`, with persistence set to
+ * Create storage for `rel` in `newrnode`, with persistence set to
  * `persistence`.
  *
  * This is used both during relation creation and various DDL operations to
@@ -1418,7 +1418,7 @@ table_relation_copy_data(Relation rel, const RelFileNode *newrnode)
 }
 
 /*
- * Copy data from `OldHeap` into `NewHeap`, as part of a CLUSTER or VACUUM
+ * Copy data from `OldTable` into `NewTable`, as part of a CLUSTER or VACUUM
  * FULL.
  *
  * Additional Input parameters:
@@ -1439,7 +1439,7 @@ table_relation_copy_data(Relation rel, const RelFileNode *newrnode)
  * - *tups_recently_dead - stats, for logging, if appropriate for AM
  */
 static inline void
-table_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
+table_relation_copy_for_cluster(Relation OldTable, Relation NewTable,
 								Relation OldIndex,
 								bool use_sort,
 								TransactionId OldestXmin,
@@ -1449,11 +1449,11 @@ table_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								double *tups_vacuumed,
 								double *tups_recently_dead)
 {
-	OldHeap->rd_tableam->relation_copy_for_cluster(OldHeap, NewHeap, OldIndex,
-												   use_sort, OldestXmin,
-												   xid_cutoff, multi_cutoff,
-												   num_tuples, tups_vacuumed,
-												   tups_recently_dead);
+	OldTable->rd_tableam->relation_copy_for_cluster(OldTable, NewTable, OldIndex,
+													use_sort, OldestXmin,
+													xid_cutoff, multi_cutoff,
+													num_tuples, tups_vacuumed,
+													tups_recently_dead);
 }
 
 /*
@@ -1514,7 +1514,7 @@ table_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
  * table_index_build_scan - scan the table to find tuples to be indexed
  *
  * This is called back from an access-method-specific index build procedure
- * after the AM has done whatever setup it needs.  The parent heap relation
+ * after the AM has done whatever setup it needs.  The parent table relation
  * is scanned to find tuples that should be entered into the index.  Each
  * such tuple is passed to the AM's callback routine, which does the right
  * things to add it to the new index.  After we return, the AM's index
@@ -1538,26 +1538,26 @@ table_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
  * for other AMs later.
  */
 static inline double
-table_index_build_scan(Relation heap_rel,
+table_index_build_scan(Relation table_rel,
 					   Relation index_rel,
-					   struct IndexInfo *index_nfo,
+					   struct IndexInfo *index_info,
 					   bool allow_sync,
 					   bool progress,
 					   IndexBuildCallback callback,
 					   void *callback_state,
 					   TableScanDesc scan)
 {
-	return heap_rel->rd_tableam->index_build_range_scan(heap_rel,
-														index_rel,
-														index_nfo,
-														allow_sync,
-														false,
-														progress,
-														0,
-														InvalidBlockNumber,
-														callback,
-														callback_state,
-														scan);
+	return table_rel->rd_tableam->index_build_range_scan(table_rel,
+														 index_rel,
+														 index_info,
+														 allow_sync,
+														 false,
+														 progress,
+														 0,
+														 InvalidBlockNumber,
+														 callback,
+														 callback_state,
+														 scan);
 }
 
 /*
@@ -1571,9 +1571,9 @@ table_index_build_scan(Relation heap_rel,
  * transactions that are still in progress.
  */
 static inline double
-table_index_build_range_scan(Relation heap_rel,
+table_index_build_range_scan(Relation table_rel,
 							 Relation index_rel,
-							 struct IndexInfo *index_nfo,
+							 struct IndexInfo *index_info,
 							 bool allow_sync,
 							 bool anyvisible,
 							 bool progress,
@@ -1583,17 +1583,17 @@ table_index_build_range_scan(Relation heap_rel,
 							 void *callback_state,
 							 TableScanDesc scan)
 {
-	return heap_rel->rd_tableam->index_build_range_scan(heap_rel,
-														index_rel,
-														index_nfo,
-														allow_sync,
-														anyvisible,
-														progress,
-														start_blockno,
-														numblocks,
-														callback,
-														callback_state,
-														scan);
+	return table_rel->rd_tableam->index_build_range_scan(table_rel,
+														 index_rel,
+														 index_info,
+														 allow_sync,
+														 anyvisible,
+														 progress,
+														 start_blockno,
+														 numblocks,
+														 callback,
+														 callback_state,
+														 scan);
 }
 
 /*
@@ -1602,17 +1602,17 @@ table_index_build_range_scan(Relation heap_rel,
  * See validate_index() for an explanation.
  */
 static inline void
-table_index_validate_scan(Relation heap_rel,
+table_index_validate_scan(Relation table_rel,
 						  Relation index_rel,
 						  struct IndexInfo *index_info,
 						  Snapshot snapshot,
 						  struct ValidateIndexState *state)
 {
-	heap_rel->rd_tableam->index_validate_scan(heap_rel,
-											  index_rel,
-											  index_info,
-											  snapshot,
-											  state);
+	table_rel->rd_tableam->index_validate_scan(table_rel,
+											   index_rel,
+											   index_info,
+											   snapshot,
+											   state);
 }
 
 
@@ -1637,7 +1637,7 @@ table_relation_size(Relation rel, ForkNumber forkNumber)
 }
 
 /*
- * table_needs_toast_table - does this relation need a toast table?
+ * table_relation_needs_toast_table - does this relation need a toast table?
  */
 static inline bool
 table_relation_needs_toast_table(Relation rel)
@@ -1744,12 +1744,12 @@ table_scan_sample_next_tuple(TableScanDesc scan,
  * ----------------------------------------------------------------------------
  */
 
-extern void simple_table_insert(Relation rel, TupleTableSlot *slot);
-extern void simple_table_delete(Relation rel, ItemPointer tid,
-								Snapshot snapshot);
-extern void simple_table_update(Relation rel, ItemPointer otid,
-								TupleTableSlot *slot, Snapshot snapshot,
-								bool *update_indexes);
+extern void simple_table_tuple_insert(Relation rel, TupleTableSlot *slot);
+extern void simple_table_tuple_delete(Relation rel, ItemPointer tid,
+									  Snapshot snapshot);
+extern void simple_table_tuple_update(Relation rel, ItemPointer otid,
+									  TupleTableSlot *slot, Snapshot snapshot,
+									  bool *update_indexes);
 
 
 /* ----------------------------------------------------------------------------

@@ -379,7 +379,7 @@ static void ATExecCheckNotNull(AlteredTableInfo *tab, Relation rel,
 							   const char *colName, LOCKMODE lockmode);
 static bool NotNullImpliedByRelConstraints(Relation rel, Form_pg_attribute attr);
 static bool ConstraintImpliedByRelConstraint(Relation scanrel,
-											 List *partConstraint, List *existedConstraints);
+											 List *testConstraint, List *provenConstraint);
 static ObjectAddress ATExecColumnDefault(Relation rel, const char *colName,
 										 Node *newDefault, LOCKMODE lockmode);
 static ObjectAddress ATExecAddIdentity(Relation rel, const char *colName,
@@ -660,8 +660,8 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 	}
 
 	/*
-	 * Select tablespace to use.  If not specified, use default tablespace
-	 * (which may in turn default to database's default).
+	 * Select tablespace to use: an explicitly indicated one, or (in the case
+	 * of a partitioned table) the parent's, if it has one.
 	 */
 	if (stmt->tablespacename)
 	{
@@ -682,6 +682,10 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 		tablespaceId = get_rel_tablespace(linitial_oid(inheritOids));
 	}
 	else
+		tablespaceId = InvalidOid;
+
+	/* still nothing? use the default */
+	if (!OidIsValid(tablespaceId))
 		tablespaceId = GetDefaultTablespace(stmt->relation->relpersistence,
 											partitioned);
 
@@ -2088,7 +2092,13 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 					coldef->cooked_default = restdef->cooked_default;
 					coldef->constraints = restdef->constraints;
 					coldef->is_from_type = false;
-					list_delete_cell(schema, rest, prev);
+					schema = list_delete_cell(schema, rest, prev);
+
+					/*
+					 * As two elements are merged and one is removed, we
+					 * should never finish with an empty list.
+					 */
+					Assert(schema != NIL);
 				}
 				else
 					ereport(ERROR,
@@ -3574,7 +3584,7 @@ AlterTableGetLockLevel(List *cmds)
 
 				/*
 				 * Removing constraints can affect SELECTs that have been
-				 * optimised assuming the constraint holds true. See also
+				 * optimized assuming the constraint holds true. See also
 				 * CloneFkReferenced.
 				 */
 			case AT_DropConstraint: /* as DROP INDEX */
@@ -4732,9 +4742,9 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap, LOCKMODE lockmode)
 		newrel = NULL;
 
 	/*
-	 * Prepare a BulkInsertState and options for table_insert. Because we're
-	 * building a new heap, we can skip WAL-logging and fsync it to disk at
-	 * the end instead (unless WAL-logging is required for archiving or
+	 * Prepare a BulkInsertState and options for table_tuple_insert. Because
+	 * we're building a new heap, we can skip WAL-logging and fsync it to disk
+	 * at the end instead (unless WAL-logging is required for archiving or
 	 * streaming replication). The FSM is empty too, so don't bother using it.
 	 */
 	if (newrel)
@@ -5005,7 +5015,8 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap, LOCKMODE lockmode)
 
 			/* Write the tuple out to the new relation */
 			if (newrel)
-				table_insert(newrel, insertslot, mycid, ti_options, bistate);
+				table_tuple_insert(newrel, insertslot, mycid,
+								   ti_options, bistate);
 
 			ResetExprContext(econtext);
 
@@ -5511,8 +5522,8 @@ ATPrepAddColumn(List **wqueue, Relation rel, bool recurse, bool recursing,
 }
 
 /*
- * Add a column to a table; this handles the AT_AddOids cases as well.  The
- * return value is the address of the new column in the parent relation.
+ * Add a column to a table.  The return value is the address of the
+ * new column in the parent relation.
  */
 static ObjectAddress
 ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
@@ -15783,8 +15794,7 @@ CloneRowTriggersToPartition(Relation parent, Relation partition)
 	ScanKeyData key;
 	SysScanDesc scan;
 	HeapTuple	tuple;
-	MemoryContext oldcxt,
-				perTupCxt;
+	MemoryContext perTupCxt;
 
 	ScanKeyInit(&key, Anum_pg_trigger_tgrelid, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(RelationGetRelid(parent)));
@@ -15794,18 +15804,16 @@ CloneRowTriggersToPartition(Relation parent, Relation partition)
 
 	perTupCxt = AllocSetContextCreate(CurrentMemoryContext,
 									  "clone trig", ALLOCSET_SMALL_SIZES);
-	oldcxt = MemoryContextSwitchTo(perTupCxt);
 
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
-		Form_pg_trigger trigForm;
+		Form_pg_trigger trigForm = (Form_pg_trigger) GETSTRUCT(tuple);
 		CreateTrigStmt *trigStmt;
 		Node	   *qual = NULL;
 		Datum		value;
 		bool		isnull;
 		List	   *cols = NIL;
-
-		trigForm = (Form_pg_trigger) GETSTRUCT(tuple);
+		MemoryContext oldcxt;
 
 		/*
 		 * Ignore statement-level triggers; those are not cloned.
@@ -15823,6 +15831,9 @@ CloneRowTriggersToPartition(Relation parent, Relation partition)
 		if (!TRIGGER_FOR_AFTER(trigForm->tgtype))
 			elog(ERROR, "unexpected trigger \"%s\" found",
 				 NameStr(trigForm->tgname));
+
+		/* Use short-lived context for CREATE TRIGGER */
+		oldcxt = MemoryContextSwitchTo(perTupCxt);
 
 		/*
 		 * If there is a WHEN clause, generate a 'cooked' version of it that's
@@ -15887,10 +15898,10 @@ CloneRowTriggersToPartition(Relation parent, Relation partition)
 					  trigForm->tgfoid, trigForm->oid, qual,
 					  false, true);
 
+		MemoryContextSwitchTo(oldcxt);
 		MemoryContextReset(perTupCxt);
 	}
 
-	MemoryContextSwitchTo(oldcxt);
 	MemoryContextDelete(perTupCxt);
 
 	systable_endscan(scan);

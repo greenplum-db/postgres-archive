@@ -134,7 +134,7 @@ typedef struct ExprState
  *		ExclusionOps		Per-column exclusion operators, or NULL if none
  *		ExclusionProcs		Underlying function OIDs for ExclusionOps
  *		ExclusionStrats		Opclass strategy numbers for ExclusionOps
- *		UniqueOps			Theses are like Exclusion*, but for unique indexes
+ *		UniqueOps			These are like Exclusion*, but for unique indexes
  *		UniqueProcs
  *		UniqueStrats
  *		Unique				is it a unique index?
@@ -1359,7 +1359,7 @@ typedef struct
  *		SortSupport		   for reordering ORDER BY exprs
  *		OrderByTypByVals   is the datatype of order by expression pass-by-value?
  *		OrderByTypLens	   typlens of the datatypes of order by expressions
- *		pscan_len		   size of parallel index scan descriptor
+ *		PscanLen		   size of parallel index scan descriptor
  * ----------------
  */
 typedef struct IndexScanState
@@ -1403,8 +1403,9 @@ typedef struct IndexScanState
  *		RuntimeContext	   expr context for evaling runtime Skeys
  *		RelationDesc	   index relation descriptor
  *		ScanDesc		   index scan descriptor
+ *		TableSlot		   slot for holding tuples fetched from the table
  *		VMBuffer		   buffer in use for visibility map testing, if any
- *		ioss_PscanLen	   Size of parallel index-only scan descriptor
+ *		PscanLen		   size of parallel index-only scan descriptor
  * ----------------
  */
 typedef struct IndexOnlyScanState
@@ -1421,9 +1422,9 @@ typedef struct IndexOnlyScanState
 	ExprContext *ioss_RuntimeContext;
 	Relation	ioss_RelationDesc;
 	struct IndexScanDescData *ioss_ScanDesc;
+	TupleTableSlot *ioss_TableSlot;
 	Buffer		ioss_VMBuffer;
 	Size		ioss_PscanLen;
-	TupleTableSlot *ioss_TableSlot;
 } IndexOnlyScanState;
 
 /* ----------------

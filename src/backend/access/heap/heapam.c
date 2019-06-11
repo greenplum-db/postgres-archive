@@ -239,8 +239,8 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	 * behaviors, independently of the size of the table; also there is a GUC
 	 * variable that can disable synchronized scanning.)
 	 *
-	 * Note that heap_parallelscan_initialize has a very similar test; if you
-	 * change this, consider changing that one, too.
+	 * Note that table_block_parallelscan_initialize has a very similar test;
+	 * if you change this, consider changing that one, too.
 	 */
 	if (!RelationUsesLocalBuffers(scan->rs_base.rs_rd) &&
 		scan->rs_nblocks > NBuffers / 4)
@@ -1301,7 +1301,7 @@ heap_getnext(TableScanDesc sscan, ScanDirection direction)
 	if (unlikely(sscan->rs_rd->rd_tableam != GetHeapamTableAmRoutine()))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("only heap AM is supported")));
+				 errmsg_internal("only heap AM is supported")));
 
 	/* Note: no locking manipulations needed */
 
@@ -1395,15 +1395,6 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
  *
  * If the tuple is found but fails the time qual check, then false is returned
  * but tuple->t_data is left pointing to the tuple.
- *
- * keep_buf determines what is done with the buffer in the false-result cases.
- * When the caller specifies keep_buf = true, we retain the pin on the buffer
- * and return it in *userbuf (so the caller must eventually unpin it); when
- * keep_buf = false, the pin is released and *userbuf is set to InvalidBuffer.
- *
- * stats_relation is the relation to charge the heap_fetch operation against
- * for statistical purposes.  (This could be the heap rel itself, an
- * associated index, or NULL to not count the fetch at all.)
  *
  * heap_fetch does not follow HOT chains: only the exact TID requested will
  * be fetched.
@@ -1866,12 +1857,12 @@ ReleaseBulkInsertStatePin(BulkInsertState bistate)
  * The new tuple is stamped with current transaction ID and the specified
  * command ID.
  *
- * See table_insert for comments about most of the input flags, except that
- * this routine directly takes a tuple rather than a slot.
+ * See table_tuple_insert for comments about most of the input flags, except
+ * that this routine directly takes a tuple rather than a slot.
  *
  * There's corresponding HEAP_INSERT_ options to all the TABLE_INSERT_
  * options, and there additionally is HEAP_INSERT_SPECULATIVE which is used to
- * implement table_insert_speculative().
+ * implement table_tuple_insert_speculative().
  *
  * On return the header fields of *tup are updated to match the stored tuple;
  * in particular tup->t_self receives the actual TID where the tuple was
@@ -2444,8 +2435,8 @@ xmax_infomask_changed(uint16 new_infomask, uint16 old_infomask)
 /*
  *	heap_delete - delete a tuple
  *
- * See table_delete() for an explanation of the parameters, except that this
- * routine directly takes a tuple rather than a slot.
+ * See table_tuple_delete() for an explanation of the parameters, except that
+ * this routine directly takes a tuple rather than a slot.
  *
  * In the failure cases, the routine fills *tmfd with the tuple's t_ctid,
  * t_xmax (resolving a possible MultiXact, if necessary), and t_cmax (the last
@@ -2890,8 +2881,8 @@ simple_heap_delete(Relation relation, ItemPointer tid)
 /*
  *	heap_update - replace a tuple
  *
- * See table_update() for an explanation of the parameters, except that this
- * routine directly takes a tuple rather than a slot.
+ * See table_tuple_update() for an explanation of the parameters, except that
+ * this routine directly takes a tuple rather than a slot.
  *
  * In the failure cases, the routine fills *tmfd with the tuple's t_ctid,
  * t_xmax (resolving a possible MultiXact, if necessary), and t_cmax (the last
@@ -3961,7 +3952,7 @@ get_mxact_status_for_lock(LockTupleMode mode, bool is_update)
  *	*buffer: set to buffer holding tuple (pinned but not locked at exit)
  *	*tmfd: filled in failure cases (see below)
  *
- * Function results are the same as the ones for table_lock_tuple().
+ * Function results are the same as the ones for table_tuple_lock().
  *
  * In the failure cases other than TM_Invisible, the routine fills
  * *tmfd with the tuple's t_ctid, t_xmax (resolving a possible MultiXact,
@@ -7085,7 +7076,7 @@ heap_compute_xid_horizon_for_tuples(Relation rel,
 			 * Conjecture: if hitemid is dead then it had xids before the xids
 			 * marked on LP_NORMAL items. So we just ignore this item and move
 			 * onto the next, for the purposes of calculating
-			 * latestRemovedxids.
+			 * latestRemovedXid.
 			 */
 		}
 		else

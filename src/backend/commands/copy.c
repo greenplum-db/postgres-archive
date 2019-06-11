@@ -90,7 +90,7 @@ typedef enum EolType
  */
 typedef enum CopyInsertMethod
 {
-	CIM_SINGLE,					/* use table_insert or fdw routine */
+	CIM_SINGLE,					/* use table_tuple_insert or fdw routine */
 	CIM_MULTI,					/* always use table_multi_insert */
 	CIM_MULTI_CONDITIONAL		/* use table_multi_insert only if valid */
 } CopyInsertMethod;
@@ -177,7 +177,6 @@ typedef struct CopyStateData
 	 */
 	AttrNumber	num_defaults;
 	FmgrInfo	oid_in_function;
-	Oid			oid_typioparam;
 	FmgrInfo   *in_functions;	/* array of input functions for each attrs */
 	Oid		   *typioparams;	/* array of element types for in_functions */
 	int		   *defmap;			/* array of default att numbers */
@@ -2466,6 +2465,9 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 	ResultRelInfo *resultRelInfo = buffer->resultRelInfo;
 	TupleTableSlot **slots = buffer->slots;
 
+	/* Set es_result_relation_info to the ResultRelInfo we're flushing. */
+	estate->es_result_relation_info = resultRelInfo;
+
 	/*
 	 * Print error context information correctly, if one of the operations
 	 * below fail.
@@ -2684,7 +2686,7 @@ CopyFrom(CopyState cstate)
 	PartitionTupleRouting *proute = NULL;
 	ErrorContextCallback errcallback;
 	CommandId	mycid = GetCurrentCommandId(true);
-	int			ti_options = 0; /* start with default table_insert options */
+	int			ti_options = 0; /* start with default options for insert */
 	BulkInsertState bistate = NULL;
 	CopyInsertMethod insertMethod;
 	CopyMultiInsertInfo multiInsertInfo = {0};	/* pacify compiler */
@@ -2757,11 +2759,11 @@ CopyFrom(CopyState cstate)
 	 * FSM for free space is a waste of time, even if we must use WAL because
 	 * of archiving.  This could possibly be wrong, but it's unlikely.
 	 *
-	 * The comments for table_insert and RelationGetBufferForTuple specify that
-	 * skipping WAL logging is only safe if we ensure that our tuples do not
-	 * go into pages containing tuples from any other transactions --- but this
-	 * must be the case if we have a new table or new relfilenode, so we need
-	 * no additional work to enforce that.
+	 * The comments for table_tuple_insert and RelationGetBufferForTuple
+	 * specify that skipping WAL logging is only safe if we ensure that our
+	 * tuples do not go into pages containing tuples from any other
+	 * transactions --- but this must be the case if we have a new table or
+	 * new relfilenode, so we need no additional work to enforce that.
 	 *
 	 * We currently don't support this optimization if the COPY target is a
 	 * partitioned table as we currently only lazily initialize partition
@@ -2908,9 +2910,9 @@ CopyFrom(CopyState cstate)
 	/*
 	 * It's generally more efficient to prepare a bunch of tuples for
 	 * insertion, and insert them in one table_multi_insert() call, than call
-	 * table_insert() separately for every tuple. However, there are a number
-	 * of reasons why we might not be able to do this.  These are explained
-	 * below.
+	 * table_tuple_insert() separately for every tuple. However, there are a
+	 * number of reasons why we might not be able to do this.  These are
+	 * explained below.
 	 */
 	if (resultRelInfo->ri_TrigDesc != NULL &&
 		(resultRelInfo->ri_TrigDesc->trig_insert_before_row ||
@@ -2954,7 +2956,7 @@ CopyFrom(CopyState cstate)
 	else if (contain_volatile_functions(cstate->whereClause))
 	{
 		/*
-		 * Can't support multi-inserts if there are any volatile funcation
+		 * Can't support multi-inserts if there are any volatile function
 		 * expressions in WHERE clause.  Similarly to the trigger case above,
 		 * such expressions may query the table we're inserting into.
 		 */
@@ -3306,8 +3308,8 @@ CopyFrom(CopyState cstate)
 					else
 					{
 						/* OK, store the tuple and create index entries for it */
-						table_insert(resultRelInfo->ri_RelationDesc, myslot,
-									 mycid, ti_options, bistate);
+						table_tuple_insert(resultRelInfo->ri_RelationDesc,
+										   myslot, mycid, ti_options, bistate);
 
 						if (resultRelInfo->ri_NumIndices > 0)
 							recheckIndexes = ExecInsertIndexTuples(myslot,
