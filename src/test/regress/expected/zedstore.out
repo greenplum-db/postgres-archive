@@ -327,6 +327,16 @@ select * from t_zedcopy;
      5 | 100 | stuff | test_5 | 
 (9 rows)
 
+-- Test rolling back COPY
+begin;
+COPY t_zedcopy (b, d) from stdin;
+rollback;
+select count(*) from t_zedcopy where b >= 20000;
+ count 
+-------
+     0
+(1 row)
+
 --
 -- Test zero column table
 --

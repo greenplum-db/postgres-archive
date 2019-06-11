@@ -440,10 +440,10 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 		undorec.rec.type = ZSUNDO_TYPE_INSERT;
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
-		undorec.rec.tid = tid;
-		undorec.rec.speculative_token = speculative_token;
+		undorec.firsttid = tid;
+		undorec.endtid = tid + nitems;
+		undorec.speculative_token = speculative_token;
 		undorec.rec.prevundorec = prevundoptr;
-		undorec.endtid = tid + nitems - 1;
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
 	}
@@ -785,12 +785,12 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 		undorec.rec.type = ZSUNDO_TYPE_UPDATE;
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
-		undorec.rec.tid = otid;
+		undorec.oldtid = otid;
+		undorec.newtid = newtid;
 		if (keep_old_undo_ptr)
 			undorec.rec.prevundorec = olditem_undoptr;
 		else
 			undorec.rec.prevundorec = InvalidUndoPtr;
-		undorec.newtid = newtid;
 		undorec.key_update = key_update;
 
 		undorecptr = zsundo_insert(rel, &undorec.rec);
@@ -854,7 +854,7 @@ zsbt_tid_lock(Relation rel, zstid tid,
 		undorec.rec.type = ZSUNDO_TYPE_TUPLE_LOCK;
 		undorec.rec.xid = xid;
 		undorec.rec.cid = cid;
-		undorec.rec.tid = tid;
+		undorec.tid = tid;
 		undorec.lockmode = mode;
 		if (keep_old_undo_ptr)
 			undorec.rec.prevundorec = item_undoptr;

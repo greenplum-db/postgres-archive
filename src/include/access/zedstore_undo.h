@@ -48,8 +48,6 @@ typedef struct
 	ZSUndoRecPtr undorecptr;
 	TransactionId xid;
 	CommandId	cid;
-	zstid		tid;
-	uint32		speculative_token; /* Only used for INSERT records */
 
 	/*
 	 * UNDO-record of the inserter. This is needed if a row is inserted, and
@@ -77,7 +75,9 @@ typedef struct
 typedef struct
 {
 	ZSUndoRec	rec;
-	zstid       endtid; /* inclusive */
+	zstid		firsttid;
+	zstid       endtid; /* exclusive */
+	uint32		speculative_token; /* Only used for INSERT records */
 
 } ZSUndoRec_Insert;
 
@@ -117,10 +117,11 @@ typedef struct
 {
 	ZSUndoRec	rec;
 
+	zstid		oldtid;
+	zstid		newtid;
+
 	bool		key_update;		/* were key columns updated?
 								 * (for conflicting with FOR KEY SHARE) */
-
-	zstid		newtid;
 
 } ZSUndoRec_Update;
 
@@ -138,6 +139,7 @@ typedef struct
 typedef struct
 {
 	ZSUndoRec	rec;
+	zstid		tid;
 
 	/*
 	 * XXX: Is it OK to store this on disk? The enum values could change. Then

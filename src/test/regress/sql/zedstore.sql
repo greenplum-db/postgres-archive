@@ -124,6 +124,18 @@ select * from t_zedcopy;
 update t_zedcopy set b = 100 where b = 5;
 select * from t_zedcopy;
 
+
+-- Test rolling back COPY
+begin;
+COPY t_zedcopy (b, d) from stdin;
+20001	test_1
+20002	test_2
+20003	test_3
+20004	test_4
+\.
+rollback;
+select count(*) from t_zedcopy where b >= 20000;
+
 --
 -- Test zero column table
 --

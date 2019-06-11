@@ -490,7 +490,9 @@ fetch_undo_record:
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
-		snapshot->speculativeToken = undorec->speculative_token;
+		ZSUndoRec_Insert *insertrec = (ZSUndoRec_Insert *) undorec;
+
+		snapshot->speculativeToken = insertrec->speculative_token;
 		/* Inserted tuple */
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 			return true;		/* inserted by me */

@@ -244,13 +244,14 @@ zsundo_fetch_lock(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmod
 void
 zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr)
 {
-	ZSUndoRec  *undorec;
+	ZSUndoRec_Insert *undorec;
 	Buffer		buf;
 
-	undorec = zsundo_fetch_lock(rel, undoptr, &buf, BUFFER_LOCK_EXCLUSIVE);
+	undorec = (ZSUndoRec_Insert *) zsundo_fetch_lock(rel, undoptr, &buf, BUFFER_LOCK_EXCLUSIVE);
 
-	if (undorec->type != ZSUNDO_TYPE_INSERT)
-		elog(ERROR, "unexpected undo record type %d on speculatively inserted row", undorec->type);
+	if (undorec->rec.type != ZSUNDO_TYPE_INSERT)
+		elog(ERROR, "unexpected undo record type %d on speculatively inserted row",
+			 undorec->rec.type);
 
 	undorec->speculative_token = INVALID_SPECULATIVE_TOKEN;
 
@@ -586,7 +587,12 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 			{
 				case ZSUNDO_TYPE_INSERT:
 					if (!did_commit)
-						zsbt_tid_mark_dead(rel, undorec->tid, oldest_undorecptr);
+					{
+						ZSUndoRec_Insert *insertrec  = (ZSUndoRec_Insert *) undorec;
+
+						for (zstid tid = insertrec->firsttid; tid < insertrec->endtid; tid++)
+							zsbt_tid_mark_dead(rel, tid, oldest_undorecptr);
+					}
 					break;
 				case ZSUNDO_TYPE_DELETE:
 					{
@@ -613,7 +619,11 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 					break;
 				case ZSUNDO_TYPE_UPDATE:
 					if (did_commit)
-						zsbt_tid_mark_dead(rel, undorec->tid, oldest_undorecptr);
+					{
+						ZSUndoRec_Update *updaterec  = (ZSUndoRec_Update *) undorec;
+
+						zsbt_tid_mark_dead(rel, updaterec->oldtid, oldest_undorecptr);
+					}
 					break;
 			}
 
@@ -822,7 +832,6 @@ zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid t
 	undorec.rec.type = ZSUNDO_TYPE_DELETE;
 	undorec.rec.xid = xid;
 	undorec.rec.cid = cid;
-	undorec.rec.tid = InvalidZSTid;	/* the TIDs are stored in 'tids' array */
 	undorec.changedPart = changedPart;
 	undorec.rec.prevundorec = prev_undo_ptr;
 	undorec.tids[0] = tid;
