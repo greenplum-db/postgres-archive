@@ -959,7 +959,7 @@ zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid)
 
 			for (int j = 0; j < iter.num_tids; j++)
 			{
-				if (iter.tid_undoslotnos[j] == 0)
+				if (iter.tid_undoslotnos[j] == ZSBT_DEAD_UNDO_SLOT)
 					intset_add_member(result, iter.tids[j]);
 			}
 		}
@@ -1013,7 +1013,7 @@ zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo)
 		return;
 	}
 
-	/* Replace the ZSBreeItem with a DEAD item. (Unless it's already dead) */
+	/* Mark the TID as DEAD. (Unless it's already dead) */
 	if (isdead)
 	{
 		UnlockReleaseBuffer(buf);
