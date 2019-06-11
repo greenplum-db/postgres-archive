@@ -98,9 +98,40 @@ zsbt_tid_begin_scan(Relation rel, zstid starttid,
 void
 zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid)
 {
+	/*
+	 * If the new starting position is within the currently processed array,
+	 * we can just reposition within the array.
+	 */
+	if (scan->array_iter.num_tids > 0)
+	{
+		if (scan->array_iter.tids[0] <= starttid &&
+			starttid <= scan->array_iter.tids[scan->array_iter.num_tids - 1])
+		{
+			/* TODO: could do a binary search here */
+			int			i;
+
+			for (i = 0; i < scan->array_iter.num_tids; i++)
+			{
+				if (scan->array_iter.tids[i] >= starttid)
+					break;
+			}
+			Assert(i < scan->array_iter.num_tids);
+			scan->array_iter.next_idx = i;
+			scan->nexttid = scan->array_iter.tids[i];
+			return;
+		}
+		else
+		{
+			scan->array_iter.num_tids = 0;
+			scan->array_iter.next_idx = 0;
+		}
+	}
+
 	if (starttid < scan->nexttid)
 	{
 		/* have to restart from scratch. */
+		/* TODO: if the new starting point lands on the same page, we could
+		 * keep 'lastbuf' */
 		scan->array_iter.num_tids = 0;
 		scan->array_iter.next_idx = 0;
 		scan->nexttid = starttid;
@@ -109,7 +140,9 @@ zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid)
 		scan->lastbuf = InvalidBuffer;
 	}
 	else
-		zsbt_tid_scan_skip(scan, starttid);
+	{
+		scan->nexttid = starttid;
+	}
 }
 
 void

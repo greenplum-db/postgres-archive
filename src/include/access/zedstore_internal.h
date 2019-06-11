@@ -735,23 +735,6 @@ extern zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer b
 extern Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
 extern bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf);
 
-
-static inline void
-zsbt_tid_scan_skip(ZSTidTreeScan *scan, zstid tid)
-{
-	if (tid > scan->nexttid)
-	{
-		while (scan->array_iter.next_idx < scan->array_iter.num_tids)
-		{
-			scan->array_iter.next_idx++;
-			if (scan->array_iter.next_idx < scan->array_iter.num_tids)
-				scan->nexttid = scan->array_iter.tids[scan->array_iter.next_idx];
-			else
-				scan->nexttid++;
-		}
-	}
-}
-
 static inline void
 zsbt_attr_scan_skip(ZSAttrTreeScan *scan, zstid tid)
 {

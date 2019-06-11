@@ -36,10 +36,24 @@ zsbt_tid_pack_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements)
 	uint64		elemno;
 	List	   *newitems = NIL;
 	uint64		codewords[MAX_ITEM_CODEWORDS];
+	int			num_slots;
+	int			slotno;
+
+	Assert(undo_ptr.counter != DeadUndoPtr.counter);
+	if (IsZSUndoRecPtrValid(&undo_ptr))
+	{
+		slotno = ZSBT_FIRST_NORMAL_UNDO_SLOT;
+		num_slots = ZSBT_FIRST_NORMAL_UNDO_SLOT + 1;
+	}
+	else
+	{
+		slotno = ZSBT_OLD_UNDO_SLOT;
+		num_slots = ZSBT_FIRST_NORMAL_UNDO_SLOT;
+	}
 
 	vals = palloc(sizeof(uint64) * nelements);
 	for (int i = 0; i < nelements; i++)
-		vals[i] = (1 << ZSBT_ITEM_UNDO_SLOT_BITS) | ZSBT_FIRST_NORMAL_UNDO_SLOT;
+		vals[i] = (1 << ZSBT_ITEM_UNDO_SLOT_BITS) | slotno;
 
 	elemno = 0;
 	while (elemno < nelements)
@@ -51,7 +65,7 @@ zsbt_tid_pack_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements)
 		zstid		firsttid = tid + elemno;
 
 		/* clear the 'diff' from the first value, because it's 'starttid' */
-		vals[elemno] = 0 | ZSBT_FIRST_NORMAL_UNDO_SLOT;
+		vals[elemno] = 0 | slotno;
 		for (num_codewords = 0; num_codewords < MAX_ITEM_CODEWORDS && elemno < nelements; num_codewords++)
 		{
 			uint64		codeword;
@@ -65,16 +79,18 @@ zsbt_tid_pack_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements)
 			elemno += num_encoded;
 		}
 
-		itemsz = SizeOfZSTidArrayItem(ZSBT_FIRST_NORMAL_UNDO_SLOT + 1, num_codewords);
+		itemsz = SizeOfZSTidArrayItem(num_slots, num_codewords);
 		newitem = palloc(itemsz);
 		newitem->t_size = itemsz;
-		newitem->t_num_undo_slots = ZSBT_FIRST_NORMAL_UNDO_SLOT + 1;
+		newitem->t_num_undo_slots = num_slots;
 		newitem->t_num_codewords = num_codewords;
 		newitem->t_firsttid = firsttid;
 		newitem->t_endtid = tid + elemno;
 		newitem->t_num_tids = newitem->t_endtid - newitem->t_firsttid;
 
-		ZSTidArrayItemGetUndoSlots(newitem)[0] = undo_ptr;
+		if (slotno == ZSBT_FIRST_NORMAL_UNDO_SLOT)
+			ZSTidArrayItemGetUndoSlots(newitem)[0] = undo_ptr;
+
 		memcpy(ZSTidArrayItemGetCodewords(newitem), codewords, num_codewords * sizeof(uint64));
 
 		newitems = lappend(newitems, newitem);
