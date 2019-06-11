@@ -434,6 +434,7 @@ zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remo
 	 */
 	total_remain = 0;
 	tid = orig->t_firsttid;
+	prev_tid = tid;
 	for (int i = 0; i < total_decoded; i++)
 	{
 		uint64		val = vals[i];
@@ -442,12 +443,12 @@ zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remo
 
 		tid += diff;
 
-		while(*nexttid < tid)
+		while (*nexttid < tid)
 		{
 			if (!intset_iterate_next(remove_tids, nexttid))
 				*nexttid = MaxPlusOneZSTid;
 		}
-		if (tid > *nexttid)
+		if (tid < *nexttid)
 		{
 			vals[total_remain] = (tid - prev_tid) << ZSBT_ITEM_UNDO_SLOT_BITS | slotno;
 			tids[total_remain] = tid;
@@ -467,7 +468,7 @@ zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remo
 		idx = 0;
 
 		vals[idx] &= ZSBT_ITEM_UNDO_SLOT_MASK;
-		newitem = remap_slots(tids[idx], &vals[idx], total_decoded - idx,
+		newitem = remap_slots(tids[idx], &vals[idx], total_remain,
 							  orig_slots, orig->t_num_undo_slots,
 							  -1, InvalidUndoPtr,
 							  recent_oldest_undo);
