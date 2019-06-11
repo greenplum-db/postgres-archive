@@ -18,6 +18,8 @@ static ZSTidArrayItem *remap_slots(zstid firsttid, uint64 *vals, int num_vals,
 								   ZSUndoRecPtr recent_oldest_undo);
 
 static uint64 simple8b_encode(const uint64 *ints, int num_ints, int *num_encoded);
+static uint64 simple8b_encode_consecutive(const uint64 firstint, const uint64 secondint, int num_ints,
+										  int *num_encoded);
 static int simple8b_decode(uint64 codeword, uint64 *decoded);
 
 /*
@@ -83,8 +85,7 @@ zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter)
 List *
 zsbt_tid_item_create_for_range(zstid tid, int nelements, ZSUndoRecPtr undo_ptr)
 {
-	uint64		*vals;
-	uint64		elemno;
+	uint64		total_encoded;
 	List	   *newitems = NIL;
 	uint64		codewords[ZSBT_MAX_ITEM_CODEWORDS];
 	int			num_slots;
@@ -102,34 +103,38 @@ zsbt_tid_item_create_for_range(zstid tid, int nelements, ZSUndoRecPtr undo_ptr)
 		num_slots = ZSBT_FIRST_NORMAL_UNDO_SLOT;
 	}
 
-	vals = palloc(sizeof(uint64) * nelements);
-	for (int i = 0; i < nelements; i++)
-		vals[i] = (1 << ZSBT_ITEM_UNDO_SLOT_BITS) | slotno;
-
-	elemno = 0;
-	while (elemno < nelements)
+	total_encoded = 0;
+	while (total_encoded < nelements)
 	{
 		ZSTidArrayItem *newitem;
 		Size		itemsz;
-		int			num_encoded;
 		int			num_codewords;
-		zstid		firsttid = tid + elemno;
+		zstid		firsttid = tid + total_encoded;
+		uint64		first_delta;
+		uint64		second_delta;
 
-		/* clear the 'diff' from the first value, because it's 'starttid' */
-		vals[elemno] = 0 | slotno;
-		for (num_codewords = 0;
-			 num_codewords < ZSBT_MAX_ITEM_CODEWORDS && elemno < nelements;
-			 num_codewords++)
+		/*
+		 * The first 'diff' is 0, because the first TID is implicitly 'starttid'.
+		 * The rest have distance of 1 to the previous TID.
+		 */
+		first_delta = 0;
+		second_delta = 1;
+
+		for (num_codewords = 0; num_codewords < ZSBT_MAX_ITEM_CODEWORDS && total_encoded < nelements; num_codewords++)
 		{
 			uint64		codeword;
+			int			num_encoded;
 
-			codeword = simple8b_encode(&vals[elemno], nelements - elemno, &num_encoded);
-
+			codeword = simple8b_encode_consecutive((first_delta << ZSBT_ITEM_UNDO_SLOT_BITS) | slotno,
+												   (second_delta << ZSBT_ITEM_UNDO_SLOT_BITS) | slotno,
+												   nelements - total_encoded,
+												   &num_encoded);
 			if (num_encoded == 0)
 				break;
 
 			codewords[num_codewords] = codeword;
-			elemno += num_encoded;
+			total_encoded += num_encoded;
+			first_delta = 1;
 		}
 
 		itemsz = SizeOfZSTidArrayItem(num_slots, num_codewords);
@@ -138,7 +143,7 @@ zsbt_tid_item_create_for_range(zstid tid, int nelements, ZSUndoRecPtr undo_ptr)
 		newitem->t_num_undo_slots = num_slots;
 		newitem->t_num_codewords = num_codewords;
 		newitem->t_firsttid = firsttid;
-		newitem->t_endtid = tid + elemno;
+		newitem->t_endtid = tid + total_encoded;
 		newitem->t_num_tids = newitem->t_endtid - newitem->t_firsttid;
 
 		if (slotno == ZSBT_FIRST_NORMAL_UNDO_SLOT)
@@ -148,8 +153,6 @@ zsbt_tid_item_create_for_range(zstid tid, int nelements, ZSUndoRecPtr undo_ptr)
 
 		newitems = lappend(newitems, newitem);
 	}
-
-	pfree(vals);
 
 	return newitems;
 }
@@ -505,6 +508,9 @@ remap_slots(zstid firsttid, uint64 *vals, int num_vals,
 		uint64		codeword;
 
 		codeword = simple8b_encode(&vals_mapped[num_encoded], num_mapped - num_encoded, &n);
+		if (n == 0)
+			break;
+
 		num_encoded += n;
 
 		codewords[num_codewords++] = codeword;
@@ -539,6 +545,10 @@ remap_slots(zstid firsttid, uint64 *vals, int num_vals,
 
 /*
  * Simple-8b encoding.
+ *
+ * FIXME: This is copy-pasted from src/backend/lib/integerset.c. Some of
+ * the things we do here are not relevant for the use in zedstore, or could
+ * be optimized. For example, EMPTY_CODEWORD is not used.
  *
  * The simple-8b algorithm packs between 1 and 240 integers into 64-bit words,
  * called "codewords".  The number of integers packed into a single codeword
@@ -683,7 +693,14 @@ simple8b_encode(const uint64 *ints, int num_ints, int *num_encoded)
 			if (i < num_ints)
 				val = ints[i];
 			else
+			{
+				/*
+				 * Reached end of input. Pretend that the next integer is a
+				 * value that's too large to represent in Simple-8b, so that
+				 * we fall out.
+				 */
 				val = PG_UINT64_MAX;
+			}
 		}
 	}
 
@@ -725,6 +742,133 @@ simple8b_encode(const uint64 *ints, int num_ints, int *num_encoded)
 	*num_encoded = nints;
 	return codeword;
 }
+
+/*
+ * Encode a number of same integers into a Simple-8b codeword.
+ *
+ * This is a special version of simple8b_encode, where the first input
+ * integer is 'firstint', followed by a number of 'secondint'. This is
+ * equivalent to calling simple8b_encode() with an input array:
+ *
+ * ints[0]: firstint
+ * ints[1]: secondint
+ * ints[2]: secondint
+ * ...
+ * ints[num_ints - 1]: secondint
+ *
+ *
+ * We need that when doing a multi-insert, and it seems nice to have a
+ * specialized version for that, for speed, but also to keep the calling
+ * code simpler, so that it doesn't need to construct an input array.
+ *
+ * TODO: This is just copy-pasted from simple8b_encode, but since we know
+ * what the input is, we could probably optimize this further.
+ */
+static uint64
+simple8b_encode_consecutive(const uint64 firstint, const uint64 secondint, int num_ints,
+							int *num_encoded)
+{
+	int			selector;
+	int			nints;
+	int			bits;
+	uint64		val;
+	uint64		codeword;
+	int			i;
+
+	/*
+	 * Select the "mode" to use for this codeword.
+	 *
+	 * In each iteration, check if the next value can be represented in the
+	 * current mode we're considering.  If it's too large, then step up the
+	 * mode to a wider one, and repeat.  If it fits, move on to the next
+	 * integer.  Repeat until the codeword is full, given the current mode.
+	 *
+	 * Note that we don't have any way to represent unused slots in the
+	 * codeword, so we require each codeword to be "full".  It is always
+	 * possible to produce a full codeword unless the very first delta is too
+	 * large to be encoded.  For example, if the first delta is small but the
+	 * second is too large to be encoded, we'll end up using the last "mode",
+	 * which has nints == 1.
+	 */
+	selector = 0;
+	nints = simple8b_modes[0].num_ints;
+	bits = simple8b_modes[0].bits_per_int;
+	val = firstint;
+	i = 0;						/* number of deltas we have accepted */
+	for (;;)
+	{
+		if (val >= (UINT64CONST(1) << bits))
+		{
+			/* too large, step up to next mode */
+			selector++;
+			nints = simple8b_modes[selector].num_ints;
+			bits = simple8b_modes[selector].bits_per_int;
+			/* we might already have accepted enough deltas for this mode */
+			if (i >= nints)
+				break;
+		}
+		else
+		{
+			/* accept this delta; then done if codeword is full */
+			i++;
+			if (i >= nints)
+				break;
+			/* examine next delta */
+			if (i < num_ints)
+				val = secondint;
+			else
+			{
+				/*
+				 * Reached end of input. Pretend that the next integer is a
+				 * value that's too large to represent in Simple-8b, so that
+				 * we fall out.
+				 */
+				val = PG_UINT64_MAX;
+			}
+		}
+	}
+
+	if (nints == 0)
+	{
+		/*
+		 * The first delta is too large to be encoded with Simple-8b.
+		 *
+		 * If there is at least one not-too-large integer in the input, we
+		 * will encode it using mode 15 (or a more compact mode).  Hence, we
+		 * can only get here if the *first* delta is >= 2^60.
+		 */
+		Assert(i == 0);
+		*num_encoded = 0;
+		return EMPTY_CODEWORD;
+	}
+
+	/*
+	 * Encode the integers using the selected mode.  Note that we shift them
+	 * into the codeword in reverse order, so that they will come out in the
+	 * correct order in the decoder.
+	 */
+	codeword = 0;
+	if (bits > 0)
+	{
+		for (i = nints - 1; i > 0; i--)
+		{
+			val = secondint;
+			codeword |= val;
+			codeword <<= bits;
+		}
+		val = firstint;
+		codeword |= val;
+	}
+
+	/* add selector to the codeword, and return */
+	codeword |= (uint64) selector << 60;
+
+	*num_encoded = nints;
+	return codeword;
+}
+
+
+
 
 /*
  * Decode a codeword into an array of integers.
