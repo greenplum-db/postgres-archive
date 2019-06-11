@@ -345,6 +345,7 @@ remap_slots(zstid firsttid, uint64 *vals, int num_vals,
 	uint64		codewords[MAX_ITEM_CODEWORDS];
 	Size		itemsz;
 	int			new_slotno;
+	bool		remap_needed;
 
 	vals_mapped = palloc(num_vals * sizeof(uint64));
 
@@ -361,26 +362,49 @@ remap_slots(zstid firsttid, uint64 *vals, int num_vals,
 	 * Simple-8b encoding again in many common cases.
 	 */
 	new_slotno = -1;
+	remap_needed = true;
+
+	if (target_idx < 0 || target_idx >= num_vals)
+	{
+		/*
+		 * There are no changes. We can just use the original slots as is.
+		 *
+		 * We get here, if we changed the target in a previous call already,
+		 * and we're now just creating an item for the remaining TIDs from
+		 * the original item. TODO: We might not need all of the slots anymore,
+		 * if the remanining TIDs don't reference them, but we don't bother
+		 * to check for that here. We could save a little bit of space by
+		 * leaving out any unused undo slots.
+		 */
+		for (int j = ZSBT_FIRST_NORMAL_UNDO_SLOT; j < num_orig_slots; j++)
+			curr_slots[j] = orig_slots[j];
+		curr_numslots = num_orig_slots;
+		remap_needed = false;
+	}
 	for (i = 0; i < num_orig_slots; i++)
 	{
 		if (orig_slots[i].counter == target_ptr.counter)
 		{
+			/* We can reuse this existing slot for the target. */
 			new_slotno = i;
 			for (int j = ZSBT_FIRST_NORMAL_UNDO_SLOT; j < num_orig_slots; j++)
 				curr_slots[j] = orig_slots[j];
 			curr_numslots = num_orig_slots;
+			remap_needed = false;
 			break;
 		}
 	}
-	if (new_slotno == -1 && num_orig_slots < ZSBT_MAX_ITEM_UNDO_SLOTS)
+	if (remap_needed && num_orig_slots < ZSBT_MAX_ITEM_UNDO_SLOTS)
 	{
+		/* There's a free slot we can use for the target */
 		for (int j = ZSBT_FIRST_NORMAL_UNDO_SLOT; j < num_orig_slots; j++)
 			curr_slots[j] = orig_slots[j];
-		curr_slots[num_orig_slots] = target_ptr;
+		new_slotno = num_orig_slots;
+		curr_slots[new_slotno] = target_ptr;
 		curr_numslots = num_orig_slots + 1;
 	}
 
-	if (new_slotno != -1 || target_idx < 0 || target_idx >= num_vals)
+	if (!remap_needed)
 	{
 		/* We can take the fast path. */
 		memcpy(vals_mapped, vals, num_vals * sizeof(uint64));
