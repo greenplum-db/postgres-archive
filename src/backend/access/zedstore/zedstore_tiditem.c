@@ -79,8 +79,8 @@ zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter)
 }
 
 /*
- * Create a ZSTidArrayItem (or items), to represent a contiguous range of
- * tids, with the same UNDO pointer.
+ * Create a ZSTidArrayItem (or items), to represent a range of contiguous TIDs,
+ * all with the same UNDO pointer.
  */
 List *
 zsbt_tid_item_create_for_range(zstid tid, int nelements, ZSUndoRecPtr undo_ptr)
@@ -154,6 +154,154 @@ zsbt_tid_item_create_for_range(zstid tid, int nelements, ZSUndoRecPtr undo_ptr)
 		newitems = lappend(newitems, newitem);
 	}
 
+	return newitems;
+}
+
+/*
+ * Add a range of contiguous TIDs to an existing item.
+ *
+ * If all the new TIDs can be merged with the existing item, returns a List
+ * with a single element, containing the new combined item that covers all
+ * the existing TIDs, and the new TIDs. *modified_orig is set to true.
+ *
+ * If some of the new TIDs can be merged with the existing item, returns a
+ * List with more than one item. The returned items together replace the
+ * original item, such that all the existing TIDs and all the new TIDs are
+ * covered. *modified_orig is set to true in that case, too.
+ *
+ * If the new TIDs could not be merged with the existing item, returns a list
+ * of new items to represent the new TIDs, just like
+ * zsbt_tid_item_create_for_range(), and *modified_orig is set to false.
+ */
+List *
+zsbt_tid_item_add_tids(ZSTidArrayItem *orig, zstid firsttid, int nelements,
+					   ZSUndoRecPtr undo_ptr, bool *modified_orig)
+{
+	int			num_slots;
+	int			num_new_codewords;
+	uint64		new_codewords[ZSBT_MAX_ITEM_CODEWORDS];
+	ZSUndoRecPtr *orig_slotptr;
+	uint64	   *orig_codewords;
+	uint64	   *dst_codewords;
+	ZSUndoRecPtr *dst_slotptr;
+	int			slotno;
+	uint64		first_delta;
+	uint64		second_delta;
+	int			total_new_encoded;
+	Size		itemsz;
+	ZSTidArrayItem *newitem;
+	List	   *newitems;
+
+	if (orig == NULL)
+	{
+		*modified_orig = false;
+		return zsbt_tid_item_create_for_range(firsttid, nelements, undo_ptr);
+	}
+
+	/* Quick check to see if we can add the new TIDs to the previous item */
+	Assert(orig->t_endtid <= firsttid);
+
+	/*
+	 * Is there room for a new codeword? Currently, we don't try to add tids to the
+	 * last existing codeword, even if we perhaps could.
+	 */
+	if (orig->t_num_tids >= ZSBT_MAX_ITEM_CODEWORDS)
+	{
+		*modified_orig = false;
+		return zsbt_tid_item_create_for_range(firsttid, nelements, undo_ptr);
+	}
+
+	orig_slotptr = ZSTidArrayItemGetUndoSlots(orig);
+
+	/* Is there an UNDO slot we can use? */
+	Assert(undo_ptr.counter != DeadUndoPtr.counter);
+	if (!IsZSUndoRecPtrValid(&undo_ptr))
+	{
+		slotno = ZSBT_OLD_UNDO_SLOT;
+		num_slots = orig->t_num_undo_slots;
+	}
+	else
+	{
+		for (slotno = ZSBT_FIRST_NORMAL_UNDO_SLOT; slotno < orig->t_num_undo_slots; slotno++)
+		{
+			if (orig_slotptr[slotno - ZSBT_FIRST_NORMAL_UNDO_SLOT].counter == undo_ptr.counter)
+				break;
+		}
+		if (slotno >= ZSBT_MAX_ITEM_UNDO_SLOTS)
+		{
+			*modified_orig = false;
+			return zsbt_tid_item_create_for_range(firsttid, nelements, undo_ptr);
+		}
+
+		if (slotno >= orig->t_num_undo_slots)
+			num_slots = orig->t_num_undo_slots + 1;
+		else
+			num_slots = orig->t_num_undo_slots;
+	}
+
+	/* ok, go ahead, create as many new codewords as fits, or is needed. */
+	first_delta = firsttid - orig->t_endtid + 1;
+	second_delta = 1;
+	total_new_encoded = 0;
+	num_new_codewords = 0;
+	while (num_new_codewords < ZSBT_MAX_ITEM_CODEWORDS - orig->t_num_codewords &&
+		   total_new_encoded < nelements)
+	{
+		uint64		codeword;
+		int			num_encoded;
+
+		codeword = simple8b_encode_consecutive((first_delta << ZSBT_ITEM_UNDO_SLOT_BITS) | slotno,
+											   (second_delta << ZSBT_ITEM_UNDO_SLOT_BITS) | slotno,
+											   nelements - total_new_encoded,
+											   &num_encoded);
+		if (num_encoded == 0)
+			break;
+
+		new_codewords[num_new_codewords] = codeword;
+		first_delta = 1;
+		num_new_codewords++;
+		total_new_encoded += num_encoded;
+	}
+
+	if (num_new_codewords == 0)
+	{
+		*modified_orig = false;
+		return zsbt_tid_item_create_for_range(firsttid, nelements, undo_ptr);
+	}
+
+	itemsz = SizeOfZSTidArrayItem(num_slots, orig->t_num_codewords + num_new_codewords);
+	newitem = palloc(itemsz);
+	newitem->t_size = itemsz;
+	newitem->t_num_undo_slots = num_slots;
+	newitem->t_num_codewords = orig->t_num_codewords + num_new_codewords;
+	newitem->t_firsttid = orig->t_firsttid;
+	newitem->t_endtid = firsttid + total_new_encoded;
+	newitem->t_num_tids = newitem->t_endtid - newitem->t_firsttid;
+
+	/* copy existing slots, followed by new slot, if any */
+	dst_slotptr = ZSTidArrayItemGetUndoSlots(newitem);
+	for (int i = ZSBT_FIRST_NORMAL_UNDO_SLOT; i < orig->t_num_undo_slots; i++)
+		*(dst_slotptr++) = orig_slotptr[i - ZSBT_FIRST_NORMAL_UNDO_SLOT];
+	if (num_slots > orig->t_num_undo_slots)
+		*(dst_slotptr++) = undo_ptr;
+
+	/* copy existing codewords, followed by new ones */
+	orig_codewords = ZSTidArrayItemGetCodewords(orig);
+	dst_codewords = ZSTidArrayItemGetCodewords(newitem);
+	for (int i = 0; i < orig->t_num_codewords; i++)
+		*(dst_codewords++) = orig_codewords[i];
+	for (int i = 0; i < num_new_codewords; i++)
+		*(dst_codewords++) = new_codewords[i];
+
+	/* Create more items for the remainder, if needed */
+	*modified_orig = true;
+	if (total_new_encoded < nelements)
+		newitems = zsbt_tid_item_create_for_range(newitem->t_endtid,
+												  nelements - total_new_encoded,
+												  undo_ptr);
+	else
+		newitems = NIL;
+	newitems = lcons(newitem, newitems);
 	return newitems;
 }
 

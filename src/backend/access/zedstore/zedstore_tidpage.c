@@ -457,6 +457,8 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int ntuples,
 	ZSUndoRecPtr undorecptr;
 	zstid		endtid;
 	zstid		tid;
+	ZSTidArrayItem *lastitem;
+	bool		modified_orig;
 
 	/*
 	 * Insert to the rightmost leaf.
@@ -477,13 +479,15 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int ntuples,
 	if (maxoff >= FirstOffsetNumber)
 	{
 		ItemId		iid = PageGetItemId(page, maxoff);
-		ZSTidArrayItem *lastitem = (ZSTidArrayItem *) PageGetItem(page, iid);
+
+		lastitem = (ZSTidArrayItem *) PageGetItem(page, iid);
 
 		endtid = lastitem->t_endtid;
 	}
 	else
 	{
 		endtid = opaque->zs_lokey;
+		lastitem = NULL;
 	}
 	tid = endtid;
 
@@ -499,14 +503,24 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int ntuples,
 	}
 
 	/*
-	 * Create a single array item to represent all the TIDs.
+	 * Create an item to represent all the TIDs, merging with the last existing
+	 * item if possible.
 	 */
-	newitems = zsbt_tid_item_create_for_range(tid, ntuples, undorecptr);
+	newitems = zsbt_tid_item_add_tids(lastitem, tid, ntuples, undorecptr,
+									  &modified_orig);
 
-	/* recompress and possibly split the page */
-	zsbt_tid_add_items(rel, buf, newitems);
-	/* zsbt_tid_add_items unlocked 'buf' */
+	/*
+	 * Replace the original last item with the new items, or add new items.
+	 * This splits the page if necessary.
+	 */
+	if(modified_orig)
+		zsbt_tid_replace_item(rel, buf, maxoff, newitems);
+	else
+		zsbt_tid_add_items(rel, buf, newitems);
+	/* zsbt_tid_replace/add_item unlocked 'buf' */
 	ReleaseBuffer(buf);
+
+	list_free_deep(newitems);
 
 	/* Return the TIDs to the caller */
 	for (int i = 0; i < ntuples; i++)
@@ -1361,8 +1375,10 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
 		}
 
 		/* Add any new items to the end */
-		if (newitems)
-			items = list_concat(items, newitems);
+		foreach (lc, newitems)
+		{
+			items = lappend(items, lfirst(lc));
+		}
 
 		/* Now pass the list to the recompressor. */
 		IncrBufferRefCount(buf);

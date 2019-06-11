@@ -718,6 +718,8 @@ extern void zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot);
 
 /* prototypes for functions in zedstore_tiditem.c */
 extern List *zsbt_tid_item_create_for_range(zstid tid, int nelements, ZSUndoRecPtr undo_ptr);
+extern List *zsbt_tid_item_add_tids(ZSTidArrayItem *orig, zstid firsttid, int nelements,
+									ZSUndoRecPtr undo_ptr, bool *modified_orig);
 extern void zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter);
 extern List *zsbt_tid_item_change_undoptr(ZSTidArrayItem *orig, zstid target_tid, ZSUndoRecPtr undoptr, ZSUndoRecPtr recent_oldest_undo);
 extern List *zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remove_tids,
