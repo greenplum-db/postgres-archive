@@ -445,7 +445,7 @@ zsbt_get_last_tid(Relation rel)
  * you got for the first column.)
  */
 void
-zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
+zsbt_tid_multi_insert(Relation rel, zstid *tids, int ntuples,
 					  TransactionId xid, CommandId cid, uint32 speculative_token, ZSUndoRecPtr prevundoptr)
 {
 	Buffer		buf;
@@ -490,7 +490,7 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	/* Form an undo record */
 	if (xid != FrozenTransactionId)
 	{
-		undorecptr = zsundo_create_for_insert(rel, xid, cid, tid, nitems,
+		undorecptr = zsundo_create_for_insert(rel, xid, cid, tid, ntuples,
 											  speculative_token, prevundoptr);
 	}
 	else
@@ -501,7 +501,7 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	/*
 	 * Create a single array item to represent all the TIDs.
 	 */
-	newitems = zsbt_tid_pack_item(tid, undorecptr, nitems);
+	newitems = zsbt_tid_item_create_for_range(tid, ntuples, undorecptr);
 
 	/* recompress and possibly split the page */
 	zsbt_tid_add_items(rel, buf, newitems);
@@ -509,7 +509,7 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int nitems,
 	ReleaseBuffer(buf);
 
 	/* Return the TIDs to the caller */
-	for (int i = 0; i < nitems; i++)
+	for (int i = 0; i < ntuples; i++)
 		tids[i] = tid + i;
 }
 

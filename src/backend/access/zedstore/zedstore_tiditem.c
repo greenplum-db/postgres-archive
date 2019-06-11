@@ -12,14 +12,6 @@
 
 #include "access/zedstore_internal.h"
 
-/*
- * Maximum number of integers that can be encoded in a single Simple-8b
- * codeword. (Defined here before anything else, so that we can size arrays
- * using this.)
- */
-#define SIMPLE8B_MAX_VALUES_PER_CODEWORD 240
-
-
 static ZSTidArrayItem *remap_slots(zstid firsttid, uint64 *vals, int num_vals,
 								   ZSUndoRecPtr *orig_slots, int num_orig_slots,
 								   int target_idx, ZSUndoRecPtr target_ptr,
@@ -29,13 +21,17 @@ static uint64 simple8b_encode(const uint64 *ints, int num_ints, int *num_encoded
 static int simple8b_decode(uint64 codeword, uint64 *decoded);
 
 
+/*
+ * Create a ZSTidArrayItem (or items), to represent a contiguous range of
+ * tids, with the same UNDO pointer.
+ */
 List *
-zsbt_tid_pack_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements)
+zsbt_tid_item_create_for_range(zstid tid, int nelements, ZSUndoRecPtr undo_ptr)
 {
 	uint64		*vals;
 	uint64		elemno;
 	List	   *newitems = NIL;
-	uint64		codewords[MAX_ITEM_CODEWORDS];
+	uint64		codewords[ZSBT_MAX_ITEM_CODEWORDS];
 	int			num_slots;
 	int			slotno;
 
@@ -66,7 +62,9 @@ zsbt_tid_pack_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements)
 
 		/* clear the 'diff' from the first value, because it's 'starttid' */
 		vals[elemno] = 0 | slotno;
-		for (num_codewords = 0; num_codewords < MAX_ITEM_CODEWORDS && elemno < nelements; num_codewords++)
+		for (num_codewords = 0;
+			 num_codewords < ZSBT_MAX_ITEM_CODEWORDS && elemno < nelements;
+			 num_codewords++)
 		{
 			uint64		codeword;
 
@@ -157,6 +155,11 @@ zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter)
 		iter->undoslots[i] = slotptr[i - ZSBT_FIRST_NORMAL_UNDO_SLOT];
 }
 
+/*
+ * Change the UNDO pointer of a tuple with TID 'target_tid', inside an item.
+ *
+ * Returns an item, or multiple items, to replace the original one.
+ */
 List *
 zsbt_tid_item_change_undoptr(ZSTidArrayItem *orig, zstid target_tid, ZSUndoRecPtr undoptr,
 							 ZSUndoRecPtr recent_oldest_undo)
@@ -235,7 +238,9 @@ zsbt_tid_item_change_undoptr(ZSTidArrayItem *orig, zstid target_tid, ZSUndoRecPt
 	return newitems;
 }
 
-
+/*
+ * Completely remove a number of TIDs from an item. (for vacuum)
+ */
 List *
 zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remove_tids,
 						  ZSUndoRecPtr recent_oldest_undo)
@@ -247,7 +252,7 @@ zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remo
 	uint64	   *vals;
 	zstid	   *tids;
 	int			nelements = orig->t_num_tids;
-	ZSUndoRecPtr orig_slots[4];
+	ZSUndoRecPtr orig_slots[ZSBT_MAX_ITEM_UNDO_SLOTS];
 	List	   *newitems = NIL;
 	zstid		tid;
 	zstid		prev_tid;
@@ -342,7 +347,7 @@ remap_slots(zstid firsttid, uint64 *vals, int num_vals,
 	int			num_mapped;
 	int			num_encoded;
 	int			num_codewords;
-	uint64		codewords[MAX_ITEM_CODEWORDS];
+	uint64		codewords[ZSBT_MAX_ITEM_CODEWORDS];
 	Size		itemsz;
 	int			new_slotno;
 	bool		remap_needed;
@@ -495,7 +500,7 @@ remap_slots(zstid firsttid, uint64 *vals, int num_vals,
 	 */
 	num_codewords = 0;
 	num_encoded = 0;
-	while (num_encoded < num_mapped && num_codewords < MAX_ITEM_CODEWORDS)
+	while (num_encoded < num_mapped && num_codewords < ZSBT_MAX_ITEM_CODEWORDS)
 	{
 		int			n;
 		uint64		codeword;
@@ -604,6 +609,12 @@ static const struct simple8b_mode
 
 	{0, 0}						/* sentinel value */
 };
+
+/*
+ * Maximum number of integers that can be encoded in a single Simple-8b
+ * codeword.
+ */
+#define SIMPLE8B_MAX_VALUES_PER_CODEWORD 240
 
 /*
  * EMPTY_CODEWORD is a special value, used to indicate "no values".

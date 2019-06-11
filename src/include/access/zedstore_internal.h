@@ -332,7 +332,7 @@ typedef struct
 #define ZSBT_MAX_ITEM_UNDO_SLOTS	(1 << (ZSBT_ITEM_UNDO_SLOT_BITS))
 #define ZSBT_ITEM_UNDO_SLOT_MASK	(ZSBT_MAX_ITEM_UNDO_SLOTS - 1)
 
-#define MAX_ITEM_CODEWORDS			16
+#define ZSBT_MAX_ITEM_CODEWORDS		16
 
 #define ZSBT_OLD_UNDO_SLOT			0
 #define ZSBT_DEAD_UNDO_SLOT			1
@@ -694,8 +694,9 @@ extern void zsbt_tid_end_scan(ZSTidTreeScan *scan);
 extern zstid zsbt_tid_scan_next(ZSTidTreeScan *scan);
 
 extern void zsbt_tid_multi_insert(Relation rel,
-							  zstid *tids, int ndatums,
-							  TransactionId xid, CommandId cid, uint32 speculative_token, ZSUndoRecPtr prevundoptr);
+								  zstid *tids, int ntuples,
+								  TransactionId xid, CommandId cid,
+								  uint32 speculative_token, ZSUndoRecPtr prevundoptr);
 extern TM_Result zsbt_tid_delete(Relation rel, zstid tid,
 								 TransactionId xid, CommandId cid,
 								 Snapshot snapshot, Snapshot crosscheck, bool wait,
@@ -716,7 +717,7 @@ extern zstid zsbt_get_last_tid(Relation rel);
 extern void zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot);
 
 /* prototypes for functions in zedstore_tiditem.c */
-extern List *zsbt_tid_pack_item(zstid tid, ZSUndoRecPtr undo_ptr, int nelements);
+extern List *zsbt_tid_item_create_for_range(zstid tid, int nelements, ZSUndoRecPtr undo_ptr);
 extern void zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter);
 extern List *zsbt_tid_item_change_undoptr(ZSTidArrayItem *orig, zstid target_tid, ZSUndoRecPtr undoptr, ZSUndoRecPtr recent_oldest_undo);
 extern List *zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remove_tids,
