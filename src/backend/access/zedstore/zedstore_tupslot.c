@@ -21,18 +21,12 @@
 
 const TupleTableSlotOps TTSOpsZedstore;
 
-
-typedef struct ZedstoreTupleTableSlot
-{
-	TupleTableSlot base;
-
-	char	   *data;		/* data for materialized slots */
-} ZedstoreTupleTableSlot;
-
-
 static void
 tts_zedstore_init(TupleTableSlot *slot)
 {
+	ZedstoreTupleTableSlot *zslot = (ZedstoreTupleTableSlot *) slot;
+	zslot->xmin = InvalidTransactionId;
+	zslot->cmin = InvalidCommandId;
 }
 
 static void
@@ -43,12 +37,11 @@ tts_zedstore_release(TupleTableSlot *slot)
 static void
 tts_zedstore_clear(TupleTableSlot *slot)
 {
+	ZedstoreTupleTableSlot *zslot = (ZedstoreTupleTableSlot *) slot;
 	if (unlikely(TTS_SHOULDFREE(slot)))
 	{
-		ZedstoreTupleTableSlot *vslot = (ZedstoreTupleTableSlot *) slot;
-
-		pfree(vslot->data);
-		vslot->data = NULL;
+		pfree(zslot->data);
+		zslot->data = NULL;
 
 		slot->tts_flags &= ~TTS_FLAG_SHOULDFREE;
 	}
@@ -56,6 +49,9 @@ tts_zedstore_clear(TupleTableSlot *slot)
 	slot->tts_nvalid = 0;
 	slot->tts_flags |= TTS_FLAG_EMPTY;
 	ItemPointerSetInvalid(&slot->tts_tid);
+
+	zslot->xmin = InvalidTransactionId;
+	zslot->cmin = InvalidCommandId;
 }
 
 /*
@@ -69,54 +65,6 @@ tts_zedstore_getsomeattrs(TupleTableSlot *slot, int natts)
 	elog(ERROR, "getsomeattrs is not required to be called on a zedstore tuple table slot");
 }
 
-static void
-zs_get_xmin_cmin(Relation rel, ZSUndoRecPtr recent_oldest_undo, zstid tid, ZSUndoRecPtr undo_ptr,
-				 TransactionId *xmin, CommandId *cmin)
-{
-	TransactionId this_xmin;
-	CommandId	this_cmin;
-	ZSUndoRec  *undorec;
-
-	/*
-	 * Follow the chain of UNDO records for this tuple, to find the
-	 * transaction that originally inserted the row  (xmin/cmin).
-	 *
-	 * XXX: this is similar logic to zs_cluster_process_tuple(). Can
-	 * we merge it?
-	 */
-	this_xmin = FrozenTransactionId;
-	this_cmin = InvalidCommandId;
-
-	for (;;)
-	{
-		if (undo_ptr.counter < recent_oldest_undo.counter)
-		{
-			/* This tuple version is visible to everyone. */
-			break;
-		}
-
-		/* Fetch the next UNDO record. */
-		undorec = zsundo_fetch(rel, undo_ptr);
-
-		if (undorec->type == ZSUNDO_TYPE_INSERT)
-		{
-			this_xmin = undorec->xid;
-			this_cmin = undorec->cid;
-			break;
-		}
-		else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK ||
-				 undorec->type == ZSUNDO_TYPE_DELETE ||
-				 undorec->type == ZSUNDO_TYPE_UPDATE)
-		{
-			undo_ptr = undorec->prevundorec;
-			continue;
-		}
-	}
-
-	*xmin = this_xmin;
-	*cmin = this_cmin;
-}
-
 /*
  * We only support fetching 'xmin', currently. It's needed for referential
  * integrity triggers (i.e. foreign keys).
@@ -124,61 +72,17 @@ zs_get_xmin_cmin(Relation rel, ZSUndoRecPtr recent_oldest_undo, zstid tid, ZSUnd
 static Datum
 tts_zedstore_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
 {
+	ZedstoreTupleTableSlot *zslot = (ZedstoreTupleTableSlot *) slot;
 	if (attnum == MinTransactionIdAttributeNumber ||
 		attnum == MinCommandIdAttributeNumber)
 	{
-		zstid		tid = ZSTidFromItemPointer(slot->tts_tid);
-		ZSUndoRecPtr undoptr;
-		ZSTidTreeScan tid_scan;
-		bool		found;
-		Relation	rel;
-		ZSUndoRecPtr recent_oldest_undo;
-		TransactionId xmin;
-		CommandId cmin;
-
-		/*
-		 * We assume that the table OID and TID in the slot are set. We
-		 * fetch the tuple from the table, and follow its UNDO chain to
-		 * find the transaction that inserted it.
-		 *
-		 * XXX: This is very slow compared to e.g. the heap, where we
-		 * always store the xmin in tuple itself. We should probably do
-		 * the same in zedstore, and add extra fields in the slot to hold
-		 * xmin/cmin and fill them in when we fetch the tuple and check its
-		 * visibility for the first time.
-		 */
-		if (!OidIsValid(slot->tts_tableOid))
-			elog(ERROR, "zedstore tuple table slot does not have a table oid");
-
-		/* assume the caller is already holding a suitable lock on the table */
-		rel = table_open(slot->tts_tableOid, NoLock);
-		recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
-
-		/* Use the meta-data tree for the visibility information. */
-		zsbt_tid_begin_scan(rel, tid, tid + 1, SnapshotAny, &tid_scan);
-
-		found = zsbt_tid_scan_next(&tid_scan) != InvalidZSTid;
-		if (!found)
-			elog(ERROR, "could not find zedstore tuple (%u, %u)",
-				 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid));
-
-		undoptr = tid_scan.array_iter.undoslots[
-			tid_scan.array_iter.tid_undoslotnos[tid_scan.array_iter.next_idx - 1]
-			];
-
-		zs_get_xmin_cmin(rel, recent_oldest_undo, tid, undoptr, &xmin, &cmin);
-
-		zsbt_tid_end_scan(&tid_scan);
-
-		table_close(rel, NoLock);
-
 		*isnull = false;
 		if (attnum == MinTransactionIdAttributeNumber)
-			return TransactionIdGetDatum(xmin);
+			return TransactionIdGetDatum(zslot->xmin);
 		else
 		{
 			Assert(attnum == MinCommandIdAttributeNumber);
-			return CommandIdGetDatum(cmin);
+			return CommandIdGetDatum(zslot->cmin);
 		}
 	}	
 	elog(ERROR, "zedstore tuple table slot does not have system attributes (except xmin and cmin)");
@@ -289,6 +193,9 @@ tts_zedstore_materialize(TupleTableSlot *slot)
 static void
 tts_zedstore_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 {
+	ZedstoreTupleTableSlot *zsrcslot = (ZedstoreTupleTableSlot *) srcslot;
+	ZedstoreTupleTableSlot *zdstslot = (ZedstoreTupleTableSlot *) dstslot;
+
 	TupleDesc	srcdesc = dstslot->tts_tupleDescriptor;
 
 	Assert(srcdesc->natts <= dstslot->tts_tupleDescriptor->natts);
@@ -302,6 +209,9 @@ tts_zedstore_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 		dstslot->tts_values[natt] = srcslot->tts_values[natt];
 		dstslot->tts_isnull[natt] = srcslot->tts_isnull[natt];
 	}
+
+	zdstslot->xmin = zsrcslot->xmin;
+	zdstslot->cmin = zsrcslot->cmin;
 
 	dstslot->tts_nvalid = srcdesc->natts;
 	dstslot->tts_flags &= ~TTS_FLAG_EMPTY;
@@ -318,7 +228,6 @@ tts_zedstore_copy_heap_tuple(TupleTableSlot *slot)
 	return heap_form_tuple(slot->tts_tupleDescriptor,
 						   slot->tts_values,
 						   slot->tts_isnull);
-
 }
 
 static MinimalTuple

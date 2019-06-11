@@ -64,7 +64,8 @@ zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 				   ZSUndoRecPtr recent_oldest_undo,
 				   zstid item_tid, ZSUndoRecPtr item_undoptr,
 				   LockTupleMode mode,
-				   bool *undo_record_needed, TM_FailureData *tmfd, zstid *next_tid)
+				   bool *undo_record_needed, TM_FailureData *tmfd,
+				   zstid *next_tid, ZSUndoSlotVisibility *visi_info)
 {
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
@@ -90,6 +91,12 @@ fetch_undo_record:
 		 */
 		if (chain_depth == 1)
 			*undo_record_needed = false;
+
+		if (visi_info)
+		{
+			visi_info->xmin = FrozenTransactionId;
+			visi_info->cmin = InvalidCommandId;
+		}
 		return TM_Ok;
 	}
 
@@ -98,6 +105,12 @@ fetch_undo_record:
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
+		if (visi_info)
+		{
+			visi_info->xmin = undorec->xid;
+			visi_info->cmin = undorec->cid;
+		}
+
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
 			if (undorec->cid >= snapshot->curcid)
@@ -273,8 +286,46 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesAny
  */
 static bool
-zs_SatisfiesAny(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr)
+zs_SatisfiesAny(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr, ZSUndoSlotVisibility *visi_info)
 {
+	Relation	rel = scan->rel;
+	Snapshot	snapshot = scan->snapshot;
+	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
+	ZSUndoRecPtr undo_ptr;
+	ZSUndoRec  *undorec;
+
+	Assert (snapshot->snapshot_type == SNAPSHOT_ANY);
+
+	undo_ptr = item_undoptr;
+
+fetch_undo_record:
+	/* If this record is "old", then the record is visible. */
+	if (undo_ptr.counter < recent_oldest_undo.counter)
+	{
+		visi_info->xmin = FrozenTransactionId;
+		visi_info->cmin = InvalidCommandId;
+		return true;
+	}
+
+	/* have to fetch the UNDO record */
+	undorec = zsundo_fetch(rel, undo_ptr);
+
+	if (undorec->type == ZSUNDO_TYPE_INSERT)
+	{
+		visi_info->xmin = undorec->xid;
+		visi_info->cmin = undorec->cid;
+		return true;
+	}
+	else if (undorec->type == ZSUNDO_TYPE_DELETE ||
+			 undorec->type == ZSUNDO_TYPE_UPDATE ||
+			 undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
+	{
+			undo_ptr = undorec->prevundorec;
+			goto fetch_undo_record;
+	}
+	else
+		elog(ERROR, "unexpected UNDO record type: %d", undorec->type);
+
 	return true;
 }
 
@@ -312,7 +363,8 @@ xid_is_visible(Snapshot snapshot, TransactionId xid, CommandId cid, bool *aborte
  */
 static bool
 zs_SatisfiesMVCC(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
-				 TransactionId *obsoleting_xid, zstid *next_tid)
+				 TransactionId *obsoleting_xid, zstid *next_tid,
+				 ZSUndoSlotVisibility *visi_info)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -328,7 +380,11 @@ zs_SatisfiesMVCC(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 fetch_undo_record:
 	/* If this record is "old", then the record is visible. */
 	if (undo_ptr.counter < recent_oldest_undo.counter)
+	{
+		visi_info->xmin = FrozenTransactionId;
+		visi_info->cmin = InvalidCommandId;
 		return true;
+	}
 
 	/* have to fetch the UNDO record */
 	undorec = zsundo_fetch(rel, undo_ptr);
@@ -337,10 +393,12 @@ fetch_undo_record:
 	{
 		/* Inserted tuple */
 		bool		result;
-
 		result = xid_is_visible(snapshot, undorec->xid, undorec->cid, &aborted);
 		if (!result && !aborted)
 			*obsoleting_xid = undorec->xid;
+
+		visi_info->xmin = undorec->xid;
+		visi_info->cmin = undorec->cid;
 		return result;
 	}
 	else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
@@ -386,7 +444,8 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesSelf
  */
 static bool
-zs_SatisfiesSelf(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr, zstid *next_tid)
+zs_SatisfiesSelf(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
+				 zstid *next_tid, ZSUndoSlotVisibility *visi_info)
 {
 	Relation	rel = scan->rel;
 	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
@@ -399,13 +458,20 @@ zs_SatisfiesSelf(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr, zstid *next_tid
 
 fetch_undo_record:
 	if (undo_ptr.counter < recent_oldest_undo.counter)
+	{
+		visi_info->xmin = FrozenTransactionId;
+		visi_info->cmin = InvalidCommandId;
 		return true;
+	}
 
 	/* have to fetch the UNDO record */
 	undorec = zsundo_fetch(rel, undo_ptr);
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
+		visi_info->xmin = undorec->xid;
+		visi_info->cmin = undorec->cid;
+
 		/* Inserted tuple */
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 			return true;		/* inserted by me */
@@ -466,7 +532,8 @@ fetch_undo_record:
  * Like HeapTupleSatisfiesDirty
  */
 static bool
-zs_SatisfiesDirty(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr, zstid *next_tid)
+zs_SatisfiesDirty(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
+				  zstid *next_tid, ZSUndoSlotVisibility *visi_info)
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
@@ -483,7 +550,11 @@ zs_SatisfiesDirty(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr, zstid *next_ti
 
 fetch_undo_record:
 	if (undo_ptr.counter < recent_oldest_undo.counter)
+	{
+		visi_info->xmin = FrozenTransactionId;
+		visi_info->cmin = InvalidCommandId;
 		return true;
+	}
 
 	/* have to fetch the UNDO record */
 	undorec = zsundo_fetch(rel, undo_ptr);
@@ -491,14 +562,23 @@ fetch_undo_record:
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
 		ZSUndoRec_Insert *insertrec = (ZSUndoRec_Insert *) undorec;
-
 		snapshot->speculativeToken = insertrec->speculative_token;
+
+		/*
+		 * HACK: For SnapshotDirty need to set the values of xmin/xmax/... in
+		 * snapshot based on tuples. Hence, can't set the visi_info values
+		 * here similar to other snapshots. Only setting the value for
+		 * TransactionIdIsInProgress().
+		 */
+
 		/* Inserted tuple */
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 			return true;		/* inserted by me */
 		else if (TransactionIdIsInProgress(undorec->xid))
 		{
 			snapshot->xmin = undorec->xid;
+			visi_info->xmin = undorec->xid;
+			visi_info->cmin = undorec->cid;
 			return true;
 		}
 		else if (TransactionIdDidCommit(undorec->xid))
@@ -537,7 +617,12 @@ fetch_undo_record:
 
 		if (TransactionIdIsInProgress(undorec->xid))
 		{
+			/*
+			 * TODO: not required to set the snapshot's xmax here? As gets
+			 * populated based on visi_info later in snapshot by caller.
+			 */
 			snapshot->xmax = undorec->xid;
+			visi_info->xmax = undorec->xid;
 			return true;
 		}
 
@@ -563,7 +648,8 @@ fetch_undo_record:
  * surely dead to everyone, ie, vacuumable.
  */
 static bool
-zs_SatisfiesNonVacuumable(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr)
+zs_SatisfiesNonVacuumable(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
+						  ZSUndoSlotVisibility *visi_info)
 {
 	Relation	rel = scan->rel;
 	TransactionId OldestXmin = scan->snapshot->xmin;
@@ -580,13 +666,20 @@ fetch_undo_record:
 
 	/* Is it visible? */
 	if (undo_ptr.counter < recent_oldest_undo.counter)
+	{
+		visi_info->xmin = FrozenTransactionId;
+		visi_info->cmin = InvalidCommandId;
 		return true;
+	}
 
 	/* have to fetch the UNDO record */
 	undorec = zsundo_fetch(rel, undo_ptr);
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
+		visi_info->xmin = undorec->xid;
+		visi_info->cmin = undorec->cid;
+
 		/* Inserted tuple */
 		if (TransactionIdIsInProgress(undorec->xid))
 			return true;		/* inserter has not committed yet */
@@ -613,7 +706,7 @@ fetch_undo_record:
 			 */
 			if (!TransactionIdPrecedes(undorec->xid, OldestXmin))
 			{
-				scan->nonvacuumable_status = ZSNV_RECENTLY_DEAD;
+				visi_info->nonvacuumable_status = ZSNV_RECENTLY_DEAD;
 				return true;
 			}
 
@@ -661,7 +754,8 @@ fetch_undo_record:
  */
 bool
 zs_SatisfiesVisibility(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
-					   TransactionId *obsoleting_xid, zstid *next_tid)
+					   TransactionId *obsoleting_xid, zstid *next_tid,
+					   ZSUndoSlotVisibility *visi_info)
 {
 	ZSUndoRecPtr undo_ptr;
 
@@ -691,27 +785,27 @@ zs_SatisfiesVisibility(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 	switch (scan->snapshot->snapshot_type)
 	{
 		case SNAPSHOT_MVCC:
-			return zs_SatisfiesMVCC(scan, item_undoptr, obsoleting_xid, next_tid);
+			return zs_SatisfiesMVCC(scan, item_undoptr, obsoleting_xid, next_tid, visi_info);
 
 		case SNAPSHOT_SELF:
-			return zs_SatisfiesSelf(scan, item_undoptr, next_tid);
+			return zs_SatisfiesSelf(scan, item_undoptr, next_tid, visi_info);
 
 		case SNAPSHOT_ANY:
-			return zs_SatisfiesAny(scan, item_undoptr);
+			return zs_SatisfiesAny(scan, item_undoptr, visi_info);
 
 		case SNAPSHOT_TOAST:
 			elog(ERROR, "SnapshotToast not implemented in zedstore");
 			break;
 
 		case SNAPSHOT_DIRTY:
-			return zs_SatisfiesDirty(scan, item_undoptr, next_tid);
+			return zs_SatisfiesDirty(scan, item_undoptr, next_tid, visi_info);
 
 		case SNAPSHOT_HISTORIC_MVCC:
 			elog(ERROR, "SnapshotHistoricMVCC not implemented in zedstore yet");
 			break;
 
 		case SNAPSHOT_NON_VACUUMABLE:
-			return zs_SatisfiesNonVacuumable(scan, item_undoptr);
+			return zs_SatisfiesNonVacuumable(scan, item_undoptr, visi_info);
 	}
 
 	return false;				/* keep compiler quiet */

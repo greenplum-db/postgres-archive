@@ -511,6 +511,23 @@ typedef enum
 	ZSNV_RECENTLY_DEAD	/* tuple is dead, but not deletable yet */
 } ZSNV_Result;
 
+typedef struct ZSUndoSlotVisibility
+{
+	TransactionId xmin;
+	TransactionId xmax;
+	CommandId cmin;
+	uint32		speculativeToken;
+	ZSNV_Result nonvacuumable_status;
+} ZSUndoSlotVisibility;
+
+static const ZSUndoSlotVisibility InvalidUndoSlotVisibility = {
+	.xmin = InvalidTransactionId,
+	.xmax = InvalidTransactionId,
+	.cmin = InvalidCommandId,
+	.speculativeToken = INVALID_SPECULATIVE_TOKEN,
+	.nonvacuumable_status = ZSNV_NONE
+};
+
 typedef struct ZSTidItemIterator
 {
 	int			tids_allocated_size;
@@ -521,6 +538,7 @@ typedef struct ZSTidItemIterator
 	MemoryContext context;
 
 	ZSUndoRecPtr  undoslots[ZSBT_MAX_ITEM_UNDO_SLOTS];
+	ZSUndoSlotVisibility undoslot_visibility[ZSBT_MAX_ITEM_UNDO_SLOTS];
 } ZSTidItemIterator;
 
 /*
@@ -558,17 +576,21 @@ typedef struct ZSTidTreeScan
 	 * array tuple.
 	 */
 	ZSTidItemIterator array_iter;
-	/*
-	 * If 'snapshot' is SnapshotDirty, these are filled for each undo slot in the
-	 * iterator, so that they can be returned to the caller of zsbt_tid_scan_next().
-	 */
-	TransactionId undoslot_xmin[ZSBT_MAX_ITEM_UNDO_SLOTS];
-	TransactionId undoslot_xmax[ZSBT_MAX_ITEM_UNDO_SLOTS];
-	uint32		undoslot_speculativeToken[ZSBT_MAX_ITEM_UNDO_SLOTS];
-
-	ZSNV_Result nonvacuumable_status;
-
 } ZSTidTreeScan;
+
+/*
+ * This is convenience function to get the index aka slot number for undo and
+ * visibility array. Important to note this performs "next_idx - 1" means
+ * works after returning from TID scan function when the next_idx has been
+ * incremented.
+ */
+static inline uint8
+ZSTidScanCurUndoSlotNo(ZSTidTreeScan *scan)
+{
+	Assert(scan->array_iter.next_idx > 0);
+	Assert(scan->array_iter.tid_undoslotnos != NULL);
+	return (scan->array_iter.tid_undoslotnos[scan->array_iter.next_idx - 1]);
+}
 
 /*
  * Holds the state of an in-progress scan on a zedstore attribute tree.
@@ -710,8 +732,10 @@ extern void zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_olde
 extern IntegerSet *zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid);
 extern void zsbt_tid_remove(Relation rel, IntegerSet *tids);
 extern TM_Result zsbt_tid_lock(Relation rel, zstid tid,
-			   TransactionId xid, CommandId cid,
-								LockTupleMode lockmode, Snapshot snapshot, TM_FailureData *hufd, zstid *next_tid);
+							   TransactionId xid, CommandId cid,
+							   LockTupleMode lockmode, Snapshot snapshot,
+							   TM_FailureData *hufd, zstid *next_tid,
+							   ZSUndoSlotVisibility *visi_info);
 extern void zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr, ZSUndoRecPtr recent_oldest_undo);
 extern zstid zsbt_get_last_tid(Relation rel);
 extern void zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot);
@@ -825,9 +849,11 @@ extern TM_Result zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 									zstid item_tid, ZSUndoRecPtr item_undoptr,
 									LockTupleMode mode,
 									bool *undo_record_needed,
-									TM_FailureData *tmfd, zstid *next_tid);
+									TM_FailureData *tmfd, zstid *next_tid,
+									ZSUndoSlotVisibility *visi_info);
 extern bool zs_SatisfiesVisibility(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
-								   TransactionId *obsoleting_xid, zstid *next_tid);
+								   TransactionId *obsoleting_xid, zstid *next_tid,
+								   ZSUndoSlotVisibility *visi_info);
 
 /* prototypes for functions in zedstore_toast.c */
 extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid);
@@ -841,5 +867,14 @@ extern void zspage_delete_page(Relation rel, Buffer buf);
 /* prototypes for functions in zedstore_utils.c */
 extern zs_split_stack *zs_new_split_stack_entry(Buffer buf, Page page);
 extern void zs_apply_split_changes(Relation rel, zs_split_stack *stack);
+
+typedef struct ZedstoreTupleTableSlot
+{
+	TupleTableSlot base;
+	TransactionId xmin;
+	CommandId cmin;
+
+	char	   *data;		/* data for materialized slots */
+} ZedstoreTupleTableSlot;
 
 #endif							/* ZEDSTORE_INTERNAL_H */

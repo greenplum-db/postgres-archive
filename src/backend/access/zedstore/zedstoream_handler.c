@@ -505,6 +505,7 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	zstid		next_tid = tid;
 	SnapshotData SnapshotDirty;
 	bool		locked_something = false;
+	ZSUndoSlotVisibility visi_info = InvalidUndoSlotVisibility;
 
 	slot->tts_tableOid = RelationGetRelid(relation);
 	slot->tts_tid = *tid_p;
@@ -516,7 +517,10 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	 */
 retry:
 	result = zsbt_tid_lock(relation, tid, xid, cid,
-						   mode, snapshot, tmfd, &next_tid);
+						   mode, snapshot, tmfd, &next_tid, &visi_info);
+
+	((ZedstoreTupleTableSlot*)slot)->xmin = visi_info.xmin;
+	((ZedstoreTupleTableSlot*)slot)->cmin = visi_info.cmin;
 
 	if (result == TM_Invisible)
 	{
@@ -1275,7 +1279,15 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 		}
 		else
 		{
+			ZSUndoSlotVisibility *visi_info;
+			uint8 slotno;
 			Assert(scan->state == ZSSCAN_STATE_SCANNING);
+
+			slotno = ZSTidScanCurUndoSlotNo(&scan_proj->tid_scan);
+			visi_info = &scan_proj->tid_scan.array_iter.undoslot_visibility[slotno];
+			((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->xmin;
+			((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->cmin;
+
 			slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
 			slot->tts_tid = ItemPointerFromZSTid(this_tid);
 			slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
@@ -1506,6 +1518,12 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 
 	if (found)
 	{
+		ZSUndoSlotVisibility *visi_info;
+		uint8 slotno = ZSTidScanCurUndoSlotNo(&fetch_proj->tid_scan);
+		visi_info = &fetch_proj->tid_scan.array_iter.undoslot_visibility[slotno];
+		((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->xmin;
+		((ZedstoreTupleTableSlot*)slot)->cmin = visi_info->cmin;
+
 		slot->tts_tableOid = RelationGetRelid(rel);
 		slot->tts_tid = ItemPointerFromZSTid(tid);
 		slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
@@ -1687,6 +1705,8 @@ static void
 index_build_getnextslot_callback(ZSTidTreeScan *scan, zstid tid, void *state)
 {
 	bool *tupleIsAlive = (bool*)state;
+	uint8 slotno = ZSTidScanCurUndoSlotNo(scan);
+	ZSUndoSlotVisibility *visi_info = &scan->array_iter.undoslot_visibility[slotno];
 
 	Assert(tid != InvalidZSTid);
 
@@ -1702,14 +1722,14 @@ index_build_getnextslot_callback(ZSTidTreeScan *scan, zstid tid, void *state)
 	 *
 	 * TODO: Heap checks for DELETE_IN_PROGRESS do we need as well?
 	 */
-	if (scan->nonvacuumable_status == ZSNV_RECENTLY_DEAD)
+	if (visi_info->nonvacuumable_status == ZSNV_RECENTLY_DEAD)
 	{
 		Assert(scan->snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE);
 		*tupleIsAlive = false;
 		return;
 	}
 
-	Assert(scan->nonvacuumable_status == ZSNV_NONE);
+	Assert(visi_info->nonvacuumable_status == ZSNV_NONE);
 }
 
 static double
@@ -2359,9 +2379,7 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		if (old_tid != fetchtid)
 			continue;
 
-		old_undoptr = tid_scan.array_iter.undoslots[
-			tid_scan.array_iter.tid_undoslotnos[tid_scan.array_iter.next_idx - 1]
-			];
+		old_undoptr = tid_scan.array_iter.undoslots[ZSTidScanCurUndoSlotNo(&tid_scan)];
 
 		new_tid = zs_cluster_process_tuple(OldHeap, NewHeap,
 										   old_tid, old_undoptr,
