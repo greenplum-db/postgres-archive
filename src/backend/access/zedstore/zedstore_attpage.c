@@ -31,6 +31,7 @@
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "utils/datum.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 
 /* prototypes for local functions */
@@ -647,6 +648,13 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 	bool		decompressing = false;
 	ZSAttributeItem *item;
 	zstid		nexttid;
+	MemoryContext oldcontext;
+	MemoryContext tmpcontext;
+
+	tmpcontext = AllocSetContextCreate(CurrentMemoryContext,
+									   "ZedstoreAMVacuumContext",
+									   ALLOCSET_DEFAULT_SIZES);
+	oldcontext = MemoryContextSwitchTo(tmpcontext);
 
 	attr = &rel->rd_att->attrs[attno - 1];
 
@@ -771,10 +779,11 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 		 * point to decompression buffers, so we cannot free them until after writing out
 		 * the pages.
 		 */
-		list_free(newitems);
-
 		zs_decompress_free(&decompressor);
+		MemoryContextReset(tmpcontext);
 	}
+	MemoryContextSwitchTo(oldcontext);
+	MemoryContextDelete(tmpcontext);
 }
 
 /* ----------------------------------------------------------------

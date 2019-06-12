@@ -32,6 +32,7 @@
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 
 /* prototypes for local functions */
@@ -1073,6 +1074,13 @@ zsbt_tid_remove(Relation rel, IntegerSet *tids)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 	zstid		nexttid;
+	MemoryContext oldcontext;
+	MemoryContext tmpcontext;
+
+	tmpcontext = AllocSetContextCreate(CurrentMemoryContext,
+									   "ZedstoreAMVacuumContext",
+									   ALLOCSET_DEFAULT_SIZES);
+	oldcontext = MemoryContextSwitchTo(tmpcontext);
 
 	intset_begin_iterate(tids);
 	if (!intset_iterate_next(tids, &nexttid))
@@ -1155,10 +1163,12 @@ zsbt_tid_remove(Relation rel, IntegerSet *tids)
 			zs_apply_split_changes(rel, stack);
 		}
 
-		list_free(newitems);
-
 		ReleaseBuffer(buf);
+
+		MemoryContextReset(tmpcontext);
 	}
+	MemoryContextSwitchTo(oldcontext);
+	MemoryContextDelete(tmpcontext);
 }
 
 /*
