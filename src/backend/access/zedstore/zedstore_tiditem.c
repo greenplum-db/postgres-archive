@@ -205,7 +205,7 @@ zsbt_tid_item_add_tids(ZSTidArrayItem *orig, zstid firsttid, int nelements,
 	 * Is there room for a new codeword? Currently, we don't try to add tids to the
 	 * last existing codeword, even if we perhaps could.
 	 */
-	if (orig->t_num_tids >= ZSBT_MAX_ITEM_CODEWORDS)
+	if (orig->t_num_codewords >= ZSBT_MAX_ITEM_CODEWORDS)
 	{
 		*modified_orig = false;
 		return zsbt_tid_item_create_for_range(firsttid, nelements, undo_ptr);
