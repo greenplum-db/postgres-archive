@@ -30,6 +30,19 @@
  *  3.6623829559208134
  * (1 row)
  *
+ * Per column compression ratio and number of pages:
+ *
+ * select attno, count(*), sum(uncompressedsz::numeric) / sum(totalsz) as
+ * compratio from pg_zs_btree_pages('t_zedstore') group by attno order by
+ * attno;
+ *
+ *  attno | count |       compratio        
+ * -------+-------+------------------------
+ *      0 |   395 | 1.00000000000000000000
+ *      1 |    56 |     1.0252948766341260
+ *      2 |     3 |    38.7542309420398383
+ * (3 rows)
+ *
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
