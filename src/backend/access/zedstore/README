@@ -90,7 +90,7 @@ is hopefully just a small fraction of the table. Vacuum on zedstore is
 therefore hopefully much faster than on heap. (Although the freeze map
 can be pretty effective on the heap, too))
 
-So logically, the TID tree item stores the TID and UNDO pointer for every
+So logically, the TID tree stores the TID and UNDO pointer for every
 tuple. However, that would take a lot of space. To reduce disk usage,
 the TID tree consists of ZSTidArrayItems, which contain the TIDs and
 their UNDO pointers in a specially encoded format. The encoded format

@@ -264,13 +264,25 @@ zsbt_attr_item_lasttid(ZSAttributeItem *item)
  *
  * Each item looks like this:
  *
- *  Header  |  0-2 UNDO pointers | 1-16 Codewords
+ *  Header  |  1-16 TID codewords | 0-2 UNDO pointers | UNDO "slotwords"
  *
- * The fixed-sized header contains the start and end of the TID range that
+ * The fixed-size header contains the start and end of the TID range that
  * this item represents, and information on how many UNDO slots and codewords
  * follow in the variable-size part.
  *
- * After the header, are so called "UNDO slots". They represent all the
+ * After the fixed-size header comes the list of TIDs. They are encoded in
+ * Simple-8b codewords. Simple-8b is an encoding scheme to pack multiple
+ * integers in 64-bit codewords. A single codeword can pack e.g. three 20-bit
+ * integers, or 20 3-bit integers, or a number of different combinations.
+ * Therefore, small integers pack more tightly than larger integers. We encode
+ * the difference between each TID, so in the common case that there are few
+ * gaps between the TIDs, we only need a few bits per tuple. The first encoded
+ * integer is always 0, because the first TID is stored explicitly in
+ * t_firsttid. (TODO: storing the first constant 0 is obviously a waste of
+ * space. Also, since there cannot be duplicates, we could store "delta - 1",
+ * which would allow a more tight representation in some cases.)
+ *
+ * After the TID codeword, are so called "UNDO slots". They represent all the
  * distinct UNDO pointers in the group of TIDs that this item covers.
  * Logically, there are 4 slots. Slots 0 and 1 are special, representing
  * all-visible "old" TIDs, and "dead" TIDs. They are not stored in the item
@@ -283,27 +295,9 @@ zsbt_attr_item_lasttid(ZSAttributeItem *item)
  * slots are already in use, the item needs to be split. Hopefully that doesn't
  * happen too often (see assumptions above).
  *
- * After the UNDO slots come the actual TIDs, and their UNDO slot numbers.
- * They are encoded in Simple-8b codewords. Simple-8b is an encoding scheme
- * to pack multiple integers in 64-bit codewords. A single codeword can pack
- * e.g. three 20-bit integers, or 20 3-bit integers, or a number of different
- * combinations. Therefore, small integers pack more tightly than larger
- * integers. The low two bits of each encoded integer store the UNDO slot
- * number, and the higher bits store the difference to the previous TID. For
- * the very first tuple in the item, the difference is always zero, because
- * the first TID is stored explicitly in t_firsttid.
- *
- * (TODO: This means that we never make use of the most compact Simple-8b
- * "modes", because the integers (except for the very first one) are always >=
- * 4, because the difference to the previous TID is always at least one, and
- * the two lowest bits are used for the UNDO slot number. We could pack more
- * tightly if we stored the "diff - 1" instead of "diff" to the previous TID,
- * because then a tuple whose TID is previous TID + 1, would not have any of
- * the the higher bits set.)
- *
- * The size of an item depends on how many UNDO slots are in use, and the
- * number of codewords. The maximum size with the current constants is 184
- * bytes.
+ * After the UNDO slots come "UNDO slotwords". The slotwords contain the slot
+ * number of each tuple in the item. The slot numbers are packed in 64 bit
+ * integers, with 2 bits for each tuple.
  *
  * Representing UNDO pointers as distinct slots also has the advantage that
  * when we're scanning the TID array, we can check the few UNDO pointers in
@@ -312,13 +306,17 @@ zsbt_attr_item_lasttid(ZSAttributeItem *item)
  * considerably speeds up visibility checks when reading. That's one
  * advantage of this special encoding scheme, compared to e.g. using a
  * general-purpose compression algorithm on an array of TIDs and UNDO pointers.
+ *
+ * The physical size of an item depends on how many tuples it covers, the
+ * number of codewords needed to encode the TIDs, and many distinct UNDO
+ * pointers they have.
  */
 typedef struct
 {
 	uint16		t_size;
 	uint16		t_num_tids;
-	uint16		t_num_undo_slots;
 	uint16		t_num_codewords;
+	uint16		t_num_undo_slots;
 
 	zstid		t_firsttid;
 	zstid		t_endtid;
@@ -328,35 +326,59 @@ typedef struct
 
 } ZSTidArrayItem;
 
+/*
+ * We use 2 bits for the UNDO slot number for every tuple. We can therefore
+ * fit 32 slot numbers in each 64-bit "slotword".
+ */
 #define ZSBT_ITEM_UNDO_SLOT_BITS	2
 #define ZSBT_MAX_ITEM_UNDO_SLOTS	(1 << (ZSBT_ITEM_UNDO_SLOT_BITS))
 #define ZSBT_ITEM_UNDO_SLOT_MASK	(ZSBT_MAX_ITEM_UNDO_SLOTS - 1)
+#define ZSBT_SLOTNOS_PER_WORD		(64 / ZSBT_ITEM_UNDO_SLOT_BITS)
 
+/*
+ * To keep the item size and time needed to work with them reasonable,
+ * limit the size of an item to max 16 codewords and 128 TIDs.
+ */
 #define ZSBT_MAX_ITEM_CODEWORDS		16
+#define ZSBT_MAX_ITEM_TIDS			128
 
 #define ZSBT_OLD_UNDO_SLOT			0
 #define ZSBT_DEAD_UNDO_SLOT			1
 #define ZSBT_FIRST_NORMAL_UNDO_SLOT	2
 
+/* Number of UNDO slotwords needed for a given number of tuples */
+#define ZSBT_NUM_SLOTWORDS(num_tids) ((num_tids + ZSBT_SLOTNOS_PER_WORD - 1) / ZSBT_SLOTNOS_PER_WORD)
+
 static inline size_t
-SizeOfZSTidArrayItem(int num_undo_slots, int num_codewords)
+SizeOfZSTidArrayItem(int num_tids, int num_undo_slots, int num_codewords)
 {
-	return offsetof(ZSTidArrayItem, t_payload) +
-		MAXALIGN((num_undo_slots - ZSBT_FIRST_NORMAL_UNDO_SLOT) * sizeof(ZSUndoRecPtr)) +
-		num_codewords * sizeof(uint64);
+	Size		sz;
+
+	sz = offsetof(ZSTidArrayItem, t_payload);
+	sz += num_codewords * sizeof(uint64);
+	sz += (num_undo_slots - ZSBT_FIRST_NORMAL_UNDO_SLOT) * sizeof(ZSUndoRecPtr);
+	sz += ZSBT_NUM_SLOTWORDS(num_tids) * sizeof(uint64);
+
+	return sz;
 }
 
-static inline ZSUndoRecPtr *
-ZSTidArrayItemGetUndoSlots(ZSTidArrayItem *item)
+/*
+ * Get pointers to the TID codewords, UNDO slots, and slotwords from an item.
+ *
+ * Note: this is also used to get the pointers when constructing a new item, so
+ * don't assert here that the data is valid!
+ */
+static inline void
+ZSTidArrayItemDecode(ZSTidArrayItem *item, uint64 **codewords,
+					 ZSUndoRecPtr **slots, uint64 **slotwords)
 {
-	return (ZSUndoRecPtr *) item->t_payload;
-}
+	char		*p = (char *) item->t_payload;
 
-static inline uint64 *
-ZSTidArrayItemGetCodewords(ZSTidArrayItem *item)
-{
-	return (uint64 *) ((char *) item->t_payload +
-					   MAXALIGN((item->t_num_undo_slots - ZSBT_FIRST_NORMAL_UNDO_SLOT) * sizeof(ZSUndoRecPtr)));
+	*codewords = (uint64 *) p;
+	p += item->t_num_codewords * sizeof(uint64);
+	*slots = (ZSUndoRecPtr *) p;
+	p += (item->t_num_undo_slots - ZSBT_FIRST_NORMAL_UNDO_SLOT) * sizeof(ZSUndoRecPtr);
+	*slotwords = (uint64 *) p;
 }
 
 /*
