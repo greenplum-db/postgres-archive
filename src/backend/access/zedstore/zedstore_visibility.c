@@ -78,6 +78,7 @@ zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 fetch_undo_record:
 	chain_depth++;
 
+retry_fetch:
 	/* Is it visible? */
 	if (undo_ptr.counter < recent_oldest_undo.counter)
 	{
@@ -102,6 +103,14 @@ fetch_undo_record:
 
 	/* have to fetch the UNDO record */
 	undorec = zsundo_fetch(rel, undo_ptr);
+	if (!undorec)
+	{
+		recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		if (undo_ptr.counter >= recent_oldest_undo.counter)
+			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
+				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
+		goto retry_fetch;
+	}
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
@@ -290,7 +299,6 @@ zs_SatisfiesAny(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr, ZSUndoSlotVisibi
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
-	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
 
@@ -300,7 +308,7 @@ zs_SatisfiesAny(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr, ZSUndoSlotVisibi
 
 fetch_undo_record:
 	/* If this record is "old", then the record is visible. */
-	if (undo_ptr.counter < recent_oldest_undo.counter)
+	if (undo_ptr.counter < scan->recent_oldest_undo.counter)
 	{
 		visi_info->xmin = FrozenTransactionId;
 		visi_info->cmin = InvalidCommandId;
@@ -309,6 +317,14 @@ fetch_undo_record:
 
 	/* have to fetch the UNDO record */
 	undorec = zsundo_fetch(rel, undo_ptr);
+	if (!undorec)
+	{
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
+			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
+				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
+		goto fetch_undo_record;
+	}
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
@@ -368,7 +384,6 @@ zs_SatisfiesMVCC(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
-	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
 	bool		aborted;
@@ -379,7 +394,7 @@ zs_SatisfiesMVCC(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 
 fetch_undo_record:
 	/* If this record is "old", then the record is visible. */
-	if (undo_ptr.counter < recent_oldest_undo.counter)
+	if (undo_ptr.counter < scan->recent_oldest_undo.counter)
 	{
 		visi_info->xmin = FrozenTransactionId;
 		visi_info->cmin = InvalidCommandId;
@@ -388,6 +403,14 @@ fetch_undo_record:
 
 	/* have to fetch the UNDO record */
 	undorec = zsundo_fetch(rel, undo_ptr);
+	if (!undorec)
+	{
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
+			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
+				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
+		goto fetch_undo_record;
+	}
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
@@ -448,7 +471,6 @@ zs_SatisfiesSelf(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 				 zstid *next_tid, ZSUndoSlotVisibility *visi_info)
 {
 	Relation	rel = scan->rel;
-	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
 	ZSUndoRec  *undorec;
 	ZSUndoRecPtr undo_ptr;
 
@@ -457,7 +479,7 @@ zs_SatisfiesSelf(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 	undo_ptr = item_undoptr;
 
 fetch_undo_record:
-	if (undo_ptr.counter < recent_oldest_undo.counter)
+	if (undo_ptr.counter < scan->recent_oldest_undo.counter)
 	{
 		visi_info->xmin = FrozenTransactionId;
 		visi_info->cmin = InvalidCommandId;
@@ -466,6 +488,14 @@ fetch_undo_record:
 
 	/* have to fetch the UNDO record */
 	undorec = zsundo_fetch(rel, undo_ptr);
+	if (!undorec)
+	{
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
+			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
+				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
+		goto fetch_undo_record;
+	}
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
@@ -537,7 +567,6 @@ zs_SatisfiesDirty(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 {
 	Relation	rel = scan->rel;
 	Snapshot	snapshot = scan->snapshot;
-	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
 
@@ -549,7 +578,7 @@ zs_SatisfiesDirty(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 	undo_ptr = item_undoptr;
 
 fetch_undo_record:
-	if (undo_ptr.counter < recent_oldest_undo.counter)
+	if (undo_ptr.counter < scan->recent_oldest_undo.counter)
 	{
 		visi_info->xmin = FrozenTransactionId;
 		visi_info->cmin = InvalidCommandId;
@@ -558,6 +587,14 @@ fetch_undo_record:
 
 	/* have to fetch the UNDO record */
 	undorec = zsundo_fetch(rel, undo_ptr);
+	if (!undorec)
+	{
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
+			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
+				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
+		goto fetch_undo_record;
+	}
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
@@ -653,7 +690,6 @@ zs_SatisfiesNonVacuumable(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 {
 	Relation	rel = scan->rel;
 	TransactionId OldestXmin = scan->snapshot->xmin;
-	ZSUndoRecPtr recent_oldest_undo = scan->recent_oldest_undo;
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
 
@@ -665,7 +701,7 @@ zs_SatisfiesNonVacuumable(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 fetch_undo_record:
 
 	/* Is it visible? */
-	if (undo_ptr.counter < recent_oldest_undo.counter)
+	if (undo_ptr.counter < scan->recent_oldest_undo.counter)
 	{
 		visi_info->xmin = FrozenTransactionId;
 		visi_info->cmin = InvalidCommandId;
@@ -674,6 +710,14 @@ fetch_undo_record:
 
 	/* have to fetch the UNDO record */
 	undorec = zsundo_fetch(rel, undo_ptr);
+	if (!undorec)
+	{
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
+			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
+				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
+		goto fetch_undo_record;
+	}
 
 	if (undorec->type == ZSUNDO_TYPE_INSERT)
 	{
@@ -721,9 +765,17 @@ fetch_undo_record:
 		do {
 			prevptr = undorec->prevundorec;
 
-			if (prevptr.counter < recent_oldest_undo.counter)
+			if (prevptr.counter < scan->recent_oldest_undo.counter)
 				return true;
 			undorec = zsundo_fetch(rel, prevptr);
+			if (!undorec)
+			{
+				scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+				if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
+					elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
+						 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
+				return true;
+			}
 		} while(undorec->type == ZSUNDO_TYPE_TUPLE_LOCK);
 
 		Assert(undorec->type == ZSUNDO_TYPE_INSERT);

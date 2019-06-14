@@ -60,7 +60,7 @@ static void lazy_cleanup_index(Relation indrel,
 				   ZSVacRelStats *vacrelstats);
 static ZSUndoRecPtr zsundo_trim(Relation rel, TransactionId OldestXmin);
 static void zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumber oldest_undopage, List *unused_pages);
-static ZSUndoRec *zsundo_fetch_lock(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode);
+static ZSUndoRec *zsundo_fetch_lock(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode, bool missing_ok);
 
 /*
  * Insert the given UNDO record to the UNDO log.
@@ -140,6 +140,8 @@ retry_lock_tail:
 		PageInit(newpage, BLCKSZ, sizeof(ZSUndoPageOpaque));
 		newopaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(newpage);
 		newopaque->next = InvalidBlockNumber;
+		newopaque->first_undorecptr = InvalidUndoPtr;
+		newopaque->last_undorecptr = InvalidUndoPtr;
 		newopaque->zs_page_id = ZS_UNDO_PAGE_ID;
 
 		metaopaque->zs_undo_tail = newblk;
@@ -175,7 +177,16 @@ retry_lock_tail:
 	rec->undorecptr = undorecptr;
 	dst = ((char *) tail_pg) + offset;
 	memcpy(dst, rec, rec->size);
+
+	/*
+	 * if this is the first record on the page, initialize the field in
+	 * the page header, too.
+	 */
+	if (((PageHeader) tail_pg)->pd_lower == SizeOfPageHeaderData)
+		tail_opaque->first_undorecptr = undorecptr;
+	tail_opaque->last_undorecptr = undorecptr;
 	((PageHeader) tail_pg)->pd_lower += rec->size;
+
 	MarkBufferDirty(tail_buf);
 	UnlockReleaseBuffer(tail_buf);
 
@@ -186,6 +197,10 @@ retry_lock_tail:
  * Fetch the UNDO record with the given undo-pointer.
  *
  * The returned record is a palloc'd copy.
+ *
+ * If the record could not be found, returns NULL. That can happen if you try
+ * to fetch an UNDO record that has already been discarded. I.e. if undoptr
+ * is smaller than the oldest UNDO pointer stored in the metapage.
  */
 ZSUndoRec *
 zsundo_fetch(Relation rel, ZSUndoRecPtr undoptr)
@@ -194,18 +209,32 @@ zsundo_fetch(Relation rel, ZSUndoRecPtr undoptr)
 	ZSUndoRec  *undorec;
 	Buffer		buf;
 
-	undorec = zsundo_fetch_lock(rel, undoptr, &buf, BUFFER_LOCK_SHARE);
+	undorec = zsundo_fetch_lock(rel, undoptr, &buf, BUFFER_LOCK_SHARE, true);
 
-	undorec_copy = palloc(undorec->size);
-	memcpy(undorec_copy, undorec, undorec->size);
+	if (undorec)
+	{
+		undorec_copy = palloc(undorec->size);
+		memcpy(undorec_copy, undorec, undorec->size);
+	}
+	else
+		undorec_copy = NULL;
 
-	UnlockReleaseBuffer(buf);
+	if (BufferIsValid(buf))
+		UnlockReleaseBuffer(buf);
 
 	return undorec_copy;
 }
 
+/*
+ * Lock page containing the given UNDO record, and return pointer to it
+ * within the buffer.
+ *
+ * If missing_ok is true, it's OK if the UNDO record has been trimmed / discarded away
+ * already. Will return NULL in that case. If missing_ok is false, throws an error if
+ * the record cannot be found.
+ */
 static ZSUndoRec *
-zsundo_fetch_lock(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode)
+zsundo_fetch_lock(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode, bool missing_ok)
 {
 	Buffer		buf;
 	Page		page;
@@ -217,28 +246,61 @@ zsundo_fetch_lock(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmod
 	page = BufferGetPage(buf);
 	pagehdr = (PageHeader) page;
 
+	/*
+	 * FIXME: If the page might've been trimmed away, there's a small chance of deadlock if
+	 * the buffer now holds an unrelated page, and we or someone else is holding a lock on
+	 * it already. We could optimistically try lock the page without blocking first, and
+	 * and update oldest undo pointer from the metapage if that fails. And only if the
+	 * oldest undo pointer indicates that the record should still be there, wait for the lock.
+	 */
 	LockBuffer(buf, lockmode);
 	if (PageIsNew(page))
-		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u; not an UNDO page",
-			 undoptr.counter, undoptr.blkno, undoptr.offset);
+		goto record_missing;
 	opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(page);
 	if (opaque->zs_page_id != ZS_UNDO_PAGE_ID)
-		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u; not an UNDO page",
-			 undoptr.counter, undoptr.blkno, undoptr.offset);
+		goto record_missing;
+
+	/* Check that this page contains the given record */
+	if (undoptr.counter < opaque->first_undorecptr.counter ||
+		undoptr.counter > opaque->last_undorecptr.counter)
+		goto record_missing;
 
 	/* Sanity check that the pointer pointed to a valid place */
 	if (undoptr.offset < SizeOfPageHeaderData ||
 		undoptr.offset + sizeof(ZSUndoRec) > pagehdr->pd_lower)
+	{
+		/*
+		 * this should not happen in the case that the page was recycled for
+		 * other use, so error even if 'missing_ok' is true
+		 */
 		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
 			 undoptr.counter, undoptr.blkno, undoptr.offset);
+	}
 
 	undorec = (ZSUndoRec *) (((char *) page) + undoptr.offset);
 
 	if (memcmp(&undorec->undorecptr, &undoptr, sizeof(ZSUndoRecPtr)) != 0)
-		elog(ERROR, "could not find UNDO record");
+	{
+		/*
+		 * this should not happen in the case that the page was recycled for
+		 * other use, so error even if 'fail_ok' is true
+		 */
+		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
+			 undoptr.counter, undoptr.blkno, undoptr.offset);
+	}
 
 	*buf_p = buf;
 	return undorec;
+
+record_missing:
+	UnlockReleaseBuffer(buf);
+	*buf_p = InvalidBuffer;
+
+	if (missing_ok)
+		return NULL;
+	else
+		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u; not an UNDO page",
+			 undoptr.counter, undoptr.blkno, undoptr.offset);
 }
 
 void
@@ -247,7 +309,7 @@ zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr)
 	ZSUndoRec_Insert *undorec;
 	Buffer		buf;
 
-	undorec = (ZSUndoRec_Insert *) zsundo_fetch_lock(rel, undoptr, &buf, BUFFER_LOCK_EXCLUSIVE);
+	undorec = (ZSUndoRec_Insert *) zsundo_fetch_lock(rel, undoptr, &buf, BUFFER_LOCK_EXCLUSIVE, false);
 
 	if (undorec->rec.type != ZSUNDO_TYPE_INSERT)
 		elog(ERROR, "unexpected undo record type %d on speculatively inserted row",
@@ -804,7 +866,7 @@ zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid t
 		ZSUndoRec_Delete *undorec_p;
 
 		undorec_p = (ZSUndoRec_Delete *) zsundo_fetch_lock(rel, cached_undo_ptr,
-														   &buf, BUFFER_LOCK_EXCLUSIVE);
+														   &buf, BUFFER_LOCK_EXCLUSIVE, false);
 
 		if (undorec_p->rec.type != ZSUNDO_TYPE_DELETE)
 			elog(ERROR, "unexpected undo record type %d, expected DELETE", undorec_p->rec.type);
@@ -872,7 +934,7 @@ zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid, zstid t
 		ZSUndoRec_Insert *undorec_p;
 
 		undorec_p = (ZSUndoRec_Insert *) zsundo_fetch_lock(rel, cached_undo_ptr,
-														   &buf, BUFFER_LOCK_EXCLUSIVE);
+														   &buf, BUFFER_LOCK_EXCLUSIVE, false);
 
 		if (undorec_p->rec.type != ZSUNDO_TYPE_INSERT)
 			elog(ERROR, "unexpected undo record type %d, expected INSERT", undorec_p->rec.type);
