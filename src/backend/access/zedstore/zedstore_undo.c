@@ -272,7 +272,6 @@ void
 zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy,
 			  TransactionId OldestXmin)
 {
-	ZSMetaCacheData *metacache;
 	ZSVacRelStats *vacrelstats;
 	Relation   *Irel;
 	int			nindexes;
@@ -282,12 +281,14 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 	zstid		endtid;
 
 	/* do nothing if the table is completely empty. */
-	metacache = zsmeta_get_cache(rel);
-	if (metacache->cache_rel_is_empty)
+	if (RelationGetTargetBlock(rel) == 0 ||
+		RelationGetTargetBlock(rel) == InvalidBlockNumber)
 	{
-		if (RelationGetNumberOfBlocks(rel) != 0)
-			metacache = zsmeta_populate_cache(rel);
-		else
+		/* don't believe the cached value without checking */
+		BlockNumber nblocks = RelationGetNumberOfBlocks(rel);
+
+		RelationSetTargetBlock(rel, nblocks);
+		if (nblocks == 0)
 			return;
 	}
 
@@ -739,18 +740,17 @@ zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr,
 ZSUndoRecPtr
 zsundo_get_oldest_undo_ptr(Relation rel)
 {
-	ZSMetaCacheData *metacache;
-
 	/* do nothing if the table is completely empty. */
-	metacache = zsmeta_get_cache(rel);
-	if (metacache->cache_rel_is_empty)
+	if (RelationGetTargetBlock(rel) == 0 ||
+		RelationGetTargetBlock(rel) == InvalidBlockNumber)
 	{
-		if (RelationGetNumberOfBlocks(rel) != 0)
-			metacache = zsmeta_populate_cache(rel);
-		else
-		{
+		/* don't believe a cached 0 size without checking */
+		BlockNumber nblocks;
+
+		nblocks = RelationGetNumberOfBlocks(rel);
+		RelationSetTargetBlock(rel, nblocks);
+		if (nblocks == 0)
 			return InvalidUndoPtr;
-		}
 	}
 
 	/*

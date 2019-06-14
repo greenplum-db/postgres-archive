@@ -54,12 +54,6 @@ typedef struct SMgrRelationData
 	BlockNumber smgr_targblock; /* current insertion target block */
 	BlockNumber smgr_fsm_nblocks;	/* last known size of fsm fork */
 	BlockNumber smgr_vm_nblocks;	/* last known size of vm fork */
-	/*
-	 * smgr_amcache is also cleared on cache flush. The AM is free to use
-	 * for whatever. It must point to a single palloc'd chunk, allocated
-	 * in TopMemoryContext.
-	 */
-	void	   *smgr_amcache;
 
 	/* additional public fields may someday exist here */
 

@@ -658,24 +658,24 @@ typedef struct ZSAttrTreeScan
 } ZSAttrTreeScan;
 
 /*
- * We keep a cached copy of the information in the metapage in
- * backend-private  memory. The cache is kept in SmgrRelation->smgr_amcache.
+ * We keep a this cached copy of the information in the metapage in
+ * backend-private memory. In RelationData->rd_amcache.
  *
- * The cache contains the block numbers of the roots of all the
- * tree structures, for quick searches, as well as the rightmost
- * leaf page, for quick insertions to the end.
+ * The cache contains the block numbers of the roots of all the tree
+ * structures, for quick searches, as well as the rightmost leaf page, for
+ * quick insertions to the end.
  *
  * Use zsmeta_get_cache() to get the cached struct.
+ *
+ * This is used together with smgr_targblock. smgr_targblock tracks the
+ * physical size of the relation file. This struct is only considered valid
+ * when smgr_targblock is valid. So in effect, we invalidate this whenever
+ * a smgr invalidation happens. Logically, the lifetime of this is the same
+ * as smgr_targblocks/smgr_fsm_nblocks/smgr_vm_nblocks, but there's no way
+ * to attach an AM-specific struct directly to SmgrRelation.
  */
 typedef struct ZSMetaCacheData
 {
-	/*
-	 * Is the relation completely empty? If this is set, you cannot trust
-	 * that it's still empty; you have to check. But if this is not set, you
-	 * can read the metapage without checking for emptiness.
-	 */
-	bool		cache_rel_is_empty;
-
 	int			cache_nattributes;
 
 	/* For each attribute */
@@ -692,9 +692,9 @@ extern ZSMetaCacheData *zsmeta_populate_cache(Relation rel);
 static inline ZSMetaCacheData *
 zsmeta_get_cache(Relation rel)
 {
-	if (rel->rd_smgr == NULL || rel->rd_smgr->smgr_amcache == NULL)
+	if (rel->rd_amcache == NULL || RelationGetTargetBlock(rel) == InvalidBlockNumber)
 		zsmeta_populate_cache(rel);
-	return (ZSMetaCacheData *) rel->rd_smgr->smgr_amcache;
+	return (ZSMetaCacheData *) rel->rd_amcache;
 }
 
 /*
@@ -704,10 +704,10 @@ zsmeta_get_cache(Relation rel)
 static inline void
 zsmeta_invalidate_cache(Relation rel)
 {
-	if (rel->rd_smgr->smgr_amcache != NULL)
+	if (rel->rd_amcache != NULL)
 	{
-		pfree(rel->rd_smgr->smgr_amcache);
-		rel->rd_smgr->smgr_amcache = NULL;
+		pfree(rel->rd_amcache);
+		rel->rd_amcache = NULL;
 	}
 }
 

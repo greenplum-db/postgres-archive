@@ -33,10 +33,10 @@ zsmeta_populate_cache_from_metapage(Relation rel, Page page)
 	ZSMetaPage *metapg;
 	int			natts;
 
-	if (rel->rd_smgr->smgr_amcache != NULL)
+	if (rel->rd_amcache != NULL)
 	{
-		pfree(rel->rd_smgr->smgr_amcache);
-		rel->rd_smgr->smgr_amcache = NULL;
+		pfree(rel->rd_amcache);
+		rel->rd_amcache = NULL;
 	}
 
 	metapg = (ZSMetaPage *) PageGetContents(page);
@@ -44,9 +44,8 @@ zsmeta_populate_cache_from_metapage(Relation rel, Page page)
 	natts = metapg->nattributes;
 
 	cache =
-		MemoryContextAllocZero(TopMemoryContext,
+		MemoryContextAllocZero(CacheMemoryContext,
 							   offsetof(ZSMetaCacheData, cache_attrs[natts]));
-	cache->cache_rel_is_empty = false;
 	cache->cache_nattributes = natts;
 
 	for (int i = 0; i < natts; i++)
@@ -55,7 +54,7 @@ zsmeta_populate_cache_from_metapage(Relation rel, Page page)
 		cache->cache_attrs[i].rightmost = InvalidBlockNumber;
 	}
 
-	rel->rd_smgr->smgr_amcache = cache;
+	rel->rd_amcache = cache;
 	return cache;
 }
 
@@ -64,23 +63,25 @@ zsmeta_populate_cache(Relation rel)
 {
 	ZSMetaCacheData *cache;
 	Buffer		metabuf;
+	BlockNumber nblocks;
 
 	RelationOpenSmgr(rel);
 
-	if (rel->rd_smgr->smgr_amcache != NULL)
+	if (rel->rd_amcache != NULL)
 	{
-		pfree(rel->rd_smgr->smgr_amcache);
-		rel->rd_smgr->smgr_amcache = NULL;
+		pfree(rel->rd_amcache);
+		rel->rd_amcache = NULL;
 	}
 
-	if (RelationGetNumberOfBlocks(rel) == 0)
+	nblocks = RelationGetNumberOfBlocks(rel);
+	RelationSetTargetBlock(rel, nblocks);
+	if (nblocks == 0)
 	{
 		cache =
-			MemoryContextAllocZero(TopMemoryContext,
+			MemoryContextAllocZero(CacheMemoryContext,
 								   offsetof(ZSMetaCacheData, cache_attrs));
-		cache->cache_rel_is_empty = true;
 		cache->cache_nattributes = 0;
-		rel->rd_smgr->smgr_amcache = cache;
+		rel->rd_amcache = cache;
 	}
 	else
 	{
@@ -138,10 +139,10 @@ zsmeta_expand_metapage_for_new_attributes(Relation rel)
 	}
 	UnlockReleaseBuffer(metabuf);
 
-	if (rel->rd_smgr->smgr_amcache != NULL)
+	if (rel->rd_amcache != NULL)
 	{
-		pfree(rel->rd_smgr->smgr_amcache);
-		rel->rd_smgr->smgr_amcache = NULL;
+		pfree(rel->rd_amcache);
+		rel->rd_amcache = NULL;
 	}
 }
 
@@ -229,9 +230,12 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 
 	metacache = zsmeta_get_cache(rel);
 
-	if (metacache->cache_rel_is_empty)
+	if (RelationGetTargetBlock(rel) == 0 ||
+		RelationGetTargetBlock(rel) == InvalidBlockNumber)
 	{
-		if (RelationGetNumberOfBlocks(rel) != 0)
+		BlockNumber nblocks = RelationGetNumberOfBlocks(rel);
+
+		if (nblocks != 0)
 			metacache = zsmeta_populate_cache(rel);
 		else if (readonly)
 			return InvalidBlockNumber;
@@ -239,10 +243,11 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 		{
 			LockRelationForExtension(rel, ExclusiveLock);
 			/*
-			 * Confirm number of blocks is still 0 after taking lock
+			 * Confirm number of blocks is still 0 after taking lock,
 			 * before initializing a new metapage
 			 */
-			if (RelationGetNumberOfBlocks(rel) == 0)
+			nblocks = RelationGetNumberOfBlocks(rel);
+			if (nblocks == 0)
 				zsmeta_initmetapage(rel);
 			UnlockRelationForExtension(rel, ExclusiveLock);
 			metacache = zsmeta_populate_cache(rel);
