@@ -191,7 +191,7 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 
 		slots_visible[i] = zs_SatisfiesVisibility(scan, undoptr, &obsoleting_xid,
 												  NULL, &scan->array_iter.undoslot_visibility[i]);
-		if (!slots_visible[i] && scan->serializable && TransactionIdIsValid(obsoleting_xid))
+		if (scan->serializable && TransactionIdIsValid(obsoleting_xid))
 			CheckForSerializableConflictOut(scan->rel, obsoleting_xid, scan->snapshot);
 	}
 
