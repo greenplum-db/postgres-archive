@@ -526,9 +526,9 @@ retry:
 	{
 		/*
 		 * This is possible, but only when locking a tuple for ON CONFLICT
-		 * UPDATE.  We return this value here rather than throwing an error in
-		 * order to give that case the opportunity to throw a more specific
-		 * error.
+		 * UPDATE and some other cases handled below.  We return this value
+		 * here rather than throwing an error in order to give that case the
+		 * opportunity to throw a more specific error.
 		 */
 		/*
 		 * This can also happen, if we're locking an UPDATE chain for KEY SHARE mode:
@@ -541,8 +541,24 @@ retry:
 		 */
 		 if (mode == LockTupleKeyShare && locked_something)
 			 return TM_Ok;
-		 else
-			 return TM_Invisible;
+
+		 /*
+		  * This can also happen, if the caller asked for the latest version
+		  * of the tuple and if tuple was inserted by our own transaction, we
+		  * have to check cmin against cid: cmin >= current CID means our
+		  * command cannot see the tuple, so we should ignore it.
+		  */
+		 Assert(visi_info.cmin != InvalidCommandId);
+		 if ((flags & TUPLE_LOCK_FLAG_FIND_LAST_VERSION) != 0 &&
+			 TransactionIdIsCurrentTransactionId(visi_info.xmin) &&
+			 visi_info.cmin >= cid)
+		 {
+			 tmfd->xmax = visi_info.xmin;
+			 tmfd->cmax = visi_info.cmin;
+			 return TM_SelfModified;
+		 }
+
+		 return TM_Invisible;
 	}
 	else if (result == TM_Updated ||
 			 (result == TM_SelfModified && tmfd->cmax == cid))
