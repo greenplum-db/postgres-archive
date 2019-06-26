@@ -1304,7 +1304,7 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 			slotno = ZSTidScanCurUndoSlotNo(&scan_proj->tid_scan);
 			visi_info = &scan_proj->tid_scan.array_iter.undoslot_visibility[slotno];
 			((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->xmin;
-			((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->cmin;
+			((ZedstoreTupleTableSlot*)slot)->cmin = visi_info->cmin;
 
 			slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
 			slot->tts_tid = ItemPointerFromZSTid(this_tid);
