@@ -32,6 +32,7 @@
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
+#include "storage/procarray.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -865,9 +866,8 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 }
 
 TM_Result
-zsbt_tid_lock(Relation rel, zstid tid,
-			  TransactionId xid, CommandId cid,
-			  LockTupleMode mode, Snapshot snapshot,
+zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
+			  LockTupleMode mode, bool follow_updates, Snapshot snapshot,
 			  TM_FailureData *hufd, zstid *next_tid,
 			  ZSUndoSlotVisibility *visi_info)
 {
@@ -898,10 +898,22 @@ zsbt_tid_lock(Relation rel, zstid tid,
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
 								tid, item_undoptr, mode,
 								&keep_old_undo_ptr, hufd, next_tid, visi_info);
+
 	if (result != TM_Ok)
 	{
-		UnlockReleaseBuffer(buf);
-		return result;
+		if (result == TM_Invisible && follow_updates &&
+			TransactionIdIsInProgress(visi_info->xmin))
+		{
+			/*
+			 * need to lock tuple irrespective of its visibility on
+			 * follow_updates.
+			 */
+		}
+		else
+		{
+			UnlockReleaseBuffer(buf);
+			return result;
+		}
 	}
 
 	/* Create UNDO record. */
@@ -930,7 +942,6 @@ zsbt_tid_lock(Relation rel, zstid tid,
 	zsbt_tid_replace_item(rel, buf, off, newitems);
 	list_free_deep(newitems);
 	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
-
 	return TM_Ok;
 }
 

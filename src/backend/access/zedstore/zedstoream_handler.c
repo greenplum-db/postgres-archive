@@ -506,6 +506,7 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	SnapshotData SnapshotDirty;
 	bool		locked_something = false;
 	ZSUndoSlotVisibility visi_info = InvalidUndoSlotVisibility;
+	bool follow_updates = false;
 
 	slot->tts_tableOid = RelationGetRelid(relation);
 	slot->tts_tid = *tid_p;
@@ -516,8 +517,8 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	 * does that, that's enough.
 	 */
 retry:
-	result = zsbt_tid_lock(relation, tid, xid, cid,
-						   mode, snapshot, tmfd, &next_tid, &visi_info);
+	result = zsbt_tid_lock(relation, tid, xid, cid, mode, follow_updates,
+						   snapshot, tmfd, &next_tid, &visi_info);
 
 	((ZedstoreTupleTableSlot*)slot)->xmin = visi_info.xmin;
 	((ZedstoreTupleTableSlot*)slot)->cmin = visi_info.cmin;
@@ -673,6 +674,7 @@ retry:
 	if (mode == LockTupleKeyShare)
 	{
 		/* lock all row versions, if it's a KEY SHARE lock */
+		follow_updates = (flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS) != 0;
 		if (result == TM_Ok && tid != next_tid && next_tid != InvalidZSTid)
 		{
 			tid = next_tid;

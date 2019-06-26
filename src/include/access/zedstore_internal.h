@@ -755,9 +755,9 @@ extern IntegerSet *zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *e
 extern void zsbt_tid_remove(Relation rel, IntegerSet *tids);
 extern TM_Result zsbt_tid_lock(Relation rel, zstid tid,
 							   TransactionId xid, CommandId cid,
-							   LockTupleMode lockmode, Snapshot snapshot,
-							   TM_FailureData *hufd, zstid *next_tid,
-							   ZSUndoSlotVisibility *visi_info);
+							   LockTupleMode lockmode, bool follow_updates,
+							   Snapshot snapshot, TM_FailureData *hufd,
+							   zstid *next_tid, ZSUndoSlotVisibility *visi_info);
 extern void zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr, ZSUndoRecPtr recent_oldest_undo);
 extern zstid zsbt_get_last_tid(Relation rel);
 extern void zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot);
