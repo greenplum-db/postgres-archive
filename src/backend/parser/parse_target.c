@@ -38,7 +38,7 @@ static void markTargetListOrigin(ParseState *pstate, TargetEntry *tle,
 static Node *transformAssignmentIndirection(ParseState *pstate,
 											Node *basenode,
 											const char *targetName,
-											bool targetIsArray,
+											bool targetIsSubscripting,
 											Oid targetTypeId,
 											int32 targetTypMod,
 											Oid targetCollation,
@@ -695,9 +695,9 @@ transformAssignmentIndirection(ParseState *pstate,
 		/*
 		 * Set up a substitution.  We abuse CaseTestExpr for this.  It's safe
 		 * to do so because the only nodes that will be above the CaseTestExpr
-		 * in the finished expression will be FieldStore and ArrayRef nodes.
-		 * (There could be other stuff in the tree, but it will be within
-		 * other child fields of those node types.)
+		 * in the finished expression will be FieldStore and SubscriptingRef
+		 * nodes. (There could be other stuff in the tree, but it will be
+		 * within other child fields of those node types.)
 		 */
 		CaseTestExpr *ctest = makeNode(CaseTestExpr);
 
