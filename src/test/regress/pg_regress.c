@@ -57,14 +57,16 @@ char	   *host_platform = HOST_TUPLE;
 static char *shellprog = SHELLPROG;
 #endif
 
+static char gpdiffprog[MAXPGPATH] = "diff";
+
 /*
  * On Windows we use -w in diff switches to avoid problems with inconsistent
  * newline representation.  The actual result files will generally have
  * Windows-style newlines, but the comparison files might or might not.
  */
 #ifndef WIN32
-const char *basic_diff_opts = "";
-const char *pretty_diff_opts = "-U3";
+const char *basic_diff_opts = "-I GP_IGNORE:";
+const char *pretty_diff_opts = "-I GP_IGNORE: -U3";
 #else
 const char *basic_diff_opts = "-w";
 const char *pretty_diff_opts = "-w -U3";
@@ -94,6 +96,8 @@ static bool port_specified_by_user = false;
 static char *dlpath = PKGLIBDIR;
 static char *user = NULL;
 static _stringlist *extraroles = NULL;
+static char *initfile = NULL;
+static bool  ignore_plans_tuple_order_diff = false;
 static char *config_auth_datadir = NULL;
 
 /* internal variables */
@@ -123,6 +127,9 @@ static void make_directory(const char *dir);
 static void header(const char *fmt,...) pg_attribute_printf(1, 2);
 static void status(const char *fmt,...) pg_attribute_printf(1, 2);
 static void psql_command(const char *database, const char *query,...) pg_attribute_printf(2, 3);
+
+static int
+run_diff(const char *cmd, const char *filename);
 
 /*
  * allow core files if possible.
@@ -1353,11 +1360,14 @@ results_differ(const char *testname, const char *resultsfile, const char *defaul
 	char		diff[MAXPGPATH];
 	char		cmd[MAXPGPATH * 3];
 	char		best_expect_file[MAXPGPATH];
+	char        diff_opts[MAXPGPATH];
+	char        m_pretty_diff_opts[MAXPGPATH];
 	FILE	   *difffile;
 	int			best_line_count;
 	int			i;
 	int			l;
 	const char *platform_expectfile;
+	const char *ignore_plans_opts;
 
 	/*
 	 * We can pass either the resultsfile or the expectfile, they should have
@@ -1378,13 +1388,36 @@ results_differ(const char *testname, const char *resultsfile, const char *defaul
 			strcpy(++p, platform_expectfile);
 	}
 
+	if (ignore_plans_tuple_order_diff)
+		ignore_plans_opts = " -gpd_ignore_plans";
+	else
+		ignore_plans_opts = "";
+
 	/* Name to use for temporary diff file */
 	snprintf(diff, sizeof(diff), "%s.diff", resultsfile);
 
+	/* Add init file arguments if provided via commandline */
+	if (initfile)
+	{
+		snprintf(diff_opts, sizeof(diff_opts),
+				 "%s%s --gpd_init %s", basic_diff_opts, ignore_plans_opts, initfile);
+
+		snprintf(m_pretty_diff_opts, sizeof(m_pretty_diff_opts),
+				 "%s%s --gpd_init %s", pretty_diff_opts, ignore_plans_opts, initfile);
+	}
+	else
+	{
+		snprintf(diff_opts, sizeof(diff_opts),
+				 "%s%s", basic_diff_opts, ignore_plans_opts);
+
+		snprintf(m_pretty_diff_opts, sizeof(m_pretty_diff_opts),
+				 "%s%s", pretty_diff_opts, ignore_plans_opts);
+	}
+
 	/* OK, run the diff */
 	snprintf(cmd, sizeof(cmd),
-			 "diff %s \"%s\" \"%s\" > \"%s\"",
-			 basic_diff_opts, expectfile, resultsfile, diff);
+			 "%s %s \"%s\" \"%s\" > \"%s\"",
+			 gpdiffprog, diff_opts, expectfile, resultsfile, diff);
 
 	/* Is the diff file empty? */
 	if (run_diff(cmd, diff) == 0)
@@ -1416,8 +1449,8 @@ results_differ(const char *testname, const char *resultsfile, const char *defaul
 		}
 
 		snprintf(cmd, sizeof(cmd),
-				 "diff %s \"%s\" \"%s\" > \"%s\"",
-				 basic_diff_opts, alt_expectfile, resultsfile, diff);
+				 "%s %s \"%s\" \"%s\" > \"%s\"",
+				 gpdiffprog, diff_opts, alt_expectfile, resultsfile, diff);
 
 		if (run_diff(cmd, diff) == 0)
 		{
@@ -1444,8 +1477,8 @@ results_differ(const char *testname, const char *resultsfile, const char *defaul
 	if (platform_expectfile)
 	{
 		snprintf(cmd, sizeof(cmd),
-				 "diff %s \"%s\" \"%s\" > \"%s\"",
-				 basic_diff_opts, default_expectfile, resultsfile, diff);
+				 "%s %s \"%s\" \"%s\" > \"%s\"",
+				 gpdiffprog, diff_opts, default_expectfile, resultsfile, diff);
 
 		if (run_diff(cmd, diff) == 0)
 		{
@@ -1478,10 +1511,9 @@ results_differ(const char *testname, const char *resultsfile, const char *defaul
 		fclose(difffile);
 	}
 
-	/* Run diff */
 	snprintf(cmd, sizeof(cmd),
-			 "diff %s \"%s\" \"%s\" >> \"%s\"",
-			 pretty_diff_opts, best_expect_file, resultsfile, difffilename);
+			"%s %s \"%s\" \"%s\" >> \"%s\"",
+			gpdiffprog, m_pretty_diff_opts, best_expect_file, resultsfile, difffilename);
 	run_diff(cmd, difffilename);
 
 	unlink(diff);
@@ -1906,6 +1938,27 @@ run_single_test(const char *test, test_function tfunc)
 }
 
 /*
+ * Find the gpdiff.pl binary.
+ */
+static void
+find_helper_programs(const char *argv0)
+{
+	if (find_other_exec(argv0, "gpdiff.pl", "(PostgreSQL)", gpdiffprog) != 0)
+	{
+		char		full_path[MAXPGPATH];
+
+		if (find_my_exec(argv0, full_path) < 0)
+			strlcpy(full_path, progname, sizeof(full_path));
+
+		fprintf(stderr,
+				_("The program \"gpdiff.pl\" is needed by %s "
+				  "but was not found in the same directory as \"%s\".\n"),
+				progname, full_path);
+		exit(1);
+	}
+}
+
+/*
  * Create the summary-output files (making them empty if already existing)
  */
 static void
@@ -2098,6 +2151,8 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 		{"load-extension", required_argument, NULL, 22},
 		{"config-auth", required_argument, NULL, 24},
 		{"max-concurrent-tests", required_argument, NULL, 25},
+		{"ignore-plans-and-tuple-order-diff", no_argument, NULL, 26},
+		{"ignore-tuple-order-diff", no_argument, NULL, 27},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -2107,6 +2162,7 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 	int			option_index;
 	char		buf[MAXPGPATH * 4];
 	char		buf2[MAXPGPATH * 4];
+	bool ignore_tuple_order_diff = false;
 
 	pg_logging_init(argv[0]);
 	progname = get_progname(argv[0]);
@@ -2217,6 +2273,14 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 			case 25:
 				max_concurrent_tests = atoi(optarg);
 				break;
+			case 26:
+				/* ignore plans means also ignore tuple order differences */
+				ignore_plans_tuple_order_diff = true;
+				ignore_tuple_order_diff = true;
+				break;
+			case 27:
+				ignore_tuple_order_diff = true;
+				break;
 			default:
 				/* getopt_long already emitted a complaint */
 				fprintf(stderr, _("\nTry \"%s -h\" for more information.\n"),
@@ -2260,6 +2324,8 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 	/*
 	 * Initialization
 	 */
+	if (ignore_tuple_order_diff || ignore_plans_tuple_order_diff)
+		find_helper_programs(argv[0]);
 	open_result_files();
 
 	initialize_environment();

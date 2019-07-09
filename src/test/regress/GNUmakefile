@@ -49,12 +49,18 @@ $(top_builddir)/src/port/pg_config_paths.h: | submake-libpgport
 
 install: all installdirs
 	$(INSTALL_PROGRAM) pg_regress$(X) '$(DESTDIR)$(pgxsdir)/$(subdir)/pg_regress$(X)'
+	$(INSTALL_PROGRAM) gpdiff.pl '$(DESTDIR)$(pgxsdir)/$(subdir)/gpdiff.pl'
+	$(INSTALL_PROGRAM) atmsort.pl '$(DESTDIR)$(pgxsdir)/$(subdir)/atmsort.pl'
+	$(INSTALL_PROGRAM) atmsort.pm '$(DESTDIR)$(pgxsdir)/$(subdir)/atmsort.pm'
 
 installdirs:
 	$(MKDIR_P) '$(DESTDIR)$(pgxsdir)/$(subdir)'
 
 uninstall:
 	rm -f '$(DESTDIR)$(pgxsdir)/$(subdir)/pg_regress$(X)'
+	rm -f '$(DESTDIR)$(pgxsdir)/$(subdir)/gpdiff.pl'
+	rm -f '$(DESTDIR)$(pgxsdir)/$(subdir)/atmsort.pl'
+	rm -f '$(DESTDIR)$(pgxsdir)/$(subdir)/atmsort.pm'
 
 
 # Build dynamically-loaded object file for CREATE FUNCTION ... LANGUAGE C.
