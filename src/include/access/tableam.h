@@ -449,8 +449,8 @@ typedef struct TableAmRoutine
 	 *
 	 * Note that only the subset of the relcache filled by
 	 * RelationBuildLocalRelation() can be relied upon and that the relation's
-	 * catalog entries either will either not yet exist (new relation), or
-	 * will still reference the old relfilenode.
+	 * catalog entries will either not yet exist (new relation), or will still
+	 * reference the old relfilenode.
 	 *
 	 * As output *freezeXid, *minmulti must be set to the values appropriate
 	 * for pg_class.{relfrozenxid, relminmxid}. For AMs that don't need those
@@ -606,7 +606,7 @@ typedef struct TableAmRoutine
 	 * See table_relation_estimate_size().
 	 *
 	 * While block oriented, it shouldn't be too hard for an AM that doesn't
-	 * doesn't internally use blocks to convert into a usable representation.
+	 * internally use blocks to convert into a usable representation.
 	 *
 	 * This differs from the relation_size callback by returning size
 	 * estimates (both relation size and tuple count) for planning purposes,
@@ -1008,7 +1008,7 @@ table_index_fetch_set_column_projection(struct IndexFetchTableData *scan,
  *
  * *all_dead, if all_dead is not NULL, will be set to true by
  * table_index_fetch_tuple() iff it is guaranteed that no backend needs to see
- * that tuple. Index AMs can use that do avoid returning that tid in future
+ * that tuple. Index AMs can use that to avoid returning that tid in future
  * searches.
  *
  * The difference between this function and table_fetch_row_version is that
@@ -1055,8 +1055,8 @@ extern bool table_index_fetch_tuple_check(Relation rel,
  * true, false otherwise.
  *
  * See table_index_fetch_tuple's comment about what the difference between
- * these functions is. This function is the correct to use outside of
- * index entry->table tuple lookups.
+ * these functions is. It is correct to use this function outside of index
+ * entry->table tuple lookups.
  */
 static inline bool
 table_tuple_fetch_row_version(Relation rel,
@@ -1767,6 +1767,20 @@ extern BlockNumber table_block_parallelscan_nextpage(Relation rel,
 extern void table_block_parallelscan_startblock_init(Relation rel,
 													 ParallelBlockTableScanDesc pbscan);
 
+
+/* ----------------------------------------------------------------------------
+ * Helper functions to implement relation sizing for block oriented AMs.
+ * ----------------------------------------------------------------------------
+ */
+
+extern uint64 table_block_relation_size(Relation rel, ForkNumber forkNumber);
+extern void table_block_relation_estimate_size(Relation rel,
+											   int32 *attr_widths,
+											   BlockNumber *pages,
+											   double *tuples,
+											   double *allvisfrac,
+											   Size overhead_bytes_per_tuple,
+											   Size usable_bytes_per_page);
 
 /* ----------------------------------------------------------------------------
  * Functions in tableamapi.c

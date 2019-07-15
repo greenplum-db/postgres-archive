@@ -83,6 +83,7 @@
        <literal>~=</literal>
       </entry>
       <entry>
+       <literal>&lt;-&gt;</literal>
       </entry>
      </row>
      <row>
@@ -910,7 +911,7 @@ Datum
 my_fetch(PG_FUNCTION_ARGS)
 {
     GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
-    input_data_type *in = DatumGetP(entry->key);
+    input_data_type *in = DatumGetPointer(entry->key);
     fetched_data_type *fetched_data;
     GISTENTRY  *retval;
 

@@ -414,7 +414,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer origbuf,
 		if (origitemno == newoff && lc)
 		{
 			item = lfirst(lc);
-			lc = lnext(lc);
+			lc = lnext(newitems, lc);
 		}
 		else
 		{

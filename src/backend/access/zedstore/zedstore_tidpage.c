@@ -1480,10 +1480,10 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *ne
 			newitem = (ZSTidArrayItem *) lfirst(lc);
 			if (!PageIndexTupleOverwrite(page, targetoff, (Item) newitem, newitem->t_size))
 				elog(ERROR, "could not replace item in TID tree page at off %d", targetoff);
-			lc = lnext(lc);
+			lc = lnext(newitems, lc);
 
 			off = targetoff + 1;
-			for (; lc != NULL; lc = lnext(lc))
+			for (; lc != NULL; lc = lnext(newitems, lc))
 			{
 				newitem = (ZSTidArrayItem *) lfirst(lc);
 				if (!PageAddItem(page, (Item) newitem, newitem->t_size, off, false, false))

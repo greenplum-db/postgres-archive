@@ -2538,7 +2538,8 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
  * The buffer must be flushed before cleanup.
  */
 static inline void
-CopyMultiInsertBufferCleanup(CopyMultiInsertBuffer *buffer)
+CopyMultiInsertBufferCleanup(CopyMultiInsertInfo *miinfo,
+							 CopyMultiInsertBuffer *buffer)
 {
 	int			i;
 
@@ -2553,6 +2554,9 @@ CopyMultiInsertBufferCleanup(CopyMultiInsertBuffer *buffer)
 	/* Since we only create slots on demand, just drop the non-null ones. */
 	for (i = 0; i < MAX_BUFFERED_TUPLES && buffer->slots[i] != NULL; i++)
 		ExecDropSingleTupleTableSlot(buffer->slots[i]);
+
+	table_finish_bulk_insert(buffer->resultRelInfo->ri_RelationDesc,
+							 miinfo->ti_options);
 
 	pfree(buffer);
 }
@@ -2605,7 +2609,7 @@ CopyMultiInsertInfoFlush(CopyMultiInsertInfo *miinfo, ResultRelInfo *curr_rri)
 			buffer = (CopyMultiInsertBuffer *) linitial(miinfo->multiInsertBuffers);
 		}
 
-		CopyMultiInsertBufferCleanup(buffer);
+		CopyMultiInsertBufferCleanup(miinfo, buffer);
 		miinfo->multiInsertBuffers = list_delete_first(miinfo->multiInsertBuffers);
 	}
 }
@@ -2619,7 +2623,7 @@ CopyMultiInsertInfoCleanup(CopyMultiInsertInfo *miinfo)
 	ListCell   *lc;
 
 	foreach(lc, miinfo->multiInsertBuffers)
-		CopyMultiInsertBufferCleanup(lfirst(lc));
+		CopyMultiInsertBufferCleanup(miinfo, lfirst(lc));
 
 	list_free(miinfo->multiInsertBuffers);
 }
@@ -3341,9 +3345,6 @@ CopyFrom(CopyState cstate)
 	{
 		if (!CopyMultiInsertInfoIsEmpty(&multiInsertInfo))
 			CopyMultiInsertInfoFlush(&multiInsertInfo, NULL);
-
-		/* Tear down the multi-insert buffer data */
-		CopyMultiInsertInfoCleanup(&multiInsertInfo);
 	}
 
 	/* Done, clean up */
@@ -3375,6 +3376,10 @@ CopyFrom(CopyState cstate)
 		target_resultRelInfo->ri_FdwRoutine->EndForeignInsert(estate,
 															  target_resultRelInfo);
 
+	/* Tear down the multi-insert buffer data */
+	if (insertMethod != CIM_SINGLE)
+		CopyMultiInsertInfoCleanup(&multiInsertInfo);
+
 	ExecCloseIndices(target_resultRelInfo);
 
 	/* Close all the partitioned tables, leaf partitions, and their indices */
@@ -3385,8 +3390,6 @@ CopyFrom(CopyState cstate)
 	ExecCleanUpTriggerState(estate);
 
 	FreeExecutorState(estate);
-
-	table_finish_bulk_insert(cstate->rel, ti_options);
 
 	return processed;
 }
