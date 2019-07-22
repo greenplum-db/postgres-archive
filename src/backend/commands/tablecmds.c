@@ -1689,7 +1689,7 @@ ExecuteTruncateGuts(List *explicit_rels, List *relids, List *relids_logged,
 		foreach(cell, rels)
 		{
 			Relation	rel = (Relation) lfirst(cell);
-			List	   *seqlist = getOwnedSequences(RelationGetRelid(rel), 0);
+			List	   *seqlist = getOwnedSequences(RelationGetRelid(rel));
 			ListCell   *seqcell;
 
 			foreach(seqcell, seqlist)
@@ -6635,7 +6635,7 @@ ATExecDropIdentity(Relation rel, const char *colName, bool missing_ok, LOCKMODE 
 	table_close(attrelation, RowExclusiveLock);
 
 	/* drop the internal sequence */
-	seqid = getOwnedSequence(RelationGetRelid(rel), attnum);
+	seqid = getIdentitySequence(RelationGetRelid(rel), attnum, false);
 	deleteDependencyRecordsForClass(RelationRelationId, seqid,
 									RelationRelationId, DEPENDENCY_INTERNAL);
 	CommandCounterIncrement();
@@ -7021,27 +7021,28 @@ ATExecDropColumn(List **wqueue, Relation rel, const char *colName,
 				 errmsg("cannot drop system column \"%s\"",
 						colName)));
 
-	/* Don't drop inherited columns */
+	/*
+	 * Don't drop inherited columns, unless recursing (presumably from a drop
+	 * of the parent column)
+	 */
 	if (targetatt->attinhcount > 0 && !recursing)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
 				 errmsg("cannot drop inherited column \"%s\"",
 						colName)));
 
-	/* Don't drop columns used in the partition key */
+	/*
+	 * Don't drop columns used in the partition key, either.  (If we let this
+	 * go through, the key column's dependencies would cause a cascaded drop
+	 * of the whole table, which is surely not what the user expected.)
+	 */
 	if (has_partition_attrs(rel,
 							bms_make_singleton(attnum - FirstLowInvalidHeapAttributeNumber),
 							&is_expr))
-	{
-		if (!is_expr)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-					 errmsg("cannot drop column named in partition key")));
-		else
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-					 errmsg("cannot drop column referenced in partition key expression")));
-	}
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+				 errmsg("cannot drop column \"%s\" because it is part of the partition key of relation \"%s\"",
+						colName, RelationGetRelationName(rel))));
 
 	ReleaseSysCache(tuple);
 
@@ -7926,7 +7927,6 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 							new_castfunc == old_castfunc &&
 							(!IsPolymorphicType(pfeqop_right) ||
 							 new_fktype == old_fktype));
-
 		}
 
 		pfeqoperators[i] = pfeqop;
@@ -10268,16 +10268,10 @@ ATPrepAlterColumnType(List **wqueue,
 	if (has_partition_attrs(rel,
 							bms_make_singleton(attnum - FirstLowInvalidHeapAttributeNumber),
 							&is_expr))
-	{
-		if (!is_expr)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-					 errmsg("cannot alter type of column named in partition key")));
-		else
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-					 errmsg("cannot alter type of column referenced in partition key expression")));
-	}
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+				 errmsg("cannot alter column \"%s\" because it is part of the partition key of relation \"%s\"",
+						colName, RelationGetRelationName(rel))));
 
 	/* Look up the target type */
 	typenameTypeIdAndMod(NULL, typeName, &targettype, &targettypmod);
@@ -11490,7 +11484,7 @@ TryReuseForeignKey(Oid oldId, Constraint *con)
 
 	/* stash a List of the operator Oids in our Constraint node */
 	for (i = 0; i < numkeys; i++)
-		con->old_conpfeqop = lcons_oid(rawarr[i], con->old_conpfeqop);
+		con->old_conpfeqop = lappend_oid(con->old_conpfeqop, rawarr[i]);
 
 	ReleaseSysCache(tup);
 }
@@ -14493,6 +14487,11 @@ register_on_commit_action(Oid relid, OnCommitAction action)
 	oc->creating_subid = GetCurrentSubTransactionId();
 	oc->deleting_subid = InvalidSubTransactionId;
 
+	/*
+	 * We use lcons() here so that ON COMMIT actions are processed in reverse
+	 * order of registration.  That might not be essential but it seems
+	 * reasonable.
+	 */
 	on_commits = lcons(oc, on_commits);
 
 	MemoryContextSwitchTo(oldcxt);

@@ -58,7 +58,7 @@ static int	check_agg_arguments(ParseState *pstate,
 static bool check_agg_arguments_walker(Node *node,
 									   check_agg_arguments_context *context);
 static void check_ungrouped_columns(Node *node, ParseState *pstate, Query *qry,
-									List *groupClauses, List *groupClauseVars,
+									List *groupClauses, List *groupClauseCommonVars,
 									bool have_non_var_grouping,
 									List **func_grouped_rels);
 static bool check_ungrouped_columns_walker(Node *node,
@@ -1132,7 +1132,7 @@ parseCheckAggregates(ParseState *pstate, Query *qry)
 		if (expr == NULL)
 			continue;			/* probably cannot happen */
 
-		groupClauses = lcons(expr, groupClauses);
+		groupClauses = lappend(groupClauses, expr);
 	}
 
 	/*
@@ -1722,11 +1722,12 @@ expand_groupingset_node(GroupingSet *gs)
 	return result;
 }
 
+/* list_sort comparator to sort sub-lists by length */
 static int
-cmp_list_len_asc(const void *a, const void *b)
+cmp_list_len_asc(const ListCell *a, const ListCell *b)
 {
-	int			la = list_length(*(List *const *) a);
-	int			lb = list_length(*(List *const *) b);
+	int			la = list_length((const List *) lfirst(a));
+	int			lb = list_length((const List *) lfirst(b));
 
 	return (la > lb) ? 1 : (la == lb) ? 0 : -1;
 }
@@ -1797,27 +1798,8 @@ expand_grouping_sets(List *groupingSets, int limit)
 		result = new_result;
 	}
 
-	if (list_length(result) > 1)
-	{
-		int			result_len = list_length(result);
-		List	  **buf = palloc(sizeof(List *) * result_len);
-		List	  **ptr = buf;
-
-		foreach(lc, result)
-		{
-			*ptr++ = lfirst(lc);
-		}
-
-		qsort(buf, result_len, sizeof(List *), cmp_list_len_asc);
-
-		result = NIL;
-		ptr = buf;
-
-		while (result_len-- > 0)
-			result = lappend(result, *ptr++);
-
-		pfree(buf);
-	}
+	/* Now sort the lists by length */
+	list_sort(result, cmp_list_len_asc);
 
 	return result;
 }
