@@ -186,6 +186,11 @@ retry_fetch:
 	else if (undorec->type == ZSUNDO_TYPE_DELETE)
 	{
 		ZSUndoRec_Delete *deleterec = (ZSUndoRec_Delete *) undorec;
+		if (visi_info)
+		{
+			visi_info->xmin = undorec->xid;
+			visi_info->cmin = undorec->cid;
+		}
 
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
@@ -237,6 +242,11 @@ retry_fetch:
 		/* updated-away tuple */
 		ZSUndoRec_Update *updaterec = (ZSUndoRec_Update *) undorec;
 		LockTupleMode old_lockmode;
+		if (visi_info)
+		{
+			visi_info->xmin = undorec->xid;
+			visi_info->cmin = undorec->cid;
+		}
 
 		*next_tid = updaterec->newtid;
 		old_lockmode = updaterec->key_update ? LockTupleExclusive : LockTupleNoKeyExclusive;
