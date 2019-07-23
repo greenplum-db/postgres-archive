@@ -1,7 +1,7 @@
 #!/usr/bin/env perl
 #
-# Portions Copyright (c) 2007, 2008, 2009 GreenPlum.  All rights reserved.
-# Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+# Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+# Portions Copyright (c) 1994, Regents of the University of California
 #
 # Pod::Usage is loaded lazily when needed, if the --help or other such option
 # is actually used. Loading the module takes some time, which adds up when
@@ -68,18 +68,18 @@ atmsort.pl -ignore_plans will reduce this to:
 explain select i from foo where i > 10;
 QUERY PLAN
 ___________
-GP_IGNORE:{
-GP_IGNORE:  'child' => [
-GP_IGNORE:    {
-GP_IGNORE:      'id' => 2,
-GP_IGNORE:      'parent' => 1,
-GP_IGNORE:      'short' => 'Seq Scan on foo'
-GP_IGNORE:    }
-GP_IGNORE:  ],
-GP_IGNORE:  'id' => 1,
-GP_IGNORE:  'short' => 'Gather Motion'
-GP_IGNORE:}
-GP_IGNORE:(4 rows)
+REGRESS_IGNORE:{
+REGRESS_IGNORE:  'child' => [
+REGRESS_IGNORE:    {
+REGRESS_IGNORE:      'id' => 2,
+REGRESS_IGNORE:      'parent' => 1,
+REGRESS_IGNORE:      'short' => 'Seq Scan on foo'
+REGRESS_IGNORE:    }
+REGRESS_IGNORE:  ],
+REGRESS_IGNORE:  'id' => 1,
+REGRESS_IGNORE:  'short' => 'Gather Motion'
+REGRESS_IGNORE:}
+REGRESS_IGNORE:(4 rows)
 
 
 =item B<-init> <file>
@@ -103,9 +103,7 @@ all SELECT statements that do *not* have an ORDER BY, writing the
 result to STDOUT.  This change to the log facilitates diff comparison,
 since unORDERed query output does not have a guaranteed order.  Note
 that for diff to work correctly, statements that do use ORDER BY must
-have a fully-specified order.  The utility gpdiff.pl invokes atmsort
-in order to compare the Greenplum test results against standard
-PostgreSQL.
+have a fully-specified order.
 
 The log content must look something like:
 
@@ -211,7 +209,7 @@ The supported commands are:
 
 =item -- ignore
 
-The ignore directive prefixes the SELECT output with GP_IGNORE.  The
+The ignore directive prefixes the SELECT output with REGRESS_IGNORE.  The
 diff command can use the -I flag to ignore lines with this prefix.
 
 =item -- mvd colnum[, colnum...] -> colnum[, colnum...] [; <additional specs>]
@@ -223,7 +221,7 @@ values determine the col3, col4 result order.
 =item -- start_ignore
 
 Ignore all results until the next "end_ignore" directive.  The
-start_ignore directive prefixes all subsequent output with GP_IGNORE,
+start_ignore directive prefixes all subsequent output with REGRESS_IGNORE,
 and all other formatting directives are ignored as well.  The diff
 command can use the -I flag to ignore lines with this prefix.
 
@@ -281,19 +279,6 @@ query is complex, you may need to tag it with a comment to force the
 explain.  Using this command for non-EXPLAIN statements is
 inadvisable.
 
-=item -- explain_processing_on
-
-Enables the automated processing of the explain output, removing all
-the variable fields using the `explain` perl module
-This is the default.
-
-=item -- explain_processing_off
-
-Do not process the explain output. This might result in test failures
-if the test does not replace the variable values itself.
-An example of a test that uses this is the test that validates the
-format of the explain output.
-
 =back
 
 Note that you can combine the directives for a single query, but each
@@ -308,9 +293,6 @@ strings with embedded newlines or pipe ("|") characters due to
 limitations with the parser in the "tablelizer" function.  Queries
 with these characteristics must have an ORDER BY clause to avoid
 potential erroneous comparison.
-
-Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
-Portions Copyright (c) 1994, Regents of the University of California
 
 =cut
 
@@ -348,7 +330,6 @@ GetOptions(
 lazy_pod2usage(-msg => $glob_id, -exitstatus => 1) if $help;
 lazy_pod2usage(-msg => $glob_id, -exitstatus => 0, -verbose => 2) if $man;
 
-# ENGINF-200: allow multiple init files
 push @{$glob_init}, @init_file;
 
 my %args;

@@ -34,7 +34,6 @@ my $cpref = '';
 my $dpref = '';
 
 my $glob_ignore_plans;
-my $glob_ignore_whitespace;
 my @glob_init;
 
 my $glob_orderwarn;
@@ -47,7 +46,6 @@ sub atmsort_init
 {
     my %args = (
         # defaults
-        IGNORE_HEADERS  => 0,
         IGNORE_PLANS    => 0,
         INIT_FILES      => [],
         ORDER_WARN      => 0,
@@ -58,22 +56,18 @@ sub atmsort_init
     );
 
     $glob_ignore_plans        = 0;
-    $glob_ignore_whitespace   = 0;
     @glob_init                = ();
 
     $glob_orderwarn           = 0;
     $glob_verbose             = 0;
     $glob_fqo                 = {count => 0};
 
-    my $ignore_headers;
     my $ignore_plans;
     my @init_file;
     my $verbose;
     my $orderwarn;
 
     $glob_ignore_plans        = $args{IGNORE_PLANS};
-
-    $glob_ignore_whitespace   = $ignore_headers; # XXX XXX: for now
 
     @glob_init = @{$args{INIT_FILES}};
 
@@ -194,7 +188,7 @@ sub _build_match_subs
 
             if ($glob_verbose && defined $atmsort_outfh)
             {
-                print $atmsort_outfh "GP_IGNORE: Defined $cmt\t$defi->[0]\t$defi->[1]\n"
+                print $atmsort_outfh "REGRESS_IGNORE: Defined $cmt\t$defi->[0]\t$defi->[1]\n"
             }
         }
         else
@@ -230,8 +224,8 @@ sub match_then_subs
             my $subs = &$fn1($ini);
             unless ($subs eq $ini)
             {
-                print $atmsort_outfh "GP_IGNORE: was: $ini";
-                print $atmsort_outfh "GP_IGNORE: matched $ff->[-3]\t$ff->[-2]\t$ff->[-1]\n"
+                print $atmsort_outfh "REGRESS_IGNORE: was: $ini";
+                print $atmsort_outfh "REGRESS_IGNORE: matched $ff->[-3]\t$ff->[-2]\t$ff->[-1]\n"
             }
 
             $ini = &$fn1($ini);
@@ -281,7 +275,7 @@ sub _build_match_ignores
                     [$fn1, $bigdef, $cmt, $defi, "(ignore)"];
             if ($glob_verbose && defined $atmsort_outfh)
             {
-                print $atmsort_outfh "GP_IGNORE: Defined $cmt\t$defi\n"
+                print $atmsort_outfh "REGRESS_IGNORE: Defined $cmt\t$defi\n"
             }
 
         }
@@ -315,7 +309,7 @@ sub match_then_ignore
         {
             if ($glob_verbose)
             {
-                print $atmsort_outfh "GP_IGNORE: matched $ff->[-3]\t$ff->[-2]\t$ff->[-1]\n"
+                print $atmsort_outfh "REGRESS_IGNORE: matched $ff->[-3]\t$ff->[-2]\t$ff->[-1]\n"
             }
             return 1; # matched
         }
@@ -391,7 +385,7 @@ sub format_explain
 
     # Ignore plan content if its between start_ignore and end_ignore blocks
     # or if -ignore_plans is specified.
-    $prefix = "GP_IGNORE:"
+    $prefix = "REGRESS_IGNORE:"
          if (exists($directive->{ignore})) || ($glob_ignore_plans);
 
     my @tmp_lines;
@@ -436,7 +430,7 @@ sub format_query_output
 
     if ($glob_verbose)
     {
-        print $atmsort_outfh "GP_IGNORE: start fqo $fqostate->{count}\n";
+        print $atmsort_outfh "REGRESS_IGNORE: start fqo $fqostate->{count}\n";
     }
 
     # EXPLAIN
@@ -456,12 +450,12 @@ sub format_query_output
        format_explain($outarr, $directive);
        if ($glob_verbose)
        {
-           print $atmsort_outfh "GP_IGNORE: end fqo $fqostate->{count}\n";
+           print $atmsort_outfh "REGRESS_IGNORE: end fqo $fqostate->{count}\n";
        }
        return;
     }
 
-    $prefix = "GP_IGNORE:"
+    $prefix = "REGRESS_IGNORE:"
         if (exists($directive->{ignore}));
 
     if (exists($directive->{sortlines}))
@@ -482,7 +476,7 @@ sub format_query_output
 
             if ($glob_verbose)
             {
-                print $atmsort_outfh "GP_IGNORE: end fqo $fqostate->{count}\n";
+                print $atmsort_outfh "REGRESS_IGNORE: end fqo $fqostate->{count}\n";
             }
 
             return;
@@ -810,7 +804,7 @@ sub format_query_output
 
         if ($glob_verbose)
         {
-            print "GP_IGNORE: end fqo $fqostate->{count}\n";
+            print "REGRESS_IGNORE: end fqo $fqostate->{count}\n";
         }
 
         return;
@@ -820,26 +814,6 @@ sub format_query_output
     if ($has_order)
     {
         my @ggg= @{$outarr};
-
-        if ($glob_ignore_whitespace)
-        {
-           my @ggg2;
-
-           for my $line (@ggg)
-           {
-              # remove all leading, trailing whitespace (changes sorting)
-              # and whitespace around column separators
-              $line =~ s/^(\s+|\s+$)//;
-              $line =~ s/\|\s+/\|/gm;
-              $line =~ s/\s+\|/\|/gm;
-
-              $line .= "\n" # replace linefeed if necessary
-                unless ($line =~ m/\n$/);
-
-              push @ggg2, $line;
-           }
-           @ggg= @ggg2;
-        }
 
         if ($glob_orderwarn)
         {
@@ -871,7 +845,7 @@ sub format_query_output
 
                         if ($ocol_count < $allcol_count)
                         {
-                            print "GP_IGNORE: ORDER_WARNING: OUTPUT ",
+                            print "REGRESS_IGNORE: ORDER_WARNING: OUTPUT ",
                             $allcol_count, " columns, but ORDER BY on ",
                             $ocol_count, " \n";
                         }
@@ -889,25 +863,6 @@ sub format_query_output
     {
         my @ggg= sort @{$outarr};
 
-        if ($glob_ignore_whitespace)
-        {
-           my @ggg2;
-
-           for my $line (@ggg)
-           {
-              # remove all leading, trailing whitespace (changes sorting)
-              # and whitespace around column separators
-              $line =~ s/^(\s+|\s+$)//;
-              $line =~ s/\|\s+/\|/gm;
-              $line =~ s/\s+\|/\|/gm;
-
-              $line .= "\n" # replace linefeed if necessary
-                unless ($line =~ m/\n$/);
-
-              push @ggg2, $line;
-           }
-           @ggg= sort @ggg2;
-        }
         for my $line (@ggg)
         {
             print $atmsort_outfh $bpref, $prefix, $line;
@@ -916,7 +871,7 @@ sub format_query_output
 
     if ($glob_verbose)
     {
-        print "GP_IGNORE: end fqo $fqostate->{count}\n";
+        print "REGRESS_IGNORE: end fqo $fqostate->{count}\n";
     }
 }
 
@@ -939,7 +894,7 @@ sub atmsort_bigloop
     my $big_ignore = 0;
     my %define_match_expression;
 
-    print $atmsort_outfh "GP_IGNORE: formatted by atmsort.pm\n";
+    print $atmsort_outfh "REGRESS_IGNORE: formatted by atmsort.pm\n";
 
   L_bigwhile:
     while (<$infh>) # big while
@@ -968,7 +923,7 @@ sub atmsort_bigloop
 
             unless (2 == scalar(@foo))
             {
-                $ini .= "GP_IGNORE: bad match definition\n";
+                $ini .= "REGRESS_IGNORE: bad match definition\n";
                 undef %define_match_expression;
                 goto L_push_outarr;
             }
@@ -994,12 +949,12 @@ sub atmsort_bigloop
                 my $outi = $stat->[1];
 
                 # print a message showing the error
-                $outi =~ s/^(.*)/GP_IGNORE: ($1)/gm;
+                $outi =~ s/^(.*)/REGRESS_IGNORE: ($1)/gm;
                 $ini .= $outi;
             }
             else
             {
-                $ini .=  "GP_IGNORE: defined new match expression\n";
+                $ini .=  "REGRESS_IGNORE: defined new match expression\n";
             }
 
             undef %define_match_expression;
@@ -1012,7 +967,7 @@ sub atmsort_bigloop
             {
                 $big_ignore--;
             }
-            print $atmsort_outfh "GP_IGNORE:", $ini;
+            print $atmsort_outfh "REGRESS_IGNORE:", $ini;
             next;
         }
 
@@ -1081,7 +1036,7 @@ sub atmsort_bigloop
                 # differ because of session level GUCs.
                 if (exists($directive->{explain}))
                 {
-                    $ini = 'GP_IGNORE:' . $ini;
+                    $ini = 'REGRESS_IGNORE:' . $ini;
                 }
 
                 $end_of_table = 1;
@@ -1121,7 +1076,7 @@ sub atmsort_bigloop
                 }
                 @outarr = ();
 
-                print $atmsort_outfh 'GP_IGNORE:', $ini;
+                print $atmsort_outfh 'REGRESS_IGNORE:', $ini;
                 next;
             }
 

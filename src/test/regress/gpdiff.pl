@@ -1,7 +1,7 @@
 #!/usr/bin/env perl
 #
-# Portions Copyright (c) 2007, 2008, 2009 GreenPlum.  All rights reserved.
-# Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+# Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+# Portions Copyright (c) 1994, Regents of the University of California
 #
 # Pod::Usage is loaded lazily when needed, if the --help or other such option
 # is actually used. Loading the module takes some time, which adds up when
@@ -22,7 +22,7 @@ use atmsort;
 
 =head1 NAME
 
-B<gpdiff.pl> - GreenPlum diff
+B<gpdiff.pl>
 
 =head1 SYNOPSIS
 
@@ -38,7 +38,6 @@ on the standard options.  The following options are specific to gpdiff:
     -man                  full documentation
     -version              print gpdiff version and underlying diff version
     -verbose              print verbose info
-    -gpd_ignore_headers   ignore header lines in query output
     -gpd_ignore_plans     ignore explain plan content in input files
     -gpd_init <file>      load initialization file
 
@@ -62,43 +61,32 @@ on the standard options.  The following options are specific to gpdiff:
 
     Prints verbose information.
 
-=item B<-gpd_ignore_headers>
-
-gpdiff/atmsort expect PostgreSQL "psql-style" output for SELECT
-statements, with a two line header composed of the column names,
-separated by vertical bars (|), and a "separator" line of dashes and
-pluses beneath, followed by the row output.  The psql utility performs
-some formatting to adjust the column widths to match the size of the
-row output.  Setting this parameter causes gpdiff to ignore any
-differences in the column naming and format widths globally.
-
 =item B<-gpd_ignore_plans>
 
 Specify this option to ignore any explain plan diffs between the
 input files. This will completely ignore any plan content in
 the input files thus masking differences in plans between the input files.
 
-=item B<-gpd_init> <file>
+=item B<-init_file> <file>
 
 Specify an initialization file containing a series of directives
 (mainly for match_subs) that get applied to the input files.  To
-specify multiple initialization files, use multiple gpd_init arguments, eg:
+specify multiple initialization files, use multiple init_file arguments, eg:
 
-  -gpd_init file1 -gpd_init file2
+  -init_file file1 -init_file file2
 
 =back
 
 =head1 DESCRIPTION
 
-gpdiff compares files using diff after processing them with atmsort.pm.
-This comparison is designed to ignore certain Greenplum-specific
-informational messages, as well as handle the cases where query output
-order may differ for a multi-segment Greenplum database versus a
-single PostgreSQL instance.  Type "atmsort.pl --man" for more details.
-gpdiff is invoked by pg_regress as part of "make installcheck-world".
-In this case the diff options are something like:
+gpdiff compares files using diff after processing them with
+atmsort.pm.  This comparison is designed to handle the cases where
+query output order may differ or plans maybe differ. Type "atmsort.pl
+--man" for more details.  gpdiff is invoked by pg_regress as part of
+"make installcheck-world".  In this case the diff options are
+something like:
 
- "-w -I NOTICE: -I HINT: -I CONTEXT: -I GP_IGNORE:".
+ "-w -I NOTICE: -I HINT: -I CONTEXT: -I REGRESS_IGNORE:".
 
 Like diff, gpdiff can compare two files, a file and directory, a
 directory and file, and two directories.  However, when gpdiff compares
@@ -109,15 +97,6 @@ comparison of the final two files.
 
 While the exit status is set correctly for most cases,
 STDERR messages from diff are not displayed.
-
-Also, atmsort cannot handle "unsorted" SELECT queries where the output
-has strings with embedded newlines or pipe ("|") characters due to
-limitations with the parser in the "tablelizer" function.  Queries
-with these characteristics must have an ORDER BY clause to avoid
-potential erroneous comparison.
-
-Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
-Portions Copyright (c) 1994, Regents of the University of California
 
 =cut
 
@@ -259,7 +238,6 @@ if (1)
         "help" => sub { lazy_pod2usage(-msg => $pmsg, -exitstatus => 1) },
 		"version|v" => \&print_version ,
         "verbose|Verbose" => \$glob_atmsort_args{VERBOSE},
-        "gpd_ignore_headers|gp_ignore_headers" => \$glob_atmsort_args{IGNORE_HEADERS},
         "gpd_ignore_plans|gp_ignore_plans" => \$glob_atmsort_args{IGNORE_PLANS},
         "gpd_init|gp_init_file=s" => \@{$glob_atmsort_args{INIT_FILES}}
     );

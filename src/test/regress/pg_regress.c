@@ -65,8 +65,8 @@ static char gpdiffprog[MAXPGPATH] = "diff";
  * Windows-style newlines, but the comparison files might or might not.
  */
 #ifndef WIN32
-const char *basic_diff_opts = "-I GP_IGNORE:";
-const char *pretty_diff_opts = "-I GP_IGNORE: -U3";
+const char *basic_diff_opts = "-I REGRESS_IGNORE:";
+const char *pretty_diff_opts = "-I REGRESS_IGNORE: -U3";
 #else
 const char *basic_diff_opts = "-w";
 const char *pretty_diff_opts = "-w -U3";
