@@ -208,7 +208,7 @@ typedef struct TableAmRoutine
 													   int nkeys, struct ScanKeyData *key,
 													   ParallelTableScanDesc parallel_scan,
 													   uint32 flags,
-													   bool *project_column);
+													   Bitmapset *project_column);
 
 	/*
 	 * Release resources and deallocate scan. If TableScanDesc.temp_snap,
@@ -290,7 +290,7 @@ typedef struct TableAmRoutine
 	 * scanning.
 	 */
 	void (*index_fetch_set_column_projection) (struct IndexFetchTableData *data,
-											   bool *project_column);
+											   Bitmapset *project_column);
 
 	/*
 	 * Fetch tuple at `tid` into `slot`, after doing a visibility test
@@ -795,7 +795,7 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 static inline TableScanDesc
 table_beginscan_with_column_projection(Relation relation, Snapshot snapshot,
 									   int nkeys, struct ScanKeyData *key,
-									   bool *project_column)
+									   Bitmapset *project_column)
 {
 	uint32		flags = SO_TYPE_SEQSCAN |
 		SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
@@ -991,7 +991,7 @@ table_index_fetch_end(struct IndexFetchTableData *scan)
 
 static inline void
 table_index_fetch_set_column_projection(struct IndexFetchTableData *scan,
-										 bool *project_column)
+										Bitmapset *project_column)
 {
 	scan->rel->rd_tableam->index_fetch_set_column_projection(scan, project_column);
 }

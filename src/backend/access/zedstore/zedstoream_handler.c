@@ -55,7 +55,7 @@ typedef enum
 typedef struct ZedStoreProjectData
 {
 	int			num_proj_atts;
-	bool       *project_columns;
+	Bitmapset   *project_columns;
 	int		   *proj_atts;
 	ZSTidTreeScan tid_scan;
 	ZSAttrTreeScan *attr_scans;
@@ -971,7 +971,8 @@ zs_initialize_proj_attributes(TupleDesc tupledesc, ZedStoreProjectData *proj_dat
 			continue;
 
 		/* project_columns empty also conveys need all the columns */
-		if (proj_data->project_columns == NULL || proj_data->project_columns[idx])
+		if (proj_data->project_columns == NULL ||
+			bms_is_member(att_no, proj_data->project_columns))
 			proj_data->proj_atts[proj_data->num_proj_atts++] = att_no;
 	}
 
@@ -1015,7 +1016,7 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 											int nkeys, ScanKey key,
 											ParallelTableScanDesc parallel_scan,
 											uint32 flags,
-											bool *project_columns)
+											Bitmapset *project_columns)
 {
 	ZedStoreDesc scan;
 
@@ -1396,7 +1397,7 @@ zedstoream_begin_index_fetch(Relation rel)
 
 static void
 zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
-									   bool *project_columns)
+									   Bitmapset *project_columns)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
 	zscan->proj_data.project_columns = project_columns;
@@ -1565,11 +1566,11 @@ zedstoream_index_validate_scan(Relation baseRelation,
 	TupleTableSlot *slot;
 	EState	   *estate;
 	ExprContext *econtext;
-	bool	   *proj;
 	int			attno;
 	TableScanDesc scan;
 	ItemPointerData idx_ptr;
 	bool		tuplesort_empty = false;
+	Bitmapset   *proj = NULL;
 
 	/*
 	 * sanity checks
@@ -1600,18 +1601,17 @@ zedstoream_index_validate_scan(Relation baseRelation,
 	/*
 	 * TODO: It would be very good to fetch only the columns we need.
 	 */
-	proj = palloc0(baseRelation->rd_att->natts * sizeof(bool));
 	for (attno = 0; attno < indexInfo->ii_NumIndexKeyAttrs; attno++)
 	{
 		Assert(indexInfo->ii_IndexAttrNumbers[attno] <= baseRelation->rd_att->natts);
-		/* skip expressions */
-		if (indexInfo->ii_IndexAttrNumbers[attno] > 0)
-			proj[indexInfo->ii_IndexAttrNumbers[attno] - 1] = true;
+		proj = bms_add_member(proj, indexInfo->ii_IndexAttrNumbers[attno]);
 	}
-	GetNeededColumnsForNode((Node *)indexInfo->ii_Predicate, proj,
-							baseRelation->rd_att->natts);
-	GetNeededColumnsForNode((Node *)indexInfo->ii_Expressions, proj,
-							baseRelation->rd_att->natts);
+	PopulateNeededColumnsForNode((Node *)indexInfo->ii_Predicate,
+								 baseRelation->rd_att->natts,
+								 &proj);
+	PopulateNeededColumnsForNode((Node *)indexInfo->ii_Expressions,
+								 baseRelation->rd_att->natts,
+								 &proj);
 
 	scan = table_beginscan_with_column_projection(baseRelation,	/* relation */
 												  snapshot,	/* snapshot */
@@ -1823,8 +1823,8 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 
 	if (!scan)
 	{
-		bool	   *proj;
 		int			attno;
+		Bitmapset  *proj = NULL;
 
 		/*
 		 * Serial index build.
@@ -1844,19 +1844,17 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 			snapshot = &NonVacuumableSnapshot;
 		}
 
-		proj = palloc0(baseRelation->rd_att->natts * sizeof(bool));
 		for (attno = 0; attno < indexInfo->ii_NumIndexKeyAttrs; attno++)
 		{
 			Assert(indexInfo->ii_IndexAttrNumbers[attno] <= baseRelation->rd_att->natts);
-			/* skip expressions */
-			if (indexInfo->ii_IndexAttrNumbers[attno] > 0)
-				proj[indexInfo->ii_IndexAttrNumbers[attno] - 1] = true;
+			proj = bms_add_member(proj, indexInfo->ii_IndexAttrNumbers[attno]);
 		}
-
-		GetNeededColumnsForNode((Node *)indexInfo->ii_Predicate, proj,
-								baseRelation->rd_att->natts);
-		GetNeededColumnsForNode((Node *)indexInfo->ii_Expressions, proj,
-								baseRelation->rd_att->natts);
+		PopulateNeededColumnsForNode((Node *)indexInfo->ii_Predicate,
+									 baseRelation->rd_att->natts,
+									 &proj);
+		PopulateNeededColumnsForNode((Node *)indexInfo->ii_Expressions,
+									 baseRelation->rd_att->natts,
+									 &proj);
 
 		scan = table_beginscan_with_column_projection(baseRelation,	/* relation */
 													  snapshot,	/* snapshot */

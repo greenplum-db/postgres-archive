@@ -71,8 +71,8 @@ SeqNext(SeqScanState *node)
 		 */
 		if (table_scans_leverage_column_projection(node->ss.ss_currentRelation))
 		{
-			bool *proj;
-			proj = GetNeededColumnsForScan(&node->ss, node->ss.ss_currentRelation->rd_att->natts);
+			Bitmapset *proj = PopulateNeededColumnsForScan(&node->ss,
+														   node->ss.ss_currentRelation->rd_att->natts);
 			scandesc = table_beginscan_with_column_projection(node->ss.ss_currentRelation,
 															  estate->es_snapshot,
 															  0, NULL, proj);

@@ -304,7 +304,7 @@ ExecScanReScan(ScanState *node)
 
 typedef struct neededColumnContext
 {
-	bool *mask;
+	Bitmapset **mask;
 	int n;
 } neededColumnContext;
 
@@ -318,17 +318,18 @@ neededColumnContextWalker(Node *node, neededColumnContext *c)
 	{
 		Var *var = (Var *)node;
 
-		if (var->varattno > 0)
+		if (var->varattno >= 0)
 		{
 			Assert(var->varattno <= c->n);
-			c->mask[var->varattno - 1] = true;
+			*(c->mask) = bms_add_member(*(c->mask), var->varattno);
 		}
+
 		/*
-		 * If all attributes are included,
-		 * set all entries in mask to true.
+		 * varattno zero flags whole row variable, so set bits for all the
+		 * columns.
 		 */
-		else if (var->varattno == 0)
-			memset(c->mask, true, c->n);
+		if (var->varattno == 0)
+			bms_add_range(*(c->mask), 1, c->n);
 
 		return false;
 	}
@@ -340,53 +341,32 @@ neededColumnContextWalker(Node *node, neededColumnContext *c)
  * it for bounds-checking in the walker above.
  */
 void
-GetNeededColumnsForNode(Node *expr, bool *mask, int n)
+PopulateNeededColumnsForNode(Node *expr, int n, Bitmapset **scanCols)
 {
 	neededColumnContext c;
 
-	c.mask = mask;
+	c.mask = scanCols;
 	c.n = n;
 
 	neededColumnContextWalker(expr, &c);
 }
 
-bool *
-GetNeededColumnsForScan(ScanState *scanstate, int ncol)
+Bitmapset *
+PopulateNeededColumnsForScan(ScanState *scanstate, int ncol)
 {
+	Bitmapset *result = NULL;
 	Plan	   *plan = scanstate->ps.plan;
-	bool	   *proj;
-	int			i;
 
-	proj = palloc0(ncol * sizeof(bool));
-	GetNeededColumnsForNode((Node *) plan->targetlist, proj, ncol);
-	GetNeededColumnsForNode((Node *) plan->qual, proj, ncol);
+	PopulateNeededColumnsForNode((Node *) plan->targetlist, ncol, &result);
+	PopulateNeededColumnsForNode((Node *) plan->qual, ncol, &result);
 
-	/*
-	 * Some node types have more fields with expressions. FIXME: This list
-	 * surely very incomplete. Should teach the planner to do this for us.
-	 */
 	if (IsA(plan, IndexScan))
 	{
-		GetNeededColumnsForNode((Node *) ((IndexScan *) plan)->indexqualorig, proj, ncol);
-		GetNeededColumnsForNode((Node *) ((IndexScan *) plan)->indexorderbyorig, proj, ncol);
+		PopulateNeededColumnsForNode((Node *) ((IndexScan *) plan)->indexqualorig, ncol, &result);
+		PopulateNeededColumnsForNode((Node *) ((IndexScan *) plan)->indexorderbyorig, ncol, &result);
 	}
 	else if (IsA(plan, BitmapHeapScan))
-	{
-		GetNeededColumnsForNode((Node *) ((BitmapHeapScan *) plan)->bitmapqualorig, proj, ncol);
-	}
+		PopulateNeededColumnsForNode((Node *) ((BitmapHeapScan *) plan)->bitmapqualorig, ncol, &result);
 
-	for (i = 0; i < ncol; i++)
-	{
-		if (proj[i])
-			break;
-	}
-
-	/*
-	 * In some cases (for example, count(*)), no columns are specified.
-	 * We always scan the first column.
-	 */
-	if (i == ncol && ncol > 0)
-		proj[0] = true;
-
-	return proj;
+	return result;
 }

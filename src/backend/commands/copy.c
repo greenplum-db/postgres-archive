@@ -2115,17 +2115,16 @@ CopyTo(CopyState cstate)
 	{
 		TupleTableSlot *slot;
 		TableScanDesc scandesc;
-		bool *proj = NULL;
+		Bitmapset *proj = NULL;
 
 		slot = table_slot_create(cstate->rel, NULL);
 		if (table_scans_leverage_column_projection(cstate->rel))
 		{
-			proj = palloc0(slot->tts_tupleDescriptor->natts * sizeof(bool));
 			foreach(cur, cstate->attnumlist)
 			{
 				int attnum = lfirst_int(cur);
 				Assert(attnum <= slot->tts_tupleDescriptor->natts);
-				proj[attnum-1] = true;
+				proj = bms_add_member(proj, attnum);
 			}
 
 			scandesc = table_beginscan_with_column_projection(cstate->rel,

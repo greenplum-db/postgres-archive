@@ -9614,7 +9614,6 @@ validateCheckConstraint(Relation rel, HeapTuple constrtup)
 	Form_pg_constraint constrForm;
 	bool		isnull;
 	Snapshot	snapshot;
-	bool *proj = NULL;
 
 	/*
 	 * VALIDATE CONSTRAINT is a no-op for foreign tables and partitioned
@@ -9649,8 +9648,8 @@ validateCheckConstraint(Relation rel, HeapTuple constrtup)
 	snapshot = RegisterSnapshot(GetLatestSnapshot());
 	if (table_scans_leverage_column_projection(rel))
 	{
-		proj = palloc0(slot->tts_tupleDescriptor->natts * sizeof(bool));
-		GetNeededColumnsForNode((Node*)exprstate->expr, proj, slot->tts_tupleDescriptor->natts);
+		Bitmapset *proj = NULL;
+		PopulateNeededColumnsForNode((Node*)exprstate->expr, slot->tts_tupleDescriptor->natts, &proj);
 		scan = table_beginscan_with_column_projection(rel, snapshot, 0, NULL, proj);
 	}
 	else
@@ -9681,8 +9680,6 @@ validateCheckConstraint(Relation rel, HeapTuple constrtup)
 	UnregisterSnapshot(snapshot);
 	ExecDropSingleTupleTableSlot(slot);
 	FreeExecutorState(estate);
-	if (proj)
-		pfree(proj);
 }
 
 /*

@@ -117,8 +117,8 @@ IndexNext(IndexScanState *node)
 
 		if (table_scans_leverage_column_projection(node->ss.ss_currentRelation))
 		{
-			bool *proj;
-			proj = GetNeededColumnsForScan(&node->ss, node->ss.ss_currentRelation->rd_att->natts);
+			Bitmapset *proj = NULL;
+			proj = PopulateNeededColumnsForScan(&node->ss, node->ss.ss_currentRelation->rd_att->natts);
 			table_index_fetch_set_column_projection(scandesc->xs_heapfetch, proj);
 		}
 

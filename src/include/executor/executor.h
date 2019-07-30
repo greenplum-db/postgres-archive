@@ -596,6 +596,9 @@ extern void CheckCmdReplicaIdentity(Relation rel, CmdType cmd);
 
 extern void CheckSubscriptionRelkind(char relkind, const char *nspname,
 									 const char *relname);
-extern void GetNeededColumnsForNode(Node *expr, bool *mask, int n);
-extern bool *GetNeededColumnsForScan(ScanState *scanstate, int ncol);
+extern void
+PopulateNeededColumnsForNode(Node *expr, int n, Bitmapset **scanCols);
+extern Bitmapset *
+PopulateNeededColumnsForScan(ScanState *scanstate, int ncol);
+
 #endif							/* EXECUTOR_H  */
