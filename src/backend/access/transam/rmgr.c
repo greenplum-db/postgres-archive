@@ -20,6 +20,7 @@
 #include "access/spgxlog.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
+#include "access/zedstore_wal.h"
 #include "catalog/storage_xlog.h"
 #include "commands/dbcommands_xlog.h"
 #include "commands/sequence.h"

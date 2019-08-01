@@ -203,10 +203,14 @@ zsmeta_initmetapage(Relation rel)
 	if (BufferGetBlockNumber(buf) != ZS_META_BLK)
 		elog(ERROR, "index is not empty");
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+	START_CRIT_SECTION();
 	PageRestoreTempPage(page, BufferGetPage(buf));
 
 	MarkBufferDirty(buf);
 	/* TODO: WAL-log */
+
+	END_CRIT_SECTION();
 
 	UnlockReleaseBuffer(buf);
 }
