@@ -861,6 +861,7 @@ extern PGDLLIMPORT const TupleTableSlotOps TTSOpsZedstore;
 
 /* prototypes for functions in zedstore_meta.c */
 extern void zsmeta_initmetapage(Relation rel);
+extern void zsmeta_initmetapage_redo(XLogReaderState *record);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
 extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
 extern void zsmeta_add_root_for_new_attributes(Relation rel, Page page);

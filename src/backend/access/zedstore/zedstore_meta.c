@@ -19,7 +19,9 @@
 #include "postgres.h"
 
 #include "access/itup.h"
+#include "access/xlogutils.h"
 #include "access/zedstore_internal.h"
+#include "access/zedstore_wal.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
@@ -146,14 +148,9 @@ zsmeta_expand_metapage_for_new_attributes(Relation rel)
 	}
 }
 
-/*
- * Initialize the metapage for an empty relation.
- */
-void
-zsmeta_initmetapage(Relation rel)
+static Page
+zsmeta_initmetapage_internal(int natts)
 {
-	int			natts = RelationGetNumberOfAttributes(rel) + 1;
-	Buffer		buf;
 	Page		page;
 	ZSMetaPageOpaque *opaque;
 	ZSMetaPage *metapg;
@@ -197,11 +194,24 @@ zsmeta_initmetapage(Relation rel)
 		metapg->tree_root_dir[i].root = InvalidBlockNumber;
 
 	((PageHeader) page)->pd_lower = new_pd_lower;
+	return page;
+}
+
+/*
+ * Initialize the metapage for an empty relation.
+ */
+void
+zsmeta_initmetapage(Relation rel)
+{
+	Buffer		buf;
+	Page		page;
+	int			natts = RelationGetNumberOfAttributes(rel) + 1;
 
 	/* Ok, write it out to disk */
 	buf = ReadBuffer(rel, P_NEW);
 	if (BufferGetBlockNumber(buf) != ZS_META_BLK)
 		elog(ERROR, "index is not empty");
+	page = zsmeta_initmetapage_internal(natts);
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
 	START_CRIT_SECTION();
@@ -209,9 +219,43 @@ zsmeta_initmetapage(Relation rel)
 
 	MarkBufferDirty(buf);
 	/* TODO: WAL-log */
+	{
+		wal_zedstore_init_metapage init_rec;
+		XLogRecPtr recptr;
+		init_rec.blocknum = BufferGetBlockNumber(buf);
+		init_rec.natts = natts;
+		XLogBeginInsert();
+		XLogRegisterBuffer(BufferGetBlockNumber(buf), buf, REGBUF_WILL_INIT);
+		XLogRegisterData((char *) &init_rec, SizeofZSWalInitMetapage);
+
+		recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_INIT_METAPAGE);
+
+		PageSetLSN(BufferGetPage(buf), recptr);
+	}
 
 	END_CRIT_SECTION();
 
+	UnlockReleaseBuffer(buf);
+}
+
+void
+zsmeta_initmetapage_redo(XLogReaderState *record)
+{
+	Buffer		buf;
+	Page		page;
+	XLogRecPtr	lsn = record->EndRecPtr;
+	wal_zedstore_init_metapage *walrec = (wal_zedstore_init_metapage *) XLogRecGetData(record);
+	int			natts = walrec->natts;
+
+	page = zsmeta_initmetapage_internal(natts);
+
+	buf = XLogInitBufferForRedo(record, walrec->blocknum);
+	Assert(BufferGetBlockNumber(buf) == ZS_META_BLK);
+
+	PageRestoreTempPage(page, BufferGetPage(buf));
+
+	MarkBufferDirty(buf);
+	PageSetLSN(BufferGetPage(buf), lsn);
 	UnlockReleaseBuffer(buf);
 }
 

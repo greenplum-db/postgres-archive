@@ -13,10 +13,15 @@
  */
 #include "postgres.h"
 #include "access/xlogreader.h"
+#include "access/zedstore_internal.h"
 #include "access/zedstore_wal.h"
 #include "lib/stringinfo.h"
 
+
 void zedstore_redo(XLogReaderState *record)
 {
+	uint8		info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
+	if (info == WAL_ZEDSTORE_INIT_METAPAGE)
+		zsmeta_initmetapage_redo(record);
 
 }

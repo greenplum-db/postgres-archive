@@ -14,10 +14,26 @@
 
 void zedstore_desc(StringInfo buf, XLogReaderState *record)
 {
+	char	   *rec = XLogRecGetData(record);
+	uint8		info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
+
+	if (info == WAL_ZEDSTORE_INIT_METAPAGE)
+	{
+		wal_zedstore_init_metapage *walrec = (wal_zedstore_init_metapage *) rec;
+		appendStringInfo(buf, "natts %i", walrec->natts);
+	}
 
 }
 
 const char *zedstore_identify(uint8 info)
 {
-  return NULL;
+	const char *id = NULL;
+
+	switch (info & ~XLR_INFO_MASK)
+	{
+		case WAL_ZEDSTORE_INIT_METAPAGE:
+			id = "INITMETAPAGE";
+			break;
+	}
+	return id;
 }
