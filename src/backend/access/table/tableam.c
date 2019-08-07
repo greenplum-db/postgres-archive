@@ -158,7 +158,7 @@ table_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan,
 }
 
 TableScanDesc
-table_beginscan_parallel(Relation relation, ParallelTableScanDesc parallel_scan)
+table_beginscan_parallel(Relation relation, ParallelTableScanDesc parallel_scan, Bitmapset *proj)
 {
 	Snapshot	snapshot;
 	uint32		flags = SO_TYPE_SEQSCAN |
@@ -180,6 +180,9 @@ table_beginscan_parallel(Relation relation, ParallelTableScanDesc parallel_scan)
 		snapshot = SnapshotAny;
 	}
 
+	if (proj)
+		return relation->rd_tableam->scan_begin_with_column_projection(relation, snapshot, 0, NULL,
+											parallel_scan, flags, proj);
 	return relation->rd_tableam->scan_begin(relation, snapshot, 0, NULL,
 											parallel_scan, flags);
 }

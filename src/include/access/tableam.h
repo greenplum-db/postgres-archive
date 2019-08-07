@@ -939,7 +939,8 @@ extern void table_parallelscan_initialize(Relation rel,
  * Caller must hold a suitable lock on the relation.
  */
 extern TableScanDesc table_beginscan_parallel(Relation rel,
-											  ParallelTableScanDesc pscan);
+											  ParallelTableScanDesc pscan,
+											  Bitmapset *proj);
 
 /*
  * Restart a parallel scan.  Call this in the leader process.  Caller is
