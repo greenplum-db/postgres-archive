@@ -18,6 +18,33 @@
 #include "access/zedstore_simple8b.h"
 
 /*
+ * Decode an array of Simple-8b codewords, known to contain 'num_integers'
+ * integers.
+ */
+void
+simple8b_decode_words(uint64 *codewords, int num_codewords,
+					  uint64 *dst, int num_integers)
+{
+	int			total_decoded = 0;
+
+	/* decode all the codewords */
+	for (int i = 0; i < num_codewords; i++)
+	{
+		int			num_decoded;
+
+		num_decoded = simple8b_decode(codewords[i], &dst[total_decoded]);
+		total_decoded += num_decoded;
+	}
+	/*
+	 * XXX: This error message is a bit specific, but it matches how this
+	 * function is actually used, i.e. to encode TIDs, and the number of integers
+	 * comes from the item header.
+	 */
+	if (total_decoded != num_integers)
+		elog(ERROR, "number of TIDs in codewords did not match the item header");
+}
+
+/*
  * Simple-8b encoding.
  *
  * The simple-8b algorithm packs between 1 and 240 integers into 64-bit words,

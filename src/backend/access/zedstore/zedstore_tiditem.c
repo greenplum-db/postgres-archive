@@ -33,11 +33,10 @@ static int binsrch_tid_array(zstid key, zstid *arr, int arr_elems);
 void
 zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter)
 {
-	int			total_decoded = 0;
 	ZSUndoRecPtr *slots;
+	int			num_tids;
 	uint64	   *slotwords;
 	uint64	   *codewords;
-	int			i;
 
 	if (iter->tids_allocated_size < item->t_num_tids)
 	{
@@ -51,25 +50,18 @@ zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter)
 	}
 
 	ZSTidArrayItemDecode(item, &codewords, &slots, &slotwords);
+	num_tids = item->t_num_tids;
 
 	/* decode all the codewords */
-	for (i = 0; i < item->t_num_codewords; i++)
-	{
-		int			num_decoded;
-
-		num_decoded = simple8b_decode(codewords[i],
-									  &iter->tids[total_decoded]);
-		total_decoded += num_decoded;
-	}
-	Assert(total_decoded == item->t_num_tids);
+	simple8b_decode_words(codewords, item->t_num_codewords, iter->tids, num_tids);
 
 	/* convert the deltas to TIDs */
-	deltas_to_tids(item->t_firsttid, iter->tids, total_decoded, iter->tids);
-	iter->num_tids = total_decoded;
-	Assert(iter->tids[total_decoded - 1] == item->t_endtid - 1);
+	deltas_to_tids(item->t_firsttid, iter->tids, num_tids, iter->tids);
+	iter->num_tids = num_tids;
+	Assert(iter->tids[num_tids - 1] == item->t_endtid - 1);
 
 	/* Expand slotwords to slotnos */
-	slotwords_to_slotnos(slotwords, total_decoded, iter->tid_undoslotnos);
+	slotwords_to_slotnos(slotwords, num_tids, iter->tid_undoslotnos);
 
 	/* also copy out the slots to the iterator */
 	iter->undoslots[ZSBT_OLD_UNDO_SLOT] = InvalidUndoPtr;
@@ -394,10 +386,9 @@ List *
 zsbt_tid_item_change_undoptr(ZSTidArrayItem *orig, zstid target_tid, ZSUndoRecPtr undoptr,
 							 ZSUndoRecPtr recent_oldest_undo)
 {
-	int			total_decoded = 0;
 	uint64	   *deltas;
 	zstid	   *tids;
-	int			nelements = orig->t_num_tids;
+	int			num_tids = orig->t_num_tids;
 	int			target_idx = -1;
 	ZSUndoRecPtr *orig_slots_partial;
 	ZSUndoRecPtr orig_slots[ZSBT_MAX_ITEM_UNDO_SLOTS];
@@ -406,26 +397,17 @@ zsbt_tid_item_change_undoptr(ZSTidArrayItem *orig, zstid target_tid, ZSUndoRecPt
 	List	   *newitems;
 	int			new_slotno;
 
-	deltas = palloc(sizeof(uint64) * nelements);
-	tids = palloc(sizeof(zstid) * nelements);
+	deltas = palloc(sizeof(uint64) * num_tids);
+	tids = palloc(sizeof(zstid) * num_tids);
 
 	ZSTidArrayItemDecode(orig, &orig_codewords, &orig_slots_partial, &orig_slotwords);
 
 	/* decode the codewords, to find the target TID */
-	total_decoded = 0;
-	for (int i = 0; i < orig->t_num_codewords; i++)
-	{
-		int			num_decoded;
+	simple8b_decode_words(orig_codewords, orig->t_num_codewords, deltas, num_tids);
 
-		num_decoded = simple8b_decode(orig_codewords[i], &deltas[total_decoded]);
+	deltas_to_tids(orig->t_firsttid, deltas, num_tids, tids);
 
-		total_decoded += num_decoded;
-	}
-	Assert(total_decoded == orig->t_num_tids);
-
-	deltas_to_tids(orig->t_firsttid, deltas, total_decoded, tids);
-
-	target_idx = binsrch_tid_array(target_tid, tids, total_decoded);
+	target_idx = binsrch_tid_array(target_tid, tids, num_tids);
 	Assert(tids[target_idx] == target_tid);
 
 	/* Ok, we know the target TID now. Can we use one of the existing UNDO slots? */
@@ -574,7 +556,6 @@ zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remo
 	ZSUndoRecPtr orig_slots[ZSBT_MAX_ITEM_UNDO_SLOTS];
 	uint64	   *orig_slotwords;
 	uint64	   *orig_codewords;
-	int			total_decoded = 0;
 	int			total_remain;
 	uint64	   *deltas;
 	zstid	   *tids;
@@ -592,14 +573,7 @@ zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remo
 	ZSTidArrayItemDecode(orig, &orig_codewords, &orig_slots_partial, &orig_slotwords);
 
 	/* decode all the codewords */
-	for (int i = 0; i < orig->t_num_codewords; i++)
-	{
-		int			num_decoded;
-
-		num_decoded = simple8b_decode(orig_codewords[i], &deltas[total_decoded]);
-		total_decoded += num_decoded;
-	}
-	Assert(total_decoded == orig->t_num_tids);
+	simple8b_decode_words(orig_codewords, orig->t_num_codewords, deltas, orig->t_num_tids);
 
 	/* also decode the slotwords */
 	orig_slots[ZSBT_OLD_UNDO_SLOT] = InvalidUndoPtr;
@@ -625,7 +599,7 @@ zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remo
 	total_remain = 0;
 	tid = orig->t_firsttid;
 	prev_tid = tid;
-	for (int i = 0; i < total_decoded; i++)
+	for (int i = 0; i < orig->t_num_tids; i++)
 	{
 		uint64		delta = deltas[i];
 

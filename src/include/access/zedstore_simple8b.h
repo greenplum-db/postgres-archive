@@ -15,4 +15,7 @@ extern uint64 simple8b_encode_consecutive(const uint64 firstint, const uint64 se
 										  int *num_encoded);
 extern int simple8b_decode(uint64 codeword, uint64 *decoded);
 
+extern void simple8b_decode_words(uint64 *codewords, int num_codewords,
+								  uint64 *dst, int num_integers);
+
 #endif							/* ZEDSTORE_SIMPLE8B_H */
