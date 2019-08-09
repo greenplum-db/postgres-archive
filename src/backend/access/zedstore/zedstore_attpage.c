@@ -532,20 +532,12 @@ zsbt_attr_scan_next(ZSAttrTreeScan *scan)
 
 /*
  * Insert a multiple items to the given attribute's btree.
- *
- * Populates the TIDs of the new tuples.
- *
- * If 'tid' in list is valid, then that TID is used. It better not be in use already. If
- * it's invalid, then a new TID is allocated, as we see best. (When inserting the
- * first column of the row, pass invalid, and for other columns, pass the TID
- * you got for the first column.)
  */
 void
 zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 					   Datum *datums, bool *isnulls, zstid *tids, int nitems)
 {
 	Form_pg_attribute attr;
-	zstid		tid = tids[0];
 	Buffer		buf;
 	zstid		insert_target_key;
 	int			i;
@@ -557,7 +549,7 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 	/*
 	 * Find the right place for the given TID.
 	 */
-	insert_target_key = tid;
+	insert_target_key = tids[0];
 
 	buf = zsbt_descend(rel, attno, insert_target_key, 0, false);
 
