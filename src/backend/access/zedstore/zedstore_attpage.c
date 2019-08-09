@@ -3,8 +3,7 @@
  *		Routines for handling attribute leaf pages.
  *
  * A Zedstore table consists of multiple B-trees, one for each attribute. The
- * functions in this file deal with one B-tree at a time, it is the caller's
- * responsibility to tie together the scans of each btree.
+ * functions in this file deal with a scan of one attribute tree.
  *
  * Operations:
  *
@@ -55,7 +54,9 @@ static zstid zsbt_attr_item_remove_elements(Form_pg_attribute atti,
  */
 
 /*
- * Begin a scan of the btree.
+ * Begin a scan of an attribute btree.
+ *
+ * Fills in the scan struct in *scan.
  */
 void
 zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,

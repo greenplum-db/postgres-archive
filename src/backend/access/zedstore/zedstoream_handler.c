@@ -1159,7 +1159,6 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 	ZedStoreProjectData *scan_proj = &scan->proj_data;
-	int			i;
 	int			slot_natts = slot->tts_tupleDescriptor->natts;
 	Datum	   *slot_values = slot->tts_values;
 	bool	   *slot_isnull = slot->tts_isnull;
@@ -1178,7 +1177,7 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 	 * columns are NULL.
 	 */
 	ExecClearTuple(slot);
-	for (i = 0; i < slot_natts; i++)
+	for (int i = 0; i < slot_natts; i++)
 		slot_isnull[i] = true;
 
 	while (scan->state != ZSSCAN_STATE_FINISHED)
@@ -1331,7 +1330,7 @@ static bool
 zedstoream_tuple_tid_valid(TableScanDesc sscan, ItemPointer tid)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
-	zstid ztid = ZSTidFromItemPointer(*tid);
+	zstid		ztid = ZSTidFromItemPointer(*tid);
 
 	if (scan->max_tid_to_scan == InvalidZSTid)
 	{
@@ -2114,8 +2113,8 @@ zedstoream_relation_copy_data(Relation rel, const RelFileNode *newrnode)
  * given tuple in the old table. Returns the tid of the tuple in the
  * new table, or InvalidZSTid if this tuple can be left out completely.
  *
- * FIXME: This break UPDATE chains. I.e. after this is done, an UPDATE
- * looks like DELETE + INSERT, instead of an UPDATe, to any transaction that
+ * FIXME: This breaks UPDATE chains. I.e. after this is done, an UPDATE
+ * looks like DELETE + INSERT, instead of an UPDATE, to any transaction that
  * might try to follow the update chain.
  */
 static zstid
@@ -2750,7 +2749,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 	int			ntuples;
 	ZSTidTreeScan tid_scan;
 	zstid		tid;
-	int			noff = 0;
+	int			noff;
 
 	zs_initialize_proj_attributes_extended(scan, RelationGetDescr(scan->rs_scan.rs_rd));
 
@@ -2770,6 +2769,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 						scan->rs_scan.rs_snapshot,
 						&tid_scan);
 	tid_scan.serializable = true;
+	noff = 0;
 	while ((tid = zsbt_tid_scan_next(&tid_scan)) != InvalidZSTid)
 	{
 		ItemPointerData itemptr;
@@ -3226,6 +3226,14 @@ zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
 	return *start < pzscan->pzs_endtid;
 }
 
+/*
+ * Get the value for a row, when no value has been stored in the attribute tree.
+ *
+ * This is used after ALTER TABLE ADD COLUMN, when reading rows that were
+ * created before column was added. Usually, missing values are implicitly
+ * NULLs, but you could specify a different value in the ALTER TABLE command,
+ * too, with DEFAULT.
+ */
 static void
 zsbt_fill_missing_attribute_value(TupleDesc tupleDesc, int attno, Datum *datum, bool *isnull)
 {

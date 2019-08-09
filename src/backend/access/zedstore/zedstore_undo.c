@@ -19,6 +19,7 @@
 #include "access/zedstore_undo.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
+#include "lib/integerset.h"
 #include "miscadmin.h"
 #include "postmaster/autovacuum.h"
 #include "pgstat.h"

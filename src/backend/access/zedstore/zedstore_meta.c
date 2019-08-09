@@ -6,7 +6,6 @@
  * column.
  *
  * TODO:
- * - support ALTER TABLE ADD COLUMN.
  * - extend the root block dir to an overflow page if there are too many
  *   attributes to fit on one page
  *
