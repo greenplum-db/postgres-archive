@@ -64,31 +64,18 @@ void
 zsbt_tid_begin_scan(Relation rel, zstid starttid,
 					zstid endtid, Snapshot snapshot, ZSTidTreeScan *scan)
 {
-	Buffer		buf;
-
 	scan->rel = rel;
-
 	scan->snapshot = snapshot;
 	scan->context = CurrentMemoryContext;
-	scan->lastoff = InvalidOffsetNumber;
 	scan->nexttid = starttid;
 	scan->endtid = endtid;
 	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 	memset(&scan->array_iter, 0, sizeof(scan->array_iter));
 	scan->array_iter.context = CurrentMemoryContext;
 
-	buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, starttid, 0, true);
-	if (!BufferIsValid(buf))
-	{
-		/* completely empty tree */
-		scan->active = false;
-		scan->lastbuf = InvalidBuffer;
-		return;
-	}
-	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
 	scan->active = true;
-	scan->lastbuf = buf;
+	scan->lastbuf = InvalidBuffer;
+	scan->lastoff = InvalidOffsetNumber;
 
 	scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 }
@@ -301,7 +288,19 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 
 			if (!BufferIsValid(buf))
 			{
-				buf = scan->lastbuf = zsbt_descend(scan->rel, ZS_META_ATTRIBUTE_NUM, scan->nexttid, 0, true);
+				buf = zsbt_descend(scan->rel, ZS_META_ATTRIBUTE_NUM, scan->nexttid, 0, true);
+				if (!BufferIsValid(buf))
+				{
+					/*
+					 * Completely empty tree. This should only happen at the beginning of a
+					 * scan - a tree cannot go missing after it's been created - but we don't
+					 * currently check for that.
+					 */
+					scan->active = false;
+					scan->lastbuf = InvalidBuffer;
+					return false;
+				}
+				scan->lastbuf = buf;
 				buf_is_locked = true;
 			}
 		}

@@ -36,6 +36,11 @@ static int zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int ar
  * Find the page containing the given key TID at the given level.
  *
  * Level 0 means leaf. The returned buffer is exclusive-locked.
+ *
+ * If tree doesn't exist at all (probably because the table was just created
+ * or truncated), the behavior depends on the 'readonly' argument. If
+ * readonly == true, then returns InvalidBuffer. If readonly == false, then
+ * the tree is created.
  */
 Buffer
 zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly)

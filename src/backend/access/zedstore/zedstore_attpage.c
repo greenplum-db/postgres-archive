@@ -61,14 +61,11 @@ void
 zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,
 					 zstid endtid, ZSAttrTreeScan *scan)
 {
-	Buffer		buf;
-
 	scan->rel = rel;
 	scan->attno = attno;
 	scan->attdesc = TupleDescAttr(tdesc, attno - 1);
 
 	scan->context = CurrentMemoryContext;
-	scan->lastoff = InvalidOffsetNumber;
 	scan->has_decompressed = false;
 	scan->nexttid = starttid;
 	scan->endtid = endtid;
@@ -78,18 +75,9 @@ zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid star
 	scan->array_num_elements = 0;
 	scan->array_next_datum = 0;
 
-	buf = zsbt_descend(rel, attno, starttid, 0, true);
-	if (!BufferIsValid(buf))
-	{
-		/* completely empty tree */
-		scan->active = false;
-		scan->lastbuf = InvalidBuffer;
-		return;
-	}
-	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
 	scan->active = true;
-	scan->lastbuf = buf;
+	scan->lastbuf = InvalidBuffer;
+	scan->lastoff = InvalidOffsetNumber;
 
 	zs_decompress_init(&scan->decompressor);
 }
@@ -444,7 +432,19 @@ zsbt_attr_scan_next(ZSAttrTreeScan *scan)
 
 			if (!BufferIsValid(buf))
 			{
-				buf = scan->lastbuf = zsbt_descend(scan->rel, scan->attno, scan->nexttid, 0, true);
+				buf = zsbt_descend(scan->rel, scan->attno, scan->nexttid, 0, true);
+				if (!BufferIsValid(buf))
+				{
+					/*
+					 * Completely empty tree. This should only happen at the beginning of a
+					 * scan - a tree cannot go missing after it's been created - but we don't
+					 * currently check for that.
+					 */
+					scan->active = false;
+					scan->lastbuf = InvalidBuffer;
+					return false;
+				}
+				scan->lastbuf = buf;
 				buf_is_locked = true;
 			}
 		}
