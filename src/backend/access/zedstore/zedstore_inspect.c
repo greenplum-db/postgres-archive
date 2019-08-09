@@ -69,6 +69,7 @@
 Datum pg_zs_page_type(PG_FUNCTION_ARGS);
 Datum pg_zs_undo_pages(PG_FUNCTION_ARGS);
 Datum pg_zs_btree_pages(PG_FUNCTION_ARGS);
+Datum pg_zs_toast_pages(PG_FUNCTION_ARGS);
 
 Datum
 pg_zs_page_type(PG_FUNCTION_ARGS)
@@ -269,6 +270,125 @@ pg_zs_undo_pages(PG_FUNCTION_ARGS)
 		values[4] = Int64GetDatum(lastptr.counter);
 
 		blkno = opaque->next;
+		UnlockReleaseBuffer(buf);
+
+		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+	}
+	tuplestore_donestoring(tupstore);
+
+	table_close(rel, AccessShareLock);
+
+	return (Datum) 0;
+}
+
+/*
+ *  blkno int8
+ *  tid int8
+ *  total_size int8
+ *  prev int8
+ *  next int8
+ */
+Datum
+pg_zs_toast_pages(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Relation	rel;
+	BlockNumber	blkno;
+	BlockNumber	nblocks;
+	TupleDesc	tupdesc;
+	Tuplestorestate *tupstore;
+	MemoryContext per_query_ctx;
+	MemoryContext oldcontext;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("must be superuser to use zedstore inspection functions"))));
+
+	/* check to see if caller supports us returning a tuplestore */
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in context that cannot accept a set")));
+	if (!(rsinfo->allowedModes & SFRM_Materialize))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("materialize mode required, but it is not " \
+						"allowed in this context")));
+
+	/* Switch into long-lived context to construct returned data structures */
+	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+	oldcontext = MemoryContextSwitchTo(per_query_ctx);
+
+	/* Build a tuple descriptor for our result type */
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = tupdesc;
+
+	MemoryContextSwitchTo(oldcontext);
+
+	rel = table_open(relid, AccessShareLock);
+
+	/*
+	 * Reject attempts to read non-local temporary relations; we would be
+	 * likely to get wrong data since we have no visibility into the owning
+	 * session's local buffers.
+	 */
+	if (RELATION_IS_OTHER_TEMP(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary tables of other sessions")));
+
+	nblocks = RelationGetNumberOfBlocks(rel);
+
+	/* scan all blocks in physical order */
+	for (blkno = 1; blkno < nblocks; blkno++)
+	{
+		Datum		values[5];
+		bool		nulls[5];
+		Buffer		buf;
+		Page		page;
+		ZSToastPageOpaque *opaque;
+
+		memset(values, 0, sizeof(values));
+		memset(nulls, 0, sizeof(nulls));
+
+		CHECK_FOR_INTERRUPTS();
+
+		/* Read the page */
+		buf = ReadBuffer(rel, blkno);
+		page = BufferGetPage(buf);
+		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+		/*
+		 * we're only interested in toast pages.
+		 */
+		if (PageGetSpecialSize(page) != MAXALIGN(sizeof(ZSToastPageOpaque)))
+		{
+			UnlockReleaseBuffer(buf);
+			continue;
+		}
+		opaque = (ZSToastPageOpaque *) PageGetSpecialPointer(page);
+		if (opaque->zs_page_id != ZS_TOAST_PAGE_ID)
+		{
+			UnlockReleaseBuffer(buf);
+			continue;
+		}
+
+		values[0] = Int64GetDatum(blkno);
+		if (opaque->zs_tid)
+		{
+			values[1] = Int64GetDatum(opaque->zs_tid);
+			values[2] = Int64GetDatum(opaque->zs_total_size);
+		}
+		values[3] = Int64GetDatum(opaque->zs_prev);
+		values[4] = Int64GetDatum(opaque->zs_next);
+
 		UnlockReleaseBuffer(buf);
 
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);

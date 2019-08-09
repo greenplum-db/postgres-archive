@@ -10727,5 +10727,12 @@
   proargmodes => '{i,o,o,o,o,o,o,o,o,o,o,o}',
   proargnames => '{relid,blkno,nextblk,attno,level,lokey,hikey,nitems,ncompressed,totalsz,uncompressedsz,freespace}',
   prosrc => 'pg_zs_btree_pages' },
+{ oid => '7003', descr => 'show stats about zedstore toast pages',
+  proname => 'pg_zs_toast_pages', prorows => '1000', proretset => 't',
+  prorettype => 'record', proargtypes => 'regclass',
+  proallargtypes => '{regclass,int8,int8,int8,int8,int8}',
+  proargmodes => '{i,o,o,o,o,o}',
+  proargnames => '{relid,blkno,tid,total_size,prev,next}',
+  prosrc => 'pg_zs_toast_pages' },
 
 ]
