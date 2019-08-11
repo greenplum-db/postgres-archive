@@ -319,6 +319,30 @@ zsbt_insert_downlinks(Relation rel, AttrNumber attno,
 	 * tree, and if we just remembered the path we descended, we could just
 	 * walk back up.
 	 */
+
+	/*
+	 * XXX:: There was a concurrency bug here, too, observed by running
+	 * "make installcheck-parallel":
+	 * We're holding a lock on a page on level 0, and the root is at level 1.
+	 * However, the metacache says that the page we're holding locked is
+	 * the root. When we get here, to find the parent page, we will start
+	 * with the cached block at level 0, and deadlock with ourselves.
+	 *
+	 * To fix that, invalidate the cache, if it claims that the child
+	 * block is the root. I'm not sure this fixes the whole general problem
+	 * those, so this needs some more thought...
+	 */
+	{
+		ZSMetaCacheData *metacache;
+
+		metacache = zsmeta_get_cache(rel);
+		if (attno < metacache->cache_nattributes &&
+			metacache->cache_attrs[attno].root == leftblkno)
+		{
+			metacache->cache_attrs[attno].root = InvalidBlockNumber;
+		}
+	}
+
 	parentbuf = zsbt_descend(rel, attno, leftlokey, level, false);
 	parentpage = BufferGetPage(parentbuf);
 
