@@ -413,15 +413,6 @@ ZSTidArrayItemDecode(ZSTidArrayItem *item, uint64 **codewords,
 }
 
 /*
- * Get the last TID that the given item spans.
- */
-static inline zstid
-zsbt_tid_item_lasttid(ZSTidArrayItem *item)
-{
-	return item->t_endtid - 1;
-}
-
-/*
  * Toast page layout.
  *
  * When an overly large datum is stored, it is divided into chunks, and each

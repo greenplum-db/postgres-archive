@@ -257,11 +257,8 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid)
 		{
 			ItemId		iid = PageGetItemId(page, scan->lastoff);
 			ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
-			zstid		lasttid;
 
-			lasttid = zsbt_tid_item_lasttid(item);
-
-			if (nexttid > lasttid)
+			if (nexttid >= item->t_endtid)
 				off = scan->lastoff + 1;
 		}
 
@@ -269,11 +266,8 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid)
 		{
 			ItemId		iid = PageGetItemId(page, off);
 			ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
-			zstid		lasttid;
 
-			lasttid = zsbt_tid_item_lasttid(item);
-
-			if (nexttid > lasttid)
+			if (nexttid >= item->t_endtid)
 				continue;
 
 			if (item->t_firsttid >= scan->endtid)
@@ -356,7 +350,7 @@ zsbt_get_last_tid(Relation rel)
 		ItemId		iid = PageGetItemId(page, maxoff);
 		ZSTidArrayItem *lastitem = (ZSTidArrayItem *) PageGetItem(page, iid);
 
-		tid = zsbt_tid_item_lasttid(lastitem) + 1;
+		tid = lastitem->t_endtid;
 	}
 	else
 	{
