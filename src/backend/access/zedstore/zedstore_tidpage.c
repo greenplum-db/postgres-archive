@@ -251,14 +251,6 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 bool
 zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
 {
-	Buffer		buf;
-	bool		buf_is_locked = false;
-	Page		page;
-	ZSBtreePageOpaque *opaque;
-	OffsetNumber maxoff;
-	OffsetNumber off;
-	BlockNumber	next;
-
 	if (!scan->active)
 		return InvalidZSTid;
 
@@ -269,76 +261,41 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
 	 */
 	while (scan->nexttid < scan->endtid)
 	{
+		Buffer		buf;
+		Page		page;
+		ZSBtreePageOpaque *opaque;
+		OffsetNumber maxoff;
+		OffsetNumber off;
+		BlockNumber	next;
+
 		/*
-		 * Scan the page for the next item.
+		 * Find and lock the leaf page containing scan->nexttid.
 		 */
-		buf = scan->lastbuf;
-		if (!buf_is_locked)
+		buf = zsbt_find_and_lock_leaf_containing_tid(scan->rel, ZS_META_ATTRIBUTE_NUM,
+													 scan->lastbuf, scan->nexttid,
+													 BUFFER_LOCK_SHARE);
+		if (buf != scan->lastbuf)
+			scan->lastoff = InvalidOffsetNumber;
+		scan->lastbuf = buf;
+		if (!BufferIsValid(buf))
 		{
-			if (BufferIsValid(buf))
-			{
-				LockBuffer(buf, BUFFER_LOCK_SHARE);
-				buf_is_locked = true;
-
-				/*
-				 * It's possible that the page was concurrently split or recycled by
-				 * another backend (or ourselves). Have to re-check that the page is
-				 * still valid.
-				 */
-				if (!zsbt_page_is_expected(scan->rel, ZS_META_ATTRIBUTE_NUM, scan->nexttid, 0, buf))
-				{
-					/*
-					 * It's not valid for the TID we're looking for, but maybe it was the
-					 * right page for the previous TID. In that case, we don't need to
-					 * restart from the root, we can follow the right-link instead.
-					 */
-					if (zsbt_page_is_expected(scan->rel, ZS_META_ATTRIBUTE_NUM, scan->nexttid - 1, 0, buf))
-					{
-						page = BufferGetPage(buf);
-						opaque = ZSBtreePageGetOpaque(page);
-						next = opaque->zs_next;
-						if (next != InvalidBlockNumber)
-						{
-							LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-							buf_is_locked = false;
-							buf = ReleaseAndReadBuffer(buf, scan->rel, next);
-							scan->lastbuf = buf;
-							scan->lastoff = InvalidOffsetNumber;
-							continue;
-						}
-					}
-
-					UnlockReleaseBuffer(buf);
-					buf_is_locked = false;
-					buf = scan->lastbuf = InvalidBuffer;
-					scan->lastoff = InvalidOffsetNumber;
-				}
-			}
-
-			if (!BufferIsValid(buf))
-			{
-				buf = zsbt_descend(scan->rel, ZS_META_ATTRIBUTE_NUM, scan->nexttid, 0, true);
-				if (!BufferIsValid(buf))
-				{
-					/*
-					 * Completely empty tree. This should only happen at the beginning of a
-					 * scan - a tree cannot go missing after it's been created - but we don't
-					 * currently check for that.
-					 */
-					scan->active = false;
-					scan->lastbuf = InvalidBuffer;
-					scan->lastoff = InvalidOffsetNumber;
-					return false;
-				}
-				scan->lastbuf = buf;
-				buf_is_locked = true;
-			}
+			/*
+			 * Completely empty tree. This should only happen at the beginning of a
+			 * scan - a tree cannot go missing after it's been created - but we don't
+			 * currently check for that.
+			 */
+			break;
 		}
 		page = BufferGetPage(buf);
 		opaque = ZSBtreePageGetOpaque(page);
 		Assert(opaque->zs_page_id == ZS_BTREE_PAGE_ID);
 
-		/* Check the last offset first, as an optimization */
+		/*
+		 * Scan the items on the page, to find the next one that covers
+		 * nexttid.
+		 *
+		 * We check the last offset first, as an optimization
+		 */
 		maxoff = PageGetMaxOffsetNumber(page);
 		off = FirstOffsetNumber;
 		if (scan->lastoff > FirstOffsetNumber && scan->lastoff <= maxoff)
@@ -375,7 +332,6 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
 			if (scan->array_iter.next_idx < scan->array_iter.num_tids)
 			{
 				LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
-				buf_is_locked = false;
 				scan->lastoff = off;
 				return true;
 			}
@@ -388,21 +344,24 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
 		if (next == BufferGetBlockNumber(buf))
 			elog(ERROR, "btree page %u next-pointer points to itself", next);
 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-		buf_is_locked = false;
 
 		if (next == InvalidBlockNumber || scan->nexttid >= scan->endtid)
 		{
-			scan->active = false;
-			scan->array_iter.num_tids = 0;
-			scan->array_iter.next_idx = 0;
-			ReleaseBuffer(scan->lastbuf);
-			scan->lastbuf = InvalidBuffer;
-			scan->lastoff = InvalidOffsetNumber;
+			/* reached end of scan */
 			break;
 		}
 
 		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 	}
+
+	/* Reached end of scan. */
+	scan->active = false;
+	scan->array_iter.num_tids = 0;
+	scan->array_iter.next_idx = 0;
+	if (BufferIsValid(scan->lastbuf))
+		ReleaseBuffer(scan->lastbuf);
+	scan->lastbuf = InvalidBuffer;
+	scan->lastoff = InvalidOffsetNumber;
 
 	return false;
 }

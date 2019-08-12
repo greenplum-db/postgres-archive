@@ -172,6 +172,69 @@ zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly
 	return buf;
 }
 
+
+/*
+ * Find and lock the leaf page that contains data for scan->nexttid.
+ *
+ * If 'buf' is valid, it is a previously pinned page. We will check that
+ * page first. If it's not the correct page, it will be released.
+ *
+ * Returns InvalidBuffer, if the attribute tree doesn't exist at all.
+ * That should only happen after ALTER TABLE ADD COLUMN. Or on a newly
+ * created table, but none of the current callers would even try to
+ * fetch attribute data, without scanning the TID tree first.)
+ */
+Buffer
+zsbt_find_and_lock_leaf_containing_tid(Relation rel, AttrNumber attno,
+									   Buffer buf, zstid nexttid, int lockmode)
+{
+	if (BufferIsValid(buf))
+	{
+retry:
+		LockBuffer(buf, lockmode);
+
+		/*
+		 * It's possible that the page was concurrently split or recycled by
+		 * another backend (or ourselves). Have to re-check that the page is
+		 * still valid.
+		 */
+		if (zsbt_page_is_expected(rel, attno, nexttid, 0, buf))
+			return buf;
+		else
+		{
+			/*
+			 * It's not valid for the TID we're looking for, but maybe it was the
+			 * right page for the previous TID. In that case, we don't need to
+			 * restart from the root, we can follow the right-link instead.
+			 */
+			if (nexttid > MinZSTid &&
+				zsbt_page_is_expected(rel, attno, nexttid - 1, 0, buf))
+			{
+				Page		page = BufferGetPage(buf);
+				ZSBtreePageOpaque *opaque = ZSBtreePageGetOpaque(page);
+				BlockNumber next = opaque->zs_next;
+
+				if (next != InvalidBlockNumber)
+				{
+					LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+					buf = ReleaseAndReadBuffer(buf, rel, next);
+					goto retry;
+				}
+			}
+
+			UnlockReleaseBuffer(buf);
+			buf = InvalidBuffer;
+		}
+	}
+
+	/* Descend the B-tree to find the correct leaf page. */
+	if (!BufferIsValid(buf))
+		buf = zsbt_descend(rel, attno, nexttid, 0, true);
+
+	return buf;
+}
+
+
 /*
  * Check that a page is a valid B-tree page, and covers the given key.
  *

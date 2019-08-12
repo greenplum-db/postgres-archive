@@ -870,6 +870,8 @@ extern zs_split_stack *zsbt_insert_downlinks(Relation rel, AttrNumber attno,
 extern void zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids);
 extern zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level);
 extern Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
+extern Buffer zsbt_find_and_lock_leaf_containing_tid(Relation rel, AttrNumber attno,
+													 Buffer buf, zstid nexttid, int lockmode);
 extern bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf);
 
 /*
