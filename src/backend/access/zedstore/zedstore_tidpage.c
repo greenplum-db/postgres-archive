@@ -126,6 +126,7 @@ zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid)
 		if (scan->lastbuf != InvalidBuffer)
 			ReleaseBuffer(scan->lastbuf);
 		scan->lastbuf = InvalidBuffer;
+		scan->lastoff = InvalidOffsetNumber;
 	}
 	else
 	{
@@ -154,8 +155,11 @@ zsbt_tid_end_scan(ZSTidTreeScan *scan)
 static void
 zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 {
-	int			j;
 	bool		slots_visible[4];
+	int			first;
+	int			last;
+	int			num_visible_tids;
+	int			continue_at;
 
 	zsbt_tid_item_unpack(aitem, &scan->array_iter);
 
@@ -183,39 +187,69 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 			CheckForSerializableConflictOut(scan->rel, obsoleting_xid, scan->snapshot);
 	}
 
-	j = 0;
-	for (int i = 0; i < scan->array_iter.num_tids; i++)
+	/*
+	 * Skip over elements at the beginning and end of the array that
+	 * are not within the range we're interested in.
+	 */
+	for (first = 0; first < scan->array_iter.num_tids; first++)
 	{
-		/* skip over elements that we are not interested in */
-		if (scan->array_iter.tids[i] < scan->nexttid)
-			continue;
-		if (scan->array_iter.tids[i] >= scan->endtid)
+		if (scan->array_iter.tids[first] >= scan->nexttid)
 			break;
+	}
+	for (last = scan->array_iter.num_tids - 1; last >= first; last--)
+	{
+		if (scan->array_iter.tids[last] < scan->endtid)
+			break;
+	}
 
+	/* squeeze out invisible TIDs */
+	if (first == 0)
+	{
+		int			j;
+
+		for (j = 0; j <= last; j++)
+		{
+			if (!slots_visible[scan->array_iter.tid_undoslotnos[j]])
+				break;
+		}
+		num_visible_tids = j;
+		continue_at = j + 1;
+	}
+	else
+	{
+		num_visible_tids = 0;
+		continue_at = first;
+	}
+
+	for (int i = continue_at; i <= last; i++)
+	{
 		/* Is this item visible? */
 		if (slots_visible[scan->array_iter.tid_undoslotnos[i]])
 		{
-			scan->array_iter.tids[j] = scan->array_iter.tids[i];
-			scan->array_iter.tid_undoslotnos[j] = scan->array_iter.tid_undoslotnos[i];
-			j++;
+			scan->array_iter.tids[num_visible_tids] = scan->array_iter.tids[i];
+			scan->array_iter.tid_undoslotnos[num_visible_tids] = scan->array_iter.tid_undoslotnos[i];
+			num_visible_tids++;
 		}
 	}
-	scan->array_iter.num_tids = j;
+	scan->array_iter.num_tids = num_visible_tids;
 	scan->array_iter.next_idx = 0;
 }
 
 /*
- * Advance scan to next item.
+ * Advance scan to next batch of TIDs.
  *
- * Return true if there was another item. The Datum/isnull of the item is
- * placed in scan->array_* fields. For a pass-by-ref datum, it's a palloc'd
- * copy that's valid until the next call.
+ * Finds the next TID array item >= scan->nexttid, and decodes it into
+ * scan->array_iter. The values in scan->array_iter are valid until
+ * the next call to this function, zsbt_tid_reset_scan() or
+ * zsbt_tid_end_scan().
  *
- * This is normally not used directly. See zsbt_scan_next_tid() and
- * zsbt_scan_next_fetch() wrappers, instead.
+ * Returns true if there was another item, or false if we reached the
+ * end of the scan.
+ *
+ * This is normally not used directly, see zsbt_tid_scan_next() wrapper.
  */
-zstid
-zsbt_tid_scan_next(ZSTidTreeScan *scan)
+bool
+zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
 {
 	Buffer		buf;
 	bool		buf_is_locked = false;
@@ -224,7 +258,6 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 	OffsetNumber maxoff;
 	OffsetNumber off;
 	BlockNumber	next;
-	zstid		result;
 
 	if (!scan->active)
 		return InvalidZSTid;
@@ -236,12 +269,6 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 	 */
 	while (scan->nexttid < scan->endtid)
 	{
-		/*
-		 * If we are still processing an array item, return next element from it.
-		 */
-		if (scan->array_iter.next_idx < scan->array_iter.num_tids)
-			goto have_array;
-
 		/*
 		 * Scan the page for the next item.
 		 */
@@ -276,6 +303,7 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 							buf_is_locked = false;
 							buf = ReleaseAndReadBuffer(buf, scan->rel, next);
 							scan->lastbuf = buf;
+							scan->lastoff = InvalidOffsetNumber;
 							continue;
 						}
 					}
@@ -283,6 +311,7 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 					UnlockReleaseBuffer(buf);
 					buf_is_locked = false;
 					buf = scan->lastbuf = InvalidBuffer;
+					scan->lastoff = InvalidOffsetNumber;
 				}
 			}
 
@@ -298,6 +327,7 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 					 */
 					scan->active = false;
 					scan->lastbuf = InvalidBuffer;
+					scan->lastoff = InvalidOffsetNumber;
 					return false;
 				}
 				scan->lastbuf = buf;
@@ -308,9 +338,22 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 		opaque = ZSBtreePageGetOpaque(page);
 		Assert(opaque->zs_page_id == ZS_BTREE_PAGE_ID);
 
-		/* TODO: check the last offset first, as an optimization */
+		/* Check the last offset first, as an optimization */
 		maxoff = PageGetMaxOffsetNumber(page);
-		for (off = FirstOffsetNumber; off <= maxoff; off++)
+		off = FirstOffsetNumber;
+		if (scan->lastoff > FirstOffsetNumber && scan->lastoff <= maxoff)
+		{
+			ItemId		iid = PageGetItemId(page, scan->lastoff);
+			ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
+			zstid		lasttid;
+
+			lasttid = zsbt_tid_item_lasttid(item);
+
+			if (scan->nexttid > lasttid)
+				off = scan->lastoff + 1;
+		}
+
+		for (; off <= maxoff; off++)
 		{
 			ItemId		iid = PageGetItemId(page, off);
 			ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
@@ -333,12 +376,10 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 			{
 				LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
 				buf_is_locked = false;
-				break;
+				scan->lastoff = off;
+				return true;
 			}
 		}
-
-		if (scan->array_iter.next_idx < scan->array_iter.num_tids)
-			continue;
 
 		/* No more items on this page. Walk right, if possible */
 		if (scan->nexttid < opaque->zs_hikey)
@@ -356,34 +397,14 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 			scan->array_iter.next_idx = 0;
 			ReleaseBuffer(scan->lastbuf);
 			scan->lastbuf = InvalidBuffer;
+			scan->lastoff = InvalidOffsetNumber;
 			break;
 		}
 
 		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 	}
 
-	return InvalidZSTid;
-
-have_array:
-	/*
-	 * If we are still processing an array item, return next element from it.
-	 */
-	Assert(scan->array_iter.next_idx < scan->array_iter.num_tids);
-
-	result = scan->array_iter.tids[scan->array_iter.next_idx];
-	if (scan->snapshot->snapshot_type == SNAPSHOT_DIRTY)
-	{
-		int			slotno = scan->array_iter.tid_undoslotnos[scan->array_iter.next_idx];
-		ZSUndoSlotVisibility *visi_info = &scan->array_iter.undoslot_visibility[slotno];
-
-		if (visi_info->xmin != FrozenTransactionId)
-			scan->snapshot->xmin = visi_info->xmin;
-		scan->snapshot->xmax = visi_info->xmax;
-		scan->snapshot->speculativeToken = visi_info->speculativeToken;
-	}
-	scan->nexttid = result + 1;
-	scan->array_iter.next_idx++;
-	return result;
+	return false;
 }
 
 /*

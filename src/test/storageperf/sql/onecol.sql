@@ -38,6 +38,20 @@ INSERT INTO results (testname, val) VALUES ('onecol, COPY, size', pg_total_relat
 INSERT INTO results (testname, val) VALUES ('onecol, COPY, time', :after - :before);
 
 --
+-- SELECT
+--
+
+select extract(epoch from now()) as before
+\gset
+
+SELECT SUM(i) FROM onecol;
+
+select extract(epoch from now()) as after
+\gset
+
+INSERT INTO results (testname, val) VALUES ('SELECT, time', :after - :before);
+
+--
 -- Delete half of the rows
 --
 

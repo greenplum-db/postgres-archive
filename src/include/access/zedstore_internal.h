@@ -764,7 +764,45 @@ extern void zsbt_tid_begin_scan(Relation rel,
 								zstid starttid, zstid endtid, Snapshot snapshot, ZSTidTreeScan *scan);
 extern void zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid);
 extern void zsbt_tid_end_scan(ZSTidTreeScan *scan);
-extern zstid zsbt_tid_scan_next(ZSTidTreeScan *scan);
+
+extern bool zsbt_tid_scan_next_array(ZSTidTreeScan *scan);
+
+static inline zstid
+zsbt_tid_scan_next(ZSTidTreeScan *scan)
+{
+	zstid		result;
+
+	if (scan->nexttid >= scan->endtid)
+		return InvalidZSTid;
+
+	while (scan->array_iter.next_idx >= scan->array_iter.num_tids)
+	{
+		if (!zsbt_tid_scan_next_array(scan))
+			return InvalidZSTid;
+	}
+
+	result = scan->array_iter.tids[scan->array_iter.next_idx];
+
+	/*
+	 * Callers using SnapshotDirty need some extra visibility information.
+	 */
+	if (scan->snapshot->snapshot_type == SNAPSHOT_DIRTY)
+	{
+		int			slotno = scan->array_iter.tid_undoslotnos[scan->array_iter.next_idx];
+		ZSUndoSlotVisibility *visi_info = &scan->array_iter.undoslot_visibility[slotno];
+
+		if (visi_info->xmin != FrozenTransactionId)
+			scan->snapshot->xmin = visi_info->xmin;
+		scan->snapshot->xmax = visi_info->xmax;
+		scan->snapshot->speculativeToken = visi_info->speculativeToken;
+	}
+
+	/* on next call, continue the scan at the next TID */
+	scan->nexttid = result + 1;
+	scan->array_iter.next_idx++;
+	return result;
+}
+
 
 extern void zsbt_tid_multi_insert(Relation rel,
 								  zstid *tids, int ntuples,
