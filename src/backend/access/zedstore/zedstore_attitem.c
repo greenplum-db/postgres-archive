@@ -599,6 +599,12 @@ zsbt_attr_item_extract(ZSAttrTreeScan *scan, ZSAttributeArrayItem *item)
 /*
  * Subroutine of zsbt_attr_item_extract(). Unpack an array item into an array of
  * TIDs, and an array of Datums and nulls.
+ *
+ * XXX: This always copies the data to a working area in 'scan'. That can be
+ * wasteful, if the data already happened to be correctly aligned. The caller
+ * relies on the copying, though, unless it already made a copy of it when
+ * decompressing it. So take that into account if you try to avoid this by
+ * avoiding the memcpys.
  */
 static void
 fetch_att_array(char *src, int srcSize, bool hasnulls,

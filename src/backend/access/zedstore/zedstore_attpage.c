@@ -206,13 +206,16 @@ zsbt_attr_scan_next_array(ZSAttrTreeScan *scan)
 		opaque = ZSBtreePageGetOpaque(page);
 		Assert(opaque->zs_page_id == ZS_BTREE_PAGE_ID);
 
+		/*
+		 * Scan the items on the page, to find the next one that covers
+		 * nexttid.
+		 */
 		/* TODO: check the last offset first, as an optimization */
 		maxoff = PageGetMaxOffsetNumber(page);
 		for (off = FirstOffsetNumber; off <= maxoff; off++)
 		{
 			ItemId		iid = PageGetItemId(page, off);
 			ZSAttributeArrayItem *item = (ZSAttributeArrayItem *) PageGetItem(page, iid);
-			ZSAttributeArrayItem *aitem;
 
 			if (scan->nexttid >= item->t_endtid)
 				continue;
@@ -223,12 +226,13 @@ zsbt_attr_scan_next_array(ZSAttrTreeScan *scan)
 				break;
 			}
 
-			/* copy the item, because we can't hold a lock on the page  */
-			/* XXX: this is wasteful, if it's compressed */
-			aitem = MemoryContextAlloc(scan->context, item->t_size);
-			memcpy(aitem, item, item->t_size);
-
-			zsbt_attr_item_extract(scan, aitem);
+			/*
+			 * Extract the data into scan->array_* fields.
+			 *
+			 * NOTE: zsbt_attr_item_extract() always makes a copy of the data,
+			 * so we can release the lock on the page after doing this.
+			 */
+			zsbt_attr_item_extract(scan, item);
 			scan->array_next_datum = 0;
 
 			if (scan->array_num_elements > 0)
