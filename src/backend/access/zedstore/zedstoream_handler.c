@@ -939,7 +939,7 @@ zedstoream_slot_callbacks(Relation relation)
 	return &TTSOpsZedstore;
 }
 
-static inline void
+static void
 zs_initialize_proj_attributes(TupleDesc tupledesc, ZedStoreProjectData *proj_data)
 {
 	MemoryContext oldcontext;
@@ -979,7 +979,7 @@ zs_initialize_proj_attributes(TupleDesc tupledesc, ZedStoreProjectData *proj_dat
 	MemoryContextSwitchTo(oldcontext);
 }
 
-static inline void
+static void
 zs_initialize_proj_attributes_extended(ZedStoreDesc scan, TupleDesc tupledesc)
 {
 	MemoryContext oldcontext;
@@ -1166,7 +1166,8 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 	if (direction != ForwardScanDirection)
 		elog(ERROR, "backward scan not implemented in zedstore");
 
-	zs_initialize_proj_attributes(slot->tts_tupleDescriptor, scan_proj);
+	if (scan_proj->num_proj_atts == 0)
+		zs_initialize_proj_attributes(slot->tts_tupleDescriptor, scan_proj);
 	Assert((scan_proj->num_proj_atts - 1) <= slot_natts);
 
 	/*
