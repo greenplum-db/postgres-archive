@@ -331,6 +331,13 @@ zs_lazy_tid_reaped(ItemPointer itemptr, void *state)
 	return intset_is_member(vacrelstats->dead_tids, tid);
 }
 
+/*
+ * Entry point of VACUUM for zedstore tables.
+ *
+ * Vacuum on a zedstore table works quite differently from the heap. We don't
+ * scan the table. Instead, we scan just the active UNDO log, and remove any
+ * garbage left behind by aborts or deletions based on the UNDO log.
+ */
 void
 zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy,
 			  TransactionId OldestXmin)
@@ -910,6 +917,16 @@ zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid t
 	return undoptr;
 }
 
+/*
+ * Create an UNDO record for insertion.
+ *
+ * The undo record stores the 'tid' of the row, as well as visibility information.
+ *
+ * There's a primitive caching mechanism here: If you perform multiple insertions
+ * with same visibility information, and consecutive TIDs, we will keep modifying
+ * the range of TIDs in the same UNDO record, instead of creating new records.
+ * That greatly reduces the space required for UNDO log of bulk inserts.
+ */
 ZSUndoRecPtr
 zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid, zstid tid,
 						 int nitems, uint32 speculative_token, ZSUndoRecPtr prev_undo_ptr)
