@@ -152,92 +152,123 @@ ZSBtreeInternalPageIsFull(Page page)
 /*
  * Attribute B-tree leaf page layout
  *
- * Leaf pages in the attribute trees are packed with ZSAttributeItems. There are two
- * kinds of items:
+ * Leaf pages in the attribute trees are packed with "array items", which
+ * contain the actual user data for the column, in a compact format. Each
+ * array item contains the datums for a range of TIDs. The ranges of two
+ * items never overlap, but there can be gaps, if a row has been deleted
+ * or updated.
  *
- * 1. "Array item", holds multiple datums, with consecutive TIDs and the same
- *    visibility information. An array item saves space compared to multiple
- *    single items, by leaving out repetitive UNDO and TID fields.
+ * Each array item consists of a fixed header, a list of TIDs of the rows
+ * contained in it, a NULL bitmap (if there are any NULLs), and the actual
+ * Datum data. The TIDs are encoded using Simple-8b encoding, like in the
+ * TID tree.
  *
- * 2. "Compressed item", which can hold multiple single or array items.
+ * The data (including the TID codewords) can be compressed. In that case,
+ * ZSAttributeCompressedItem is used. The fields are mostly the same as in
+ * ZSAttributeArrayItem, and we cast between the two liberally.
+ *
+ * The datums are packed in a custom format. Fixed-width datatypes are
+ * stored as is, but without any alignment padding. Variable-length
+ * datatypes are *not* stored in the usual Postgres varlen format; the
+ * following encoding is used instead:
+ *
+ * Each varlen datum begins with a one or two byte header, to store the
+ * size. If the size of the datum, excluding the varlen header, is <=
+ * 128, then a one byte header is used. Otherwise, the high bit of the
+ * first byte is set, and two bytes are used to represent the size.
+ * Two bytes is always enough, because if a datum is larger than a page,
+ * it must be toasted.
+ *
+ * Traditional Postgres toasted datums should not be seen on-disk in
+ * zedstore. However, "zedstore-toasted" datums, i.e. datums that have been
+ * stored on separate toast blocks within zedstore, are possible. They
+ * are stored with magic 0xFF 0xFF as the two header bytes, followed by
+ * the block number of the first toast block.
+ *
+ * 0xxxxxxx [up to 128 bytes of data follows]
+ * 1xxxxxxx xxxxxxxx [data]
+ * 11111111 11111111 toast pointer.
+ *
+ * XXX Heikki: I'm not sure if this special encoding makes sense. Perhaps
+ * just storing normal Postgres varlenas would be better. Having a custom
+ * encoding felt like a good idea, but I'm not sure we're actually gaining
+ * anything. If we also did alignment padding, like the rest of Postgres
+ * does, then we could avoid some memory copies when decoding the array.
  *
  * TODO: squeeze harder: eliminate padding, use high bits of t_tid for flags or size
  */
-typedef struct ZSAttributeItem
-{
-	zstid		t_tid;
-	uint16		t_size;
-	uint16		t_flags;
-} ZSAttributeItem;
-
-#define ZSBT_ATTR_COMPRESSED		0x0001
-
 typedef struct ZSAttributeArrayItem
 {
-	/* these fields must match ZSAttributeItem */
-	zstid		t_tid;
 	uint16		t_size;
 	uint16		t_flags;
 
-	uint16		t_nelements;
+	uint16		t_num_elements;
+	uint16		t_num_codewords;
 
-	uint8		t_bitmap[FLEXIBLE_ARRAY_MEMBER];	/* null bitmap */
-	/* payload follows at next MAXALIGN boundary after the bitmap */
+	zstid		t_firsttid;
+	zstid		t_endtid;
+
+	uint64		t_tid_codewords[FLEXIBLE_ARRAY_MEMBER];
+
+	/* NULL bitmap follows, if ZSBT_HAS_NULLS is set */
+
+	/* The Datum data follows */
 } ZSAttributeArrayItem;
-
-#define ZSBT_ATTR_BITMAPLEN(nelems)		(((int) (nelems) + 7) / 8)
-
-static inline char *
-zsbt_attr_item_payload(ZSAttributeArrayItem *aitem)
-{
-	return (char *) MAXALIGN(aitem->t_bitmap + ZSBT_ATTR_BITMAPLEN(aitem->t_nelements));
-}
-
-static inline bool
-zsbt_attr_item_isnull(ZSAttributeArrayItem *aitem, int n)
-{
-	return (aitem->t_bitmap[n / 8] & (1 << (n % 8))) != 0;
-}
-
-static inline void
-zsbt_attr_item_setnull(ZSAttributeArrayItem *aitem, int n)
-{
-	aitem->t_bitmap[n / 8] |= (1 << (n % 8));
-}
 
 typedef struct ZSAttributeCompressedItem
 {
-	/* these fields must match ZSAttributeItem */
-	zstid		t_tid;
 	uint16		t_size;
 	uint16		t_flags;
 
-	uint16		t_uncompressedsize;
-	zstid		t_lasttid;	/* inclusive */
+	uint16		t_num_elements;
+	uint16		t_num_codewords;
 
+	zstid		t_firsttid;
+	zstid		t_endtid;
+
+	uint16		t_uncompressed_size;
+
+	/* compressed data follows */
 	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
+
 } ZSAttributeCompressedItem;
 
 /*
- * Get the last TID that the given item spans.
- *
- * For an uncompressed array item, it's the TID of the last element. For
- * a compressed item, it's the last TID of the last item it contains (which
- * is stored explicitly in the item header).
+ * The two structs above are stored on disk. ZSExplodedItem is a third
+ * representation of an array item that is only used in memory, when
+ * repacking items on a page. It is distinguished by t_size == 0.
  */
-static inline zstid
-zsbt_attr_item_lasttid(ZSAttributeItem *item)
+typedef struct ZSExplodedItem
 {
-	if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
-		return ((ZSAttributeCompressedItem *) item)->t_lasttid;
-	else
-	{
-		ZSAttributeArrayItem *aitem = (ZSAttributeArrayItem *) item;
-		return aitem->t_tid + aitem->t_nelements - 1;
-	}
+	uint16		t_size; /* dummy 0 */
+	uint16		t_flags;
+
+	uint16		t_num_elements;
+
+	zstid	   *tids;
+
+	bits8	   *nullbitmap;
+
+	char	   *datumdata;
+	int			datumdatasz;
+} ZSExplodedItem;
+
+#define ZSBT_ATTR_COMPRESSED		0x0001
+#define ZSBT_HAS_NULLS				0x0002
+
+#define ZSBT_ATTR_BITMAPLEN(nelems)		(((int) (nelems) + 7) / 8)
+
+static inline void
+zsbt_attr_item_setnull(bits8 *nullbitmap, int n)
+{
+	nullbitmap[n / 8] |= (1 << (n % 8));
 }
 
-
+static inline bool
+zsbt_attr_item_isnull(bits8 *nullbitmap, int n)
+{
+	return (nullbitmap[n / 8] & (1 << (n % 8))) != 0;
+}
 
 /*
  * TID B-tree leaf page layout
@@ -593,9 +624,7 @@ typedef struct ZSTidTreeScan
 	bool		acquire_predicate_tuple_locks;
 
 	/*
-	 * These fields are used, if the scan is processing an array tuple.
-	 * And also for a single-item tuple - it works just like a single-element
-	 * array tuple.
+	 * These fields are used, when the scan is processing an array item.
 	 */
 	ZSTidItemIterator array_iter;
 } ZSTidTreeScan;
@@ -638,22 +667,22 @@ typedef struct ZSAttrTreeScan
 	zstid		endtid;
 
 	/*
-	 * if we have remaining items from a compressed container tuple, they
-	 * are kept in the decompressor context, and 'has_decompressed' is true.
-	 */
-	ZSDecompressContext decompressor;
-	bool		has_decompressed;
-
-	/*
-	 * These fields are used, if the scan is processing an array tuple.
-	 * And also for a single-item tuple - it works just like a single-element
-	 * array tuple.
+	 * These fields are used, when the scan is processing an array tuple.
+	 * They are filled in by zsbt_attr_item_extract().
 	 */
 	int			array_datums_allocated_size;
 	Datum	   *array_datums;
 	bool	   *array_isnulls;
-	int			array_next_datum;
+	zstid	   *array_tids;
 	int			array_num_elements;
+
+	int			array_next_datum;
+
+	/* working areas for zsbt_attr_item_extract() */
+	char	   *decompress_buf;
+	int			decompress_buf_size;
+	char	   *attr_buf;
+	int			attr_buf_size;
 
 } ZSAttrTreeScan;
 
@@ -772,15 +801,28 @@ extern List *zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, Int
 									   ZSUndoRecPtr recent_oldest_undo);
 
 
-/* prototypes for functions in zedstore_attrpage.c */
+/* prototypes for functions in zedstore_attpage.c */
 extern void zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
 								zstid starttid, zstid endtid, ZSAttrTreeScan *scan);
 extern void zsbt_attr_reset_scan(ZSAttrTreeScan *scan, zstid starttid);
 extern void zsbt_attr_end_scan(ZSAttrTreeScan *scan);
-extern bool zsbt_attr_scan_next(ZSAttrTreeScan *scan);
+extern bool zsbt_attr_scan_next_array(ZSAttrTreeScan *scan);
 
 extern void zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 							  Datum *datums, bool *isnulls, zstid *tids, int ndatums);
+
+/* prototypes for functions in zedstore_attitem.c */
+extern List *zsbt_attr_create_items(Form_pg_attribute att,
+									Datum *datums, bool *isnulls, zstid *tids, int nelements);
+extern void zsbt_split_item(Form_pg_attribute attr, ZSExplodedItem *origitem, zstid first_right_tid,
+					 ZSExplodedItem **leftitem_p, ZSExplodedItem **rightitem_p);
+extern ZSExplodedItem *zsbt_attr_remove_from_item(Form_pg_attribute attr,
+												  ZSAttributeArrayItem *olditem,
+												  zstid *removetids);
+extern List *zsbt_attr_recompress_items(Form_pg_attribute attr, List *olditems);
+
+extern void zsbt_attr_item_extract(ZSAttrTreeScan *scan, ZSAttributeArrayItem *item);
+
 
 /* prototypes for functions in zedstore_btree.c */
 extern zs_split_stack *zsbt_newroot(Relation rel, AttrNumber attno, int level, List *downlinks);
@@ -791,28 +833,6 @@ extern void zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids);
 extern zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level);
 extern Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
 extern bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf);
-
-static inline void
-zsbt_attr_scan_skip(ZSAttrTreeScan *scan, zstid tid)
-{
-	if (tid > scan->nexttid)
-	{
-		if (scan->array_next_datum < scan->array_num_elements)
-		{
-			int64		skip = tid - scan->nexttid;
-
-			if (skip < scan->array_num_elements - scan->array_next_datum)
-			{
-				scan->array_next_datum += skip;
-			}
-			else
-			{
-				scan->array_next_datum = scan->array_num_elements;
-			}
-		}
-		scan->nexttid = tid;
-	}
-}
 
 /*
  * Return the value of row identified with 'tid' in a scan.
@@ -825,11 +845,16 @@ zsbt_attr_scan_skip(ZSAttrTreeScan *scan, zstid tid)
 static inline bool
 zsbt_attr_fetch(ZSAttrTreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 {
+	zstid			next_scan_tid;
+
 	if (!scan->active)
 		return false;
 
-	/* skip to the given tid. */
-	zsbt_attr_scan_skip(scan, tid);
+	if (tid < scan->nexttid)
+	{
+		/* The next item from this scan is beyond the TID we're looking for. */
+		return false;
+	}
 
 	/*
 	 * Fetch the next item from the scan. The item we're looking for might
@@ -837,22 +862,35 @@ zsbt_attr_fetch(ZSAttrTreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 	 */
 	do
 	{
-		if (tid < scan->nexttid)
+		next_scan_tid = scan->nexttid;
+		while (scan->array_next_datum < scan->array_num_elements)
 		{
-			/* The next item from this scan is beyond the TID we're looking for. */
-			return false;
+			next_scan_tid = scan->array_tids[scan->array_next_datum];
+
+			if (tid > next_scan_tid)
+			{
+				scan->array_next_datum++;
+				next_scan_tid++;
+			}
+			else if (tid == next_scan_tid)
+			{
+				*isnull = scan->array_isnulls[scan->array_next_datum];
+				*datum = scan->array_datums[scan->array_next_datum];
+				scan->array_next_datum++;
+				scan->nexttid = tid + 1;
+				return true;
+			}
+			else /* tid < next_scan_tid */
+			{
+				scan->nexttid = next_scan_tid;
+				return false;
+			}
 		}
 
-		if (scan->array_next_datum < scan->array_num_elements)
-		{
-			*isnull = scan->array_isnulls[scan->array_next_datum];
-			*datum = scan->array_datums[scan->array_next_datum];
-			scan->array_next_datum++;
-			scan->nexttid++;
-			return true;
-		}
-		/* Advance the scan, and check again. */
-	} while (zsbt_attr_scan_next(scan));
+		/* processed all of this array. Fetch another item */
+		scan->nexttid = next_scan_tid;
+	}
+	while (zsbt_attr_scan_next_array(scan));
 
 	return false;
 }

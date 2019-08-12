@@ -34,19 +34,10 @@
 #include "utils/rel.h"
 
 /* prototypes for local functions */
-static void zsbt_attr_recompress_replace(Relation rel, AttrNumber attno,
-										 Buffer oldbuf, List *items);
+static void zsbt_attr_repack_replace(Relation rel, AttrNumber attno,
+									 Buffer oldbuf, List *items);
 static void zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf,
 								List *newitems);
-static Size zsbt_add_data_size(Form_pg_attribute atti, Size datasz, Datum val, bool isnull);
-static ZSAttributeItem *zsbt_attr_copy_item(ZSAttributeItem *item);
-static ZSAttributeItem *zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid,
-														  int nelements, Datum *datums, bool *isnulls,
-														  Size datasz);
-static zstid zsbt_attr_item_remove_elements(Form_pg_attribute atti,
-											ZSAttributeArrayItem *olditem,
-											zstid removetid, IntegerSet *more_removetids,
-											List **newitems);
 
 /* ----------------------------------------------------------------
  *						 Public interface
@@ -67,20 +58,23 @@ zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid star
 	scan->attdesc = TupleDescAttr(tdesc, attno - 1);
 
 	scan->context = CurrentMemoryContext;
-	scan->has_decompressed = false;
 	scan->nexttid = starttid;
 	scan->endtid = endtid;
 	scan->array_datums = MemoryContextAlloc(scan->context, sizeof(Datum));
-	scan->array_isnulls = MemoryContextAlloc(scan->context, sizeof(bool));
+	scan->array_isnulls = MemoryContextAlloc(scan->context, sizeof(bool) + 7);
+	scan->array_tids = MemoryContextAlloc(scan->context, sizeof(zstid));
 	scan->array_datums_allocated_size = 1;
 	scan->array_num_elements = 0;
 	scan->array_next_datum = 0;
 
+	scan->decompress_buf = NULL;
+	scan->decompress_buf_size = 0;
+	scan->attr_buf = NULL;
+	scan->attr_buf_size = 0;
+
 	scan->active = true;
 	scan->lastbuf = InvalidBuffer;
 	scan->lastoff = InvalidOffsetNumber;
-
-	zs_decompress_init(&scan->decompressor);
 }
 
 /*
@@ -92,16 +86,14 @@ zsbt_attr_reset_scan(ZSAttrTreeScan *scan, zstid starttid)
 	if (starttid < scan->nexttid)
 	{
 		/* have to restart from scratch. */
+		/* XXX: could check if it's within the current array, though */
 		scan->array_num_elements = 0;
 		scan->array_next_datum = 0;
 		scan->nexttid = starttid;
-		scan->has_decompressed = false;
 		if (scan->lastbuf != InvalidBuffer)
 			ReleaseBuffer(scan->lastbuf);
 		scan->lastbuf = InvalidBuffer;
 	}
-	else
-		zsbt_attr_scan_skip(scan, starttid);
 }
 
 void
@@ -112,203 +104,10 @@ zsbt_attr_end_scan(ZSAttrTreeScan *scan)
 
 	if (scan->lastbuf != InvalidBuffer)
 		ReleaseBuffer(scan->lastbuf);
-	zs_decompress_free(&scan->decompressor);
 
 	scan->active = false;
 	scan->array_num_elements = 0;
 	scan->array_next_datum = 0;
-}
-
-/*
- * Helper function of zsbt_attr_scan_next(), to extract Datums from the given
- * array item into the scan->array_* fields.
- */
-static void
-zsbt_attr_scan_extract_array(ZSAttrTreeScan *scan, ZSAttributeArrayItem *aitem)
-{
-	int			nelements = aitem->t_nelements;
-	zstid		tid = aitem->t_tid;
-	char	   *p = zsbt_attr_item_payload(aitem);
-	int			firstelem;
-	Form_pg_attribute attr = scan->attdesc;
-	int16		attlen = attr->attlen;
-
-	/* skip over elements that we are not interested in */
-	firstelem = 0;
-	while (tid < scan->nexttid && nelements > 0)
-	{
-		if (!zsbt_attr_item_isnull(aitem, firstelem))
-		{
-			if (attr->attlen > 0)
-			{
-				p += att_align_nominal(attr->attlen, attr->attalign);
-			}
-			else
-			{
-				p = (Pointer) att_align_pointer(p, attr->attalign, attr->attlen, p);
-
-				if (attr->attlen == -1 &&
-					VARATT_IS_EXTERNAL(p) && VARTAG_EXTERNAL(p) == VARTAG_ZEDSTORE)
-				{
-					p += sizeof(varatt_zs_toastptr);
-				}
-				else
-					p = att_addlength_pointer(p, attr->attlen, p);
-			}
-		}
-		tid++;
-		nelements--;
-		firstelem++;
-	}
-
-	/* leave out elements that are past end of range */
-	if (tid + nelements > scan->endtid)
-		nelements = scan->endtid - tid;
-
-	if (nelements > scan->array_datums_allocated_size)
-	{
-		if (scan->array_datums)
-			pfree(scan->array_datums);
-		if (scan->array_isnulls)
-			pfree(scan->array_isnulls);
-		scan->array_datums = MemoryContextAlloc(scan->context, nelements * sizeof(Datum));
-		scan->array_isnulls = MemoryContextAlloc(scan->context, nelements * sizeof(bool));
-		scan->array_datums_allocated_size = nelements;
-	}
-
-	/*
-	 * Expand the packed array data into an array of Datums.
-	 *
-	 * It would perhaps be more natural to loop through the elements with
-	 * datumGetSize() and fetch_att(), but this is a pretty hot loop, so it's
-	 * better to avoid checking attlen/attbyval in the loop.
-	 *
-	 * TODO: a different on-disk representation might make this better still,
-	 * for varlenas (this is pretty optimal for fixed-lengths already).
-	 * For example, storing an array of sizes or an array of offsets, followed
-	 * by the data itself, might incur fewer pipeline stalls in the CPU.
-	 */
-	if (attr->attbyval)
-	{
-		if (attlen == sizeof(Datum))
-		{
-			for (int i = 0; i < nelements; i++)
-			{
-				if (zsbt_attr_item_isnull(aitem, firstelem + i))
-				{
-					scan->array_isnulls[i] = true;
-					scan->array_datums[i] = (Datum) 0;
-				}
-				else
-				{
-					scan->array_isnulls[i] = false;
-					scan->array_datums[i] = fetch_att(p, true, sizeof(Datum));
-					p += sizeof(Datum);
-				}
-			}
-		}
-		else if (attlen == sizeof(int32))
-		{
-			for (int i = 0; i < nelements; i++)
-			{
-				if (zsbt_attr_item_isnull(aitem, firstelem + i))
-				{
-					scan->array_isnulls[i] = true;
-					scan->array_datums[i] = (Datum) 0;
-				}
-				else
-				{
-					scan->array_isnulls[i] = false;
-					scan->array_datums[i] = fetch_att(p, true, sizeof(int32));
-					p += sizeof(int32);
-				}
-			}
-		}
-		else if (attlen == sizeof(int16))
-		{
-			for (int i = 0; i < nelements; i++)
-			{
-				if (zsbt_attr_item_isnull(aitem, firstelem + i))
-				{
-					scan->array_isnulls[i] = true;
-					scan->array_datums[i] = (Datum) 0;
-				}
-				else
-				{
-					scan->array_isnulls[i] = false;
-					scan->array_datums[i] = fetch_att(p, true, sizeof(int16));
-					p += sizeof(int16);
-				}
-			}
-		}
-		else if (attlen == 1)
-		{
-			for (int i = 0; i < nelements; i++)
-			{
-				if (zsbt_attr_item_isnull(aitem, firstelem + i))
-				{
-					scan->array_isnulls[i] = true;
-					scan->array_datums[i] = (Datum) 0;
-				}
-				else
-				{
-					scan->array_isnulls[i] = false;
-					scan->array_datums[i] = fetch_att(p, true, 1);
-					p += 1;
-				}
-			}
-		}
-		else
-			Assert(false);
-	}
-	else if (attlen > 0)
-	{
-		for (int i = 0; i < nelements; i++)
-		{
-			if (zsbt_attr_item_isnull(aitem, firstelem + i))
-			{
-				scan->array_isnulls[i] = true;
-				scan->array_datums[i] = (Datum) 0;
-			}
-			else
-			{
-				scan->array_isnulls[i] = false;
-				scan->array_datums[i] = PointerGetDatum(p);
-				p += att_align_nominal(attr->attlen, attr->attalign);
-			}
-		}
-	}
-	else if (attlen == -1)
-	{
-		for (int i = 0; i < nelements; i++)
-		{
-			if (zsbt_attr_item_isnull(aitem, firstelem + i))
-			{
-				scan->array_isnulls[i] = true;
-				scan->array_datums[i] = (Datum) 0;
-			}
-			else
-			{
-				scan->array_isnulls[i] = false;
-				p = (Pointer) att_align_pointer(p, attr->attalign, attlen, p);
-				scan->array_datums[i] = PointerGetDatum(p);
-				if (VARATT_IS_EXTERNAL(p) && VARTAG_EXTERNAL(p) == VARTAG_ZEDSTORE)
-					p += sizeof(varatt_zs_toastptr);
-				else
-					p = att_addlength_pointer(p, attlen, p);
-			}
-		}
-	}
-	else
-	{
-		/* TODO: convert cstrings to varlenas before we get here? */
-		elog(ERROR, "cstrings not supported");
-	}
-
-	scan->array_next_datum = 0;
-	scan->array_num_elements = nelements;
-	if (scan->nexttid < tid)
-		scan->nexttid = tid;
 }
 
 /*
@@ -322,7 +121,7 @@ zsbt_attr_scan_extract_array(ZSAttrTreeScan *scan, ZSAttributeArrayItem *aitem)
  * zsbt_scan_next_fetch() wrappers, instead.
  */
 bool
-zsbt_attr_scan_next(ZSAttrTreeScan *scan)
+zsbt_attr_scan_next_array(ZSAttrTreeScan *scan)
 {
 	Buffer		buf;
 	bool		buf_is_locked = false;
@@ -341,52 +140,6 @@ zsbt_attr_scan_next(ZSAttrTreeScan *scan)
 	 */
 	while (scan->nexttid < scan->endtid)
 	{
-		/*
-		 * If we are still processing an array item, return next element from it.
-		 */
-		if (scan->array_next_datum < scan->array_num_elements)
-			return true;
-
-		/*
-		 * If we are still processing a compressed item, process the next item
-		 * from the it. If it's an array item, we start iterating the array by
-		 * setting the scan->array_* fields, and loop back to top to return the
-		 * first element from the array.
-		 */
-		if (scan->has_decompressed)
-		{
-			zstid		lasttid;
-			ZSAttributeItem *uitem;
-
-			uitem = zs_decompress_read_item(&scan->decompressor);
-
-			if (uitem == NULL)
-			{
-				scan->has_decompressed = false;
-				continue;
-			}
-
-			/* a compressed item cannot contain nested compressed items */
-			Assert((uitem->t_flags & ZSBT_ATTR_COMPRESSED) == 0);
-
-			lasttid = zsbt_attr_item_lasttid(uitem);
-			if (lasttid < scan->nexttid)
-				continue;
-
-			if (uitem->t_tid >= scan->endtid)
-				break;
-
-			/* no need to make a copy, because the uncompressed buffer
-			 * is already a copy */
-
-			/*
-			 * XXX: currently, there's only one kind of an item, but we'll probably get
-			 * different more or less compact formats in the future.
-			 */
-			zsbt_attr_scan_extract_array(scan, (ZSAttributeArrayItem *) uitem);
-			continue;
-		}
-
 		/*
 		 * Scan the page for the next item.
 		 */
@@ -458,53 +211,34 @@ zsbt_attr_scan_next(ZSAttrTreeScan *scan)
 		for (off = FirstOffsetNumber; off <= maxoff; off++)
 		{
 			ItemId		iid = PageGetItemId(page, off);
-			ZSAttributeItem *item = (ZSAttributeItem *) PageGetItem(page, iid);
-			zstid		lasttid;
+			ZSAttributeArrayItem *item = (ZSAttributeArrayItem *) PageGetItem(page, iid);
+			ZSAttributeArrayItem *aitem;
 
-			lasttid = zsbt_attr_item_lasttid(item);
-
-			if (scan->nexttid > lasttid)
+			if (scan->nexttid >= item->t_endtid)
 				continue;
 
-			if (item->t_tid >= scan->endtid)
+			if (item->t_firsttid >= scan->endtid)
 			{
 				scan->nexttid = scan->endtid;
 				break;
 			}
 
-			if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
-			{
-				ZSAttributeCompressedItem *citem = (ZSAttributeCompressedItem *) item;
-				MemoryContext oldcxt = MemoryContextSwitchTo(scan->context);
+			/* copy the item, because we can't hold a lock on the page  */
+			/* XXX: this is wasteful, if it's compressed */
+			aitem = MemoryContextAlloc(scan->context, item->t_size);
+			memcpy(aitem, item, item->t_size);
 
-				zs_decompress_chunk(&scan->decompressor, citem);
-				MemoryContextSwitchTo(oldcxt);
-				scan->has_decompressed = true;
-				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+			zsbt_attr_item_extract(scan, aitem);
+			scan->array_next_datum = 0;
+
+			if (scan->array_num_elements > 0)
+			{
+				/* Found it! */
+				LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
 				buf_is_locked = false;
-				break;
-			}
-			else
-			{
-				/* copy the item, because we can't hold a lock on the page  */
-				ZSAttributeArrayItem *aitem;
-
-				aitem = MemoryContextAlloc(scan->context, item->t_size);
-				memcpy(aitem, item, item->t_size);
-
-				zsbt_attr_scan_extract_array(scan, aitem);
-
-				if (scan->array_next_datum < scan->array_num_elements)
-				{
-					LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
-					buf_is_locked = false;
-					break;
-				}
+				return true;
 			}
 		}
-
-		if (scan->array_next_datum < scan->array_num_elements || scan->has_decompressed)
-			continue;
 
 		/* No more items on this page. Walk right, if possible */
 		if (scan->nexttid < opaque->zs_hikey)
@@ -516,18 +250,16 @@ zsbt_attr_scan_next(ZSAttrTreeScan *scan)
 		buf_is_locked = false;
 
 		if (next == InvalidBlockNumber || scan->nexttid >= scan->endtid)
-		{
-			scan->active = false;
-			scan->array_num_elements = 0;
-			scan->array_next_datum = 0;
-			ReleaseBuffer(scan->lastbuf);
-			scan->lastbuf = InvalidBuffer;
 			break;
-		}
 
 		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 	}
 
+	scan->active = false;
+	scan->array_num_elements = 0;
+	scan->array_next_datum = 0;
+	ReleaseBuffer(scan->lastbuf);
+	scan->lastbuf = InvalidBuffer;
 	return false;
 }
 
@@ -541,7 +273,6 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 	Form_pg_attribute attr;
 	Buffer		buf;
 	zstid		insert_target_key;
-	int			i;
 	List	   *newitems;
 
 	Assert (attno >= 1);
@@ -552,71 +283,16 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 	 */
 	insert_target_key = tids[0];
 
+	/* Create items to insert. */
+	newitems = zsbt_attr_create_items(attr, datums, isnulls, tids, nitems);
+
 	buf = zsbt_descend(rel, attno, insert_target_key, 0, false);
 
-	/* Create items to insert. */
-	newitems = NIL;
-	i = 0;
-	while (i < nitems)
-	{
-		Size		datasz;
-		int			j;
-		ZSAttributeItem *newitem;
-
-		/*
-		 * Try to collapse as many items as possible into an Array item.
-		 * The first item in the array is now at tids[i]/datums[i]/isnulls[i].
-		 * Items can be stored in the same array as long as the TIDs are
-		 * consecutive, they all have the same isnull flag, and the array
-		 * isn't too large to be stored on a single leaf page. Scan the
-		 * arrays, checking those conditions.
-		 */
-		datasz = zsbt_add_data_size(attr, 0, datums[i], isnulls[i]);
-		for (j = i + 1; j < nitems; j++)
-		{
-			if (tids[j] != tids[j - 1] + 1)
-				break;
-
-			/*
-			 * Will the array still fit on a leaf page, if this datum is
-			 * included in it? We actually use 1/4 of the page, to avoid
-			 * making very large arrays, which might be slower to update in
-			 * the future. Also, using an array that completely fills a page
-			 * might cause more fragmentation. (XXX: The 1/4 threshold
-			 * is arbitrary, though, and this probably needs more smarts
-			 * or testing to determine the optimum.)
-			 *
-			 * FIXME: this math doesn't take into account the size needed for
-			 * the null bitmap.
-			 */
-			if (!isnulls[j])
-			{
-				Datum		val = datums[j];
-				Size		newdatasz;
-
-				newdatasz = zsbt_add_data_size(attr, datasz, val, false);
-
-				if (newdatasz > MaxZedStoreDatumSize / 4)
-					break;
-				datasz = newdatasz;
-			}
-		}
-
-		/*
-		 * 'i' is now the first entry to store in the array, and 'j' is the
-		 * last + 1 elemnt to store. If j == i + 1, then there is only one
-		 * element and zsbt_create_item() will create a 'single' item rather
-		 * than an array.
-		 */
-		newitem = zsbt_attr_create_item_from_datums(attr, tids[i],
-													j - i,
-													&datums[i],
-													&isnulls[i],
-													datasz);
-
-		newitems = lappend(newitems, newitem);
-		i = j;
-	}
+	/*
+	 * FIXME: I think it's possible, that the target page has been split by
+	 * a concurrent backend, so that it contains only part of the keyspace.
+	 * zsbt_attr_add_items() would not handle that correctly.
+	 */
 
 	/* recompress and possibly split the page */
 	zsbt_attr_add_items(rel, attno, buf, newitems);
@@ -637,9 +313,8 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 	OffsetNumber maxoff;
 	OffsetNumber off;
 	List	   *newitems = NIL;
-	ZSDecompressContext decompressor;
-	bool		decompressing = false;
-	ZSAttributeItem *item;
+	ZSAttributeArrayItem *item;
+	ZSExplodedItem *newitem;
 	zstid		nexttid;
 	MemoryContext oldcontext;
 	MemoryContext tmpcontext;
@@ -660,8 +335,6 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 		buf = zsbt_descend(rel, attno, nexttid, 0, false);
 		page = BufferGetPage(buf);
 
-		zs_decompress_init(&decompressor);
-		decompressing = false;
 		newitems = NIL;
 
 		/*
@@ -671,63 +344,37 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 		off = FirstOffsetNumber;
 		for (;;)
 		{
-			zstid		lasttid;
+			zstid		endtid;
+			ItemId		iid;
+			int			num_to_remove;
+			zstid	   *tids_arr;
 
-			if (decompressing)
-			{
-				item = zs_decompress_read_item(&decompressor);
-				if (item == NULL)
-				{
-					decompressing = false;
-					continue;
-				}
-			}
-			else
-			{
-				ItemId		iid;
+			if (off > maxoff)
+				break;
 
-				if (off > maxoff)
-					break;
-
-				iid = PageGetItemId(page, off);
-				item = (ZSAttributeItem *) PageGetItem(page, iid);
-				off++;
-			}
+			iid = PageGetItemId(page, off);
+			item = (ZSAttributeArrayItem *) PageGetItem(page, iid);
+			off++;
 
 			/*
 			 * If we don't find an item containing the given TID, just skip
 			 * over it.
 			 *
-			 * XXX: This can legitimately happen, if e.g. VACUUM is
+			 * This can legitimately happen, if e.g. VACUUM is
 			 * interrupted, after it has already removed the attribute data for
-			 * the dead tuples. And in fact, zsbt_attr_item_remove_elements()
-			 * won't emit warnings like this.
+			 * the dead tuples.
 			 */
-			while (nexttid != MaxZSTid && nexttid < item->t_tid)
+			while (nexttid != MaxZSTid && nexttid < item->t_firsttid)
 			{
-				elog(WARNING, "could not find tuple to remove with TID (%u, %u) for attribute %d",
-					 ZSTidGetBlockNumber(nexttid), ZSTidGetOffsetNumber(nexttid), attno);
-
 				if (!intset_iterate_next(tids, &nexttid))
 					nexttid = MaxZSTid;
 			}
 
 			/* If this item doesn't contain any of the items we're removing, keep it as it is. */
-			lasttid = zsbt_attr_item_lasttid(item);
-			if (nexttid == MaxZSTid || lasttid < nexttid)
+			endtid = item->t_endtid;
+			if (nexttid == MaxZSTid || endtid < nexttid)
 			{
-				if (decompressing)
-					item = zsbt_attr_copy_item(item);
 				newitems = lappend(newitems, item);
-				continue;
-			}
-
-			if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
-			{
-				ZSAttributeCompressedItem *citem = (ZSAttributeCompressedItem *) item;
-
-				zs_decompress_chunk(&decompressor, citem);
-				decompressing = true;
 				continue;
 			}
 
@@ -736,17 +383,26 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 			 * of the TIDs we want to remove. Split the array, removing all
 			 * the target tids.
 			 */
-			nexttid = zsbt_attr_item_remove_elements(attr,
-													 (ZSAttributeArrayItem *) item,
-													 nexttid, tids,
-													 &newitems);
+			tids_arr = palloc((item->t_num_elements + 1) * sizeof(zstid));
+			num_to_remove = 0;
+			while (nexttid < endtid)
+			{
+				tids_arr[num_to_remove++] = nexttid;
+				if (!intset_iterate_next(tids, &nexttid))
+					nexttid = MaxZSTid;
+			}
+			tids_arr[num_to_remove++] = MaxZSTid;
+			newitem = zsbt_attr_remove_from_item(attr, item, tids_arr);
+			pfree(tids_arr);
+			if (newitem)
+				newitems = lappend(newitems, newitem);
 		}
 
 		/* Now pass the list to the recompressor. */
 		IncrBufferRefCount(buf);
 		if (newitems)
 		{
-			zsbt_attr_recompress_replace(rel, attno, buf, newitems);
+			zsbt_attr_repack_replace(rel, attno, buf, newitems);
 		}
 		else
 		{
@@ -772,7 +428,6 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 		 * point to decompression buffers, so we cannot free them until after writing out
 		 * the pages.
 		 */
-		zs_decompress_free(&decompressor);
 		MemoryContextReset(tmpcontext);
 	}
 	MemoryContextSwitchTo(oldcontext);
@@ -784,763 +439,232 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
  * ----------------------------------------------------------------
  */
 
-/* Does att's datatype allow packing into the 1-byte-header varlena format? */
-#define ATT_IS_PACKABLE(att) \
-	((att)->attlen == -1 && (att)->attstorage != 'p')
-/* Use this if it's already known varlena */
-#define VARLENA_ATT_IS_PACKABLE(att) \
-	((att)->attstorage != 'p')
-
-/*
- * This is very similar to heap_compute_data_size()
- */
-static Size
-zsbt_add_data_size(Form_pg_attribute atti, Size datasz, Datum val, bool isnull)
-{
-	Size		data_length = datasz;
-
-	if (isnull)
-		return data_length;
-
-	if (ATT_IS_PACKABLE(atti) &&
-		VARATT_CAN_MAKE_SHORT(DatumGetPointer(val)))
-	{
-		/*
-		 * we're anticipating converting to a short varlena header, so
-		 * adjust length and don't count any alignment
-		 */
-		data_length += VARATT_CONVERTED_SHORT_SIZE(DatumGetPointer(val));
-	}
-	else if (atti->attlen == -1 &&
-			 VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(val)))
-	{
-		/*
-		 * we want to flatten the expanded value so that the constructed
-		 * tuple doesn't depend on it
-		 */
-		data_length = att_align_nominal(data_length, atti->attalign);
-		data_length += EOH_get_flat_size(DatumGetEOHP(val));
-	}
-	else if (atti->attlen == -1 &&
-			 VARATT_IS_EXTERNAL(val) && VARTAG_EXTERNAL(val) == VARTAG_ZEDSTORE)
-	{
-		data_length += sizeof(varatt_zs_toastptr);
-	}
-	else
-	{
-		data_length = att_align_datum(data_length, atti->attalign,
-									  atti->attlen, val);
-		data_length = att_addlength_datum(data_length, atti->attlen,
-										  val);
-	}
-
-	return data_length;
-}
-
-static ZSAttributeItem *
-zsbt_attr_copy_item(ZSAttributeItem *item)
-{
-	ZSAttributeItem *newitem;
-
-	newitem = palloc(item->t_size);
-	memcpy(newitem, item, item->t_size);
-	return newitem;
-}
-
-/*
- * Form a ZSAttributeItem out of the given datums.
- */
-static ZSAttributeItem *
-zsbt_attr_create_item_from_datums(Form_pg_attribute att, zstid tid,
-								  int nelements, Datum *datums, bool *isnulls,
-								  Size datasz)
-{
-	ZSAttributeArrayItem *newitem;
-	Size		itemsz;
-	char	   *databegin;
-	char	   *data;
-
-	Assert(nelements > 0);
-
-	itemsz = offsetof(ZSAttributeArrayItem, t_bitmap);
-	itemsz += ZSBT_ATTR_BITMAPLEN(nelements);
-	itemsz = MAXALIGN(itemsz);
-	itemsz += datasz;
-
-	newitem = palloc(itemsz);
-	newitem->t_tid = tid;
-	newitem->t_size = itemsz;
-	newitem->t_flags = 0;
-	newitem->t_nelements = nelements;
-
-	databegin = zsbt_attr_item_payload(newitem);
-
-	/*
-	 * Zero the null bitmap. This also zeros all padding bytes between the
-	 * bitmap and the beginning of the payload are 0.
-	 */
-	memset(newitem->t_bitmap, 0, databegin - (char *) newitem->t_bitmap);
-
-	/*
-	 * Copy the data.
-	 *
-	 * This is largely copied from heaptuple.c's fill_val().
-	 */
-	data = databegin;
-
-	for (int i = 0; i < nelements; i++)
-	{
-		Datum		datum = datums[i];
-		Size		data_length;
-
-		if (isnulls[i])
-		{
-			zsbt_attr_item_setnull(newitem, i);
-			continue;
-		}
-
-		/*
-		 * XXX we use the att_align macros on the pointer value itself, not on an
-		 * offset.  This is a bit of a hack.
-		 */
-		if (att->attbyval)
-		{
-			/* pass-by-value */
-			data = (char *) att_align_nominal(data, att->attalign);
-			store_att_byval(data, datum, att->attlen);
-			data_length = att->attlen;
-		}
-		else if (att->attlen == -1)
-		{
-			/* varlena */
-			Pointer		val = DatumGetPointer(datum);
-
-			if (VARATT_IS_EXTERNAL(val))
-			{
-				if (VARATT_IS_EXTERNAL_EXPANDED(val))
-				{
-					/*
-					 * we want to flatten the expanded value so that the
-					 * constructed tuple doesn't depend on it
-					 */
-					/* FIXME: This should happen earlier, because if the
-					 * datum is very large, it should be toasted, and
-					 * that should happen earlier.
-					 */
-					ExpandedObjectHeader *eoh = DatumGetEOHP(datum);
-
-					data = (char *) att_align_nominal(data,
-													  att->attalign);
-					data_length = EOH_get_flat_size(eoh);
-					EOH_flatten_into(eoh, data, data_length);
-				}
-				else if (VARATT_IS_EXTERNAL(val) && VARTAG_EXTERNAL(val) == VARTAG_ZEDSTORE)
-				{
-					data_length = sizeof(varatt_zs_toastptr);
-					memcpy(data, val, data_length);
-				}
-				else
-				{
-					/* no alignment, since it's short by definition */
-					data_length = VARSIZE_EXTERNAL(val);
-					memcpy(data, val, data_length);
-				}
-			}
-			else if (VARATT_IS_SHORT(val))
-			{
-				/* no alignment for short varlenas */
-				data_length = VARSIZE_SHORT(val);
-				memcpy(data, val, data_length);
-			}
-			else if (VARLENA_ATT_IS_PACKABLE(att) &&
-					 VARATT_CAN_MAKE_SHORT(val))
-			{
-				/* convert to short varlena -- no alignment */
-				data_length = VARATT_CONVERTED_SHORT_SIZE(val);
-				SET_VARSIZE_SHORT(data, data_length);
-				memcpy(data + 1, VARDATA(val), data_length - 1);
-			}
-			else
-			{
-				/* full 4-byte header varlena */
-				char		*p = data;
-
-				data = (char *) att_align_nominal(data,
-												  att->attalign);
-
-				/* clear padding bytes */
-				while (p < data)
-					*(p++) = 0;
-
-				data_length = VARSIZE(val);
-				memcpy(data, val, data_length);
-			}
-		}
-		else if (att->attlen == -2)
-		{
-			/* cstring ... never needs alignment */
-			Assert(att->attalign == 'c');
-			data_length = strlen(DatumGetCString(datum)) + 1;
-			memcpy(data, DatumGetPointer(datum), data_length);
-		}
-		else
-		{
-			/* fixed-length pass-by-reference */
-			char		*p = data;
-
-			data = (char *) att_align_nominal(data, att->attalign);
-
-			/* clear padding bytes */
-			while (p < data)
-				*(p++) = 0;
-			Assert(att->attlen > 0);
-			data_length = att->attlen;
-			memcpy(data, DatumGetPointer(datum), data_length);
-		}
-		data += data_length;
-	}
-	Assert(data - databegin == datasz);
-
-	return (ZSAttributeItem *) newitem;
-}
-
-/*
- * Try to merge two array items, if they happen to have consecutive TIDs.
- *
- * On success, returns a merged item that contains the elements of both
- * inputs. if they could not be merged, returns null.
- */
-static ZSAttributeItem *
-zsbt_attr_merge_items(Form_pg_attribute attr,
-					 ZSAttributeItem *aitem, ZSAttributeItem *bitem)
-{
-	ZSAttributeArrayItem *newitem;
-	Size		adatasz;
-	Size		bdatasz;
-	Size		totaldatasz;
-	Size		newitemsz;
-	ZSAttributeArrayItem *a_arr_item;
-	ZSAttributeArrayItem *b_arr_item;
-	Size		paddingsz = 0;
-	char	   *dst;
-
-	/* don't bother trying to merge compressed items */
-	if ((aitem->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
-		return NULL;
-	if ((bitem->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
-		return NULL;
-
-	a_arr_item = (ZSAttributeArrayItem *) aitem;
-	b_arr_item = (ZSAttributeArrayItem *) bitem;
-
-	/*
-	 * Attribute btrees shouldn't be storing duplicate TIDs. Hence, add
-	 * assertion to make sure inserting TID doesn't conflict with existing
-	 * TID.
-	 */
-	Assert((b_arr_item->t_tid < a_arr_item->t_tid) ||
-		   (b_arr_item->t_tid >= a_arr_item->t_tid + a_arr_item->t_nelements));
-
-	/* The arrays must have consecutive TIDs */
-	if (b_arr_item->t_tid != a_arr_item->t_tid + a_arr_item->t_nelements)
-		return NULL;
-
-	/*
-	 * Compute the sizes of the data portions of both inputs, and the space
-	 * needed for the result.
-	 */
-	adatasz = (char *) a_arr_item + a_arr_item->t_size - zsbt_attr_item_payload(a_arr_item);
-
-	if (attr->attlen > 0)
-	{
-		Size	alignedsz = att_align_nominal(adatasz, attr->attalign);
-
-		bdatasz = (char *) b_arr_item + b_arr_item->t_size - zsbt_attr_item_payload(b_arr_item);
-		paddingsz = alignedsz - adatasz;
-		totaldatasz = adatasz + paddingsz + bdatasz;
-	}
-	else if (attr->attlen == -1)
-	{
-		/*
-		 * For varlenas, we have to work harder, to get the alignment right.
-		 * We have to walk through all the elements, and figure out where
-		 * each element will land and what alignment padding they need, when
-		 * they're appended to the first array. (TODO: We could stop short as
-		 * soon as we reach a point where the alignments in the source and
-		 * destination are the same)
-		 */
-		char		*src;
-		int			offset;
-
-		offset = adatasz;
-		src = zsbt_attr_item_payload(b_arr_item);
-		for (int i = 0; i < b_arr_item->t_nelements; i++)
-		{
-			Size		data_length;
-
-			if (zsbt_attr_item_isnull(b_arr_item, i))
-				continue;
-
-			/* Walk to the next element in the source */
-			src = (Pointer) att_align_pointer(src, attr->attalign, attr->attlen, src);
-
-			/* Write it to dest, with proper alignment */
-			if (VARATT_IS_EXTERNAL(src) && VARTAG_EXTERNAL(src) == VARTAG_ZEDSTORE)
-			{
-				data_length = sizeof(varatt_zs_toastptr);
-			}
-			else if (VARATT_IS_SHORT(src))
-			{
-				data_length = VARSIZE_SHORT(src);
-			}
-			else
-			{
-				/* full 4-byte header varlena */
-				offset = att_align_nominal(offset, attr->attalign);
-				data_length = VARSIZE(src);
-			}
-			src += data_length;
-			offset += data_length;
-		}
-
-		totaldatasz = offset;
-		bdatasz = offset - adatasz;
-	}
-	else
-		elog(ERROR, "unexpected attlen %d", attr->attlen);
-
-	newitemsz = offsetof(ZSAttributeArrayItem, t_bitmap);
-	newitemsz += ZSBT_ATTR_BITMAPLEN(a_arr_item->t_nelements + b_arr_item->t_nelements);
-	newitemsz = MAXALIGN(newitemsz);
-	newitemsz += totaldatasz;
-
-	/*
-	 * Like in zsbt_attr_multi_insert(), enforce a practical limit on the
-	 * size of the array tuple.
-	 */
-	if (newitemsz >= MaxZedStoreDatumSize / 4)
-		return NULL;
-
-	newitem = palloc(newitemsz);
-	newitem->t_tid = aitem->t_tid;
-	newitem->t_size = newitemsz;
-	newitem->t_flags = 0;
-	newitem->t_nelements = a_arr_item->t_nelements + b_arr_item->t_nelements;
-
-	/*
-	 * Create combined null bitmap.
-	 *
-	 * The first input's bitmap can be copied as is, while the second bitmap
-	 * needs to be copied bit by bit. (TODO: We could optimize that by shifting
-	 * the bytes in the second bitmap as we copy it, but this will do for now.)
-	 */
-	memset(newitem->t_bitmap, 0, (char *) zsbt_attr_item_payload(newitem) - (char *) newitem->t_bitmap);
-	memcpy(newitem->t_bitmap, a_arr_item->t_bitmap, ZSBT_ATTR_BITMAPLEN(a_arr_item->t_nelements));
-	for (int i = 0; i < b_arr_item->t_nelements; i++)
-	{
-		if (zsbt_attr_item_isnull(b_arr_item, i))
-			zsbt_attr_item_setnull(newitem, a_arr_item->t_nelements + i);
-	}
-
-	/*
-	 * Combine the payloads.
-	 *
-	 * Begin by copying the first item's payload. Then append the second item's
-	 * payload.
-	 */
-	dst = zsbt_attr_item_payload(newitem);
-	memcpy(dst, zsbt_attr_item_payload(a_arr_item), adatasz);
-	dst += adatasz;
-
-	if (attr->attlen > 0)
-	{
-		/* clear alignment padding */
-		memset(dst, 0, paddingsz);
-		dst += paddingsz;
-
-		memcpy(dst, zsbt_attr_item_payload(b_arr_item), bdatasz);
-		dst += bdatasz;
-	}
-	else
-	{
-		char	   *src;
-
-		/* clear alignment padding */
-		memset(dst, 0, bdatasz);
-
-		src = zsbt_attr_item_payload(b_arr_item);
-		for (int i = 0; i < b_arr_item->t_nelements; i++)
-		{
-			Size		data_length;
-
-			if (zsbt_attr_item_isnull(b_arr_item, i))
-				continue;
-
-			/* Walk to the next element in the source */
-			src = (Pointer) att_align_pointer(src, attr->attalign, attr->attlen, src);
-
-			/* Write it to dest, with proper alignment */
-			if (VARATT_IS_EXTERNAL(src) && VARTAG_EXTERNAL(src) == VARTAG_ZEDSTORE)
-			{
-				data_length = sizeof(varatt_zs_toastptr);
-			}
-			else if (VARATT_IS_SHORT(src))
-			{
-				data_length = VARSIZE_SHORT(src);
-			}
-			else
-			{
-				/* full 4-byte header varlena */
-				dst = (char *) att_align_nominal(dst, attr->attalign);
-				data_length = VARSIZE(src);
-			}
-			memcpy(dst, src, data_length);
-			dst += data_length;
-			src += data_length;
-		}
-	}
-	Assert(dst == (char *) newitem + newitem->t_size);
-
-	return (ZSAttributeItem *) newitem;
-}
-
 /*
  * This helper function is used to implement INSERT, UPDATE and DELETE.
  *
  * The items in the 'newitems' list are added to the page, to the correct position.
  *
- * FIXME: Actually, they're always just added to the end of the page, and that
- * better be the correct position.
- *
  * This function handles decompressing and recompressing items, and splitting
- * the page if needed.
+ * existing items, or the page, as needed.
  */
 static void
 zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 {
+	Form_pg_attribute attr;
 	Page		page = BufferGetPage(buf);
 	OffsetNumber off;
 	OffsetNumber maxoff;
-	List	   *items;
-	ZSAttributeItem *mergeditem = NULL;
-	Size		last_item_size = 0;
+	List	   *items = NIL;
 	Size		growth;
 	ListCell   *lc;
+	ListCell   *nextnewlc;
+	zstid		last_existing_tid;
+	ZSAttributeArrayItem *olditem;
+	ZSAttributeArrayItem *newitem;
+
+	attr = &rel->rd_att->attrs[attno - 1];
+
+	nextnewlc = list_head(newitems);
 
 	Assert(newitems != NIL);
 
 	maxoff = PageGetMaxOffsetNumber(page);
 
 	/*
-	 * Add any new items to the end.
-	 *
-	 * As a quick but very effective optimization, check if the last existing
-	 * item on the page happens to be an array item, such that we could merge
-	 * the new item with it. That makes single row INSERTs much more efficient.
+	 * Quick check if the new items go to the end of the page. This is the
+	 * common case, when inserting new rows, since we allocate TIDs in order.
 	 */
-	if (maxoff >= 1)
-	{
-		ItemId		last_iid = PageGetItemId(page, maxoff);
-		ZSAttributeItem *last_old_item = (ZSAttributeItem *) PageGetItem(page, last_iid);
-		ZSAttributeItem *first_new_item = (ZSAttributeItem *) linitial(newitems);
-
-		mergeditem = zsbt_attr_merge_items(TupleDescAttr(RelationGetDescr(rel), attno - 1),
-										   last_old_item, first_new_item);
-		if (mergeditem)
-		{
-			/*
-			 * Yes, we could append to the last array item. 'mergeditem' is now
-			 * the item that will replace the old last item on the page. The
-			 * values of the first new item are now included in 'mergeditem',
-			 * so remove it from the list of new items.
-			 */
-			newitems = list_delete_first(newitems);
-		}
-
-		last_item_size = last_old_item->t_size;
-	}
-
-	/* Can we make the new items fit without splitting the page? */
-	growth = 0;
-	if (mergeditem)
-		growth += MAXALIGN(mergeditem->t_size) - last_item_size;
-	foreach (lc, newitems)
-	{
-		ZSAttributeItem *item = (ZSAttributeItem *) lfirst(lc);
-
-		growth += MAXALIGN(item->t_size) + sizeof(ItemId);
-	}
-
-	if (growth <= PageGetExactFreeSpace(page))
-	{
-		/* The new items fit on the page. Add them. */
-		START_CRIT_SECTION();
-
-		if (mergeditem)
-		{
-			PageIndexTupleDelete(page, maxoff);
-			if (PageAddItemExtended(page,
-									(Item) mergeditem, mergeditem->t_size,
-									maxoff,
-									PAI_OVERWRITE) == InvalidOffsetNumber)
-				elog(ERROR, "could not add item to attribute page");
-		}
-
-		foreach(lc, newitems)
-		{
-			ZSAttributeItem *item = (ZSAttributeItem *) lfirst(lc);
-
-			if (PageAddItemExtended(page,
-									(Item) item, item->t_size,
-									PageGetMaxOffsetNumber(page) + 1,
-									PAI_OVERWRITE) == InvalidOffsetNumber)
-				elog(ERROR, "could not add item to attribute page");
-		}
-
-		MarkBufferDirty(buf);
-
-		/* TODO: WAL-log */
-
-		END_CRIT_SECTION();
-
-		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-		list_free(newitems);
-	}
+	if (maxoff == 0)
+		last_existing_tid = 0;
 	else
 	{
-		/* need to split */
+		ItemId			iid;
+		ZSAttributeArrayItem *lastitem;
 
-		/* Loop through all old items on the page */
-		items = NIL;
-		for (off = 1; off <= maxoff; off++)
+		iid = PageGetItemId(page, maxoff);
+		lastitem = (ZSAttributeArrayItem *) PageGetItem(page, iid);
+
+		last_existing_tid = lastitem->t_endtid;
+	}
+
+	if (((ZSAttributeArrayItem *) lfirst(nextnewlc))->t_firsttid >= last_existing_tid)
+	{
+		/*
+		 * The new items go to the end. Do they fit as is on the page?
+		 * */
+		growth = 0;
+		foreach (lc, newitems)
 		{
-			ZSAttributeItem *item;
+			ZSAttributeArrayItem *item = (ZSAttributeArrayItem *) lfirst(lc);
 
-			if (off == maxoff && mergeditem)
-				item = mergeditem;
-			else
+			growth += MAXALIGN(item->t_size) + sizeof(ItemId);
+		}
+
+		if (growth <= PageGetExactFreeSpace(page))
+		{
+			/* The new items fit on the page. Add them. */
+			START_CRIT_SECTION();
+
+			foreach(lc, newitems)
 			{
-				ItemId		iid = PageGetItemId(page, off);
-				item = (ZSAttributeItem *) PageGetItem(page, iid);
+				ZSAttributeArrayItem *item = (ZSAttributeArrayItem *) lfirst(lc);
+
+				Assert ((item->t_flags & 0x3) == item->t_flags);
+				Assert(item->t_size > 5);
+
+				if (PageAddItemExtended(page,
+										(Item) item, item->t_size,
+										PageGetMaxOffsetNumber(page) + 1,
+										PAI_OVERWRITE) == InvalidOffsetNumber)
+					elog(ERROR, "could not add item to attribute page");
 			}
 
-			items = lappend(items, item);
+			MarkBufferDirty(buf);
+
+			/* TODO: WAL-log */
+
+			END_CRIT_SECTION();
+
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			list_free(newitems);
+
+			return;
+		}
+	}
+
+	/*
+	 * Need to recompress and/or split the hard way.
+	 *
+	 * First, loop through the old and new items in lockstep, to figure out
+	 * where the new items go to. If some of the old and new items have
+	 * overlapping TID ranges, we will need to split some items to make
+	 * them not overlap.
+	 */
+	off = 1;
+	if (off <= maxoff)
+	{
+		ItemId		iid = PageGetItemId(page, off);
+		olditem = (ZSAttributeArrayItem *) PageGetItem(page, iid);
+		off++;
+	}
+	else
+		olditem = NULL;
+
+	if (nextnewlc)
+	{
+		newitem = lfirst(nextnewlc);
+		nextnewlc = lnext(newitems, nextnewlc);
+	}
+
+	for (;;)
+	{
+		if (!newitem && !olditem)
+			break;
+
+		if (newitem && olditem && newitem->t_firsttid == olditem->t_firsttid)
+			elog(ERROR, "duplicate TID on attribute page");
+
+		/*
+		 *   NNNNNNNN
+		 *             OOOOOOOOO
+		 */
+		if (newitem && (!olditem || newitem->t_endtid <= olditem->t_firsttid))
+		{
+			items = lappend(items, newitem);
+			if (nextnewlc)
+			{
+				newitem = lfirst(nextnewlc);
+				nextnewlc = lnext(newitems, nextnewlc);
+			}
+			else
+				newitem = NULL;
+			continue;
 		}
 
 		/*
-		 * Attribute btree should not have Duplicate TIDs. Plus, based on how
-		 * below code works, new TIDs should be greater than existing
-		 * TIDs. Hence, check to make sure the new items don't have
-		 * conflicting TIDs with existing items. The code here performs
-		 * minimal checking to avoid duplicates.  It doesn't perform
-		 * exhaustive checking for array item full ranges don't overlap and
-		 * all, which seems little unnecessary.
+		 *              NNNNNNNN
+		 *   OOOOOOOOO
 		 */
-#ifdef USE_ASSERT_CHECKING
-		if (items && newitems)
+		if (olditem && (!newitem || olditem->t_endtid <= newitem->t_firsttid))
 		{
-			ZSAttributeItem *last_old_item = linitial(items);
-			ZSAttributeItem *first_new_item = linitial(newitems);
-			Assert(last_old_item->t_tid < first_new_item->t_tid);
-		}
-#endif
-		items = list_concat(items, newitems);
-
-		/* Now pass the list to the recompressor. */
-		IncrBufferRefCount(buf);
-
-		zsbt_attr_recompress_replace(rel, attno, buf, items);
-
-		list_free(items);
-	}
-}
-
-/*
- * Remove the values with the given TIDs from an array item,
- * creating new array items. Returns the next TID that was fetched from the set
- * that was *not* removed.
- */
-static zstid
-zsbt_attr_item_remove_elements(Form_pg_attribute attr,
-							   ZSAttributeArrayItem *olditem,
-							   zstid removetid, IntegerSet *more_removetids,
-							   List **newitems)
-{
-	int16		attlen;
-	int16		aligned_attlen = -1;
-	char	   *src;
-	ZSAttributeArrayItem *newitem = NULL;
-	char	   *dst;
-	int		   *keep_tids;
-	int			num_keep_tids;
-	int			cnt = 0;
-	int		   *k;
-
-	/* Only varlenas and fixed-width attributes are supported (not cstrings) */
-	Assert(attr->attlen > 0 || attr->attlen == -1);
-
-	attlen = attr->attlen;
-	if (attr->attlen >= 0)
-		aligned_attlen = att_align_nominal(attr->attlen, attr->attalign);
-
-	/*
-	 * Construct an array, 'keep_tids', to indicate what to do at each
-	 * item. A 0 means that the TID needs to be removed, and should be left
-	 * out from the result. A positive number means that a new array should
-	 * be created starting with the TID at that position, covering the N
-	 * consecutive TIDs. The non-first TIDs that are included in the array
-	 * are marked with -1.
-	 */
-	keep_tids = (int *) palloc(olditem->t_nelements * sizeof(int));
-	num_keep_tids = 0;
-	k = &keep_tids[0];
-	for (int i = 0; i < olditem->t_nelements; i++)
-	{
-		zstid		tid = olditem->t_tid + i;
-
-		while (removetid < tid)
-		{
-			if (!intset_iterate_next(more_removetids, &removetid))
-				removetid = MaxZSTid;
-		}
-
-		if (removetid > tid)
-		{
-			/* Need to keep this one. */
-			cnt++;
-			keep_tids[i] = -1;
-			*k = cnt;
-			num_keep_tids++;
-		}
-		else
-		{
-			/* skip this item, since it's being removed */
-			Assert(removetid == tid);
-			if (!intset_iterate_next(more_removetids, &removetid))
-				removetid = MaxZSTid;
-			keep_tids[i] = 0;
-			cnt = 0;
-			k = &keep_tids[i + 1];
-		}
-	}
-
-	/*
-	 * Now that we know what arrays we need to build, build them, following
-	 * the instructions in 'keep_tids'.
-	 */
-	src = zsbt_attr_item_payload(olditem);
-	for (int i = 0; i < olditem->t_nelements; i++)
-	{
-		zstid		tid = olditem->t_tid + i;
-		bool		align_target = false;
-		int			data_length;
-
-		/* Walk to the next element in the source */
-		src = (Pointer) att_align_pointer(src, attr->attalign, attr->attlen, src);
-		if (zsbt_attr_item_isnull(olditem, i))
-		{
-			data_length = 0;
-		}
-		else if (attlen >= 0)
-		{
-			data_length = aligned_attlen;
-		}
-		else if (VARATT_IS_EXTERNAL(src) && VARTAG_EXTERNAL(src) == VARTAG_ZEDSTORE)
-		{
-			data_length = sizeof(varatt_zs_toastptr);
-		}
-		else if (VARATT_IS_SHORT(src))
-		{
-			data_length = VARSIZE_SHORT(src);
-		}
-		else
-		{
-			/* full 4-byte header varlena */
-			data_length = VARSIZE(src);
-			align_target = true;
-		}
-
-		if (keep_tids[i] != 0)
-		{
-			/* Need to keep this one. */
-			if (newitem == NULL)
+			items = lappend(items, olditem);
+			if (off <= maxoff)
 			{
-				/*
-				 * Allocate an item that's guaranteed to be big enough.
-				 * FIXME: This is almost certainly overkill, but we don't
-				 * know how much we need yet.
-				 */
-				Assert(keep_tids[i] > 0);
-				newitem = palloc(olditem->t_size);
-				newitem->t_tid = tid;
-				/* newitem->t_size is set later */
-				newitem->t_flags = 0;
-				newitem->t_nelements = keep_tids[i];
-				dst = zsbt_attr_item_payload(newitem);
-
-				memset(newitem->t_bitmap, 0, dst - (char *) newitem->t_bitmap);
-
-				cnt = 0;
+				ItemId		iid = PageGetItemId(page, off);
+				olditem = (ZSAttributeArrayItem *) PageGetItem(page, iid);
+				off++;
 			}
 			else
-				Assert(keep_tids[i] == -1);
-
-			/* Write it to dest, with proper alignment */
-			if (align_target)
-			{
-				char	   *newdst = (char *) att_align_nominal(dst, attr->attalign);
-
-				/* zero alignment padding */
-				while (dst < newdst)
-					*(dst++) = 0;
-			}
-
-			memcpy(dst, src, data_length);
-			dst += data_length;
-
-			if (zsbt_attr_item_isnull(olditem, i))
-				zsbt_attr_item_setnull(newitem, cnt);
-			cnt++;
+				olditem = NULL;
+			continue;
 		}
-		else
+
+		/*
+		 *   NNNNNNNN
+		 *        OOOOOOOOO
+		 */
+		if (olditem->t_firsttid > newitem->t_firsttid)
 		{
+			ZSExplodedItem *left_newitem;
+			ZSExplodedItem *right_newitem;
 			/*
-			 * Skip this item, since it's being removed. "Flush" the item we were
-			 * building up to this point.
+			 * split newitem:
+			 *
+			 *   NNNNNnnnn
+			 *        OOOOOOOOO
 			 */
-			if (newitem)
-			{
-				Assert(cnt == newitem->t_nelements);
-				newitem->t_size = dst - (char *) newitem;
-				*newitems = lappend(*newitems, newitem);
-				newitem = NULL;
-			}
+			zsbt_split_item(attr, (ZSExplodedItem *) newitem, olditem->t_firsttid,
+							&left_newitem, &right_newitem);
+			items = lappend(items, left_newitem);
+			newitem = (ZSAttributeArrayItem *) right_newitem;
+			continue;
 		}
 
-		src += data_length;
+		/*
+		 *        NNNNNNNN
+		 *   OOOOOOOOO
+		 */
+		if (olditem->t_firsttid < newitem->t_firsttid)
+		{
+			ZSExplodedItem *left_olditem;
+			ZSExplodedItem *right_olditem;
+			/*
+			 * split olditem:
+			 *
+			 *   OOOOOoooo
+			 *        NNNNNNNNN
+			 */
+			zsbt_split_item(attr, (ZSExplodedItem *) olditem, newitem->t_firsttid,
+							&left_olditem, &right_olditem);
+			items = lappend(items, left_olditem);
+			olditem = (ZSAttributeArrayItem *) right_olditem;
+			continue;
+		}
+
+		elog(ERROR, "shouldn't reach here");
 	}
 
-	if (newitem)
-	{
-		Assert(cnt == newitem->t_nelements);
-		newitem->t_size = dst - (char *) newitem;
-		*newitems = lappend(*newitems, newitem);
-		newitem = NULL;
-	}
+	/* Now pass the list to the repacker, to distribute the items to pages. */
+	IncrBufferRefCount(buf);
 
-	pfree(keep_tids);
-	return removetid;
+	/*
+	 * Now we have a list of non-overlapping items, containing all the old and
+	 * new data. zsbt_attr_repack_replace() takes care of storing them on the
+	 * page, splitting the page if needed.
+	 */
+	zsbt_attr_repack_replace(rel, attno, buf, items);
+
+	list_free(items);
 }
 
 
 /*
- * Recompressor routines
+ * Repacker routines
  */
 typedef struct
 {
 	Page		currpage;
-	ZSCompressContext *compressor;
 	int			compressed_items;
 
 	/* first page writes over the old buffer, subsequent pages get newly-allocated buffers */
@@ -1548,15 +672,14 @@ typedef struct
 	zs_split_stack *stack_tail;
 
 	int			total_items;
-	int			total_compressed_items;
-	int			total_already_compressed_items;
+	int			total_packed_items;
 
 	AttrNumber	attno;
 	zstid		hikey;
-} zsbt_attr_recompress_context;
+} zsbt_attr_repack_context;
 
 static void
-zsbt_attr_recompress_newpage(zsbt_attr_recompress_context *cxt, zstid nexttid, int flags)
+zsbt_attr_repack_newpage(zsbt_attr_repack_context *cxt, zstid nexttid, int flags)
 {
 	Page		newpage;
 	ZSBtreePageOpaque *newopaque;
@@ -1593,98 +716,17 @@ zsbt_attr_recompress_newpage(zsbt_attr_recompress_context *cxt, zstid nexttid, i
 	newopaque->zs_page_id = ZS_BTREE_PAGE_ID;
 }
 
-static void
-zsbt_attr_recompress_add_to_page(zsbt_attr_recompress_context *cxt, ZSAttributeItem *item)
-{
-	if (PageGetFreeSpace(cxt->currpage) < MAXALIGN(item->t_size))
-		zsbt_attr_recompress_newpage(cxt, item->t_tid, 0);
-
-	if (PageAddItemExtended(cxt->currpage,
-							(Item) item, item->t_size,
-							PageGetMaxOffsetNumber(cxt->currpage) + 1,
-							PAI_OVERWRITE) == InvalidOffsetNumber)
-		elog(ERROR, "could not add item to page while recompressing");
-
-	cxt->total_items++;
-}
-
-static bool
-zsbt_attr_recompress_add_to_compressor(zsbt_attr_recompress_context *cxt, ZSAttributeItem *item)
-{
-	bool		result;
-
-	if (cxt->compressed_items == 0)
-	{
-		if (!cxt->compressor)
-		{
-			cxt->compressor = palloc(sizeof(ZSCompressContext));
-			zs_compress_init(cxt->compressor);
-		}
-		zs_compress_begin(cxt->compressor, PageGetFreeSpace(cxt->currpage));
-	}
-
-	result = zs_compress_add(cxt->compressor, item);
-	if (result)
-	{
-		cxt->compressed_items++;
-
-		cxt->total_compressed_items++;
-	}
-
-	return result;
-}
-
-static void
-zsbt_attr_recompress_flush(zsbt_attr_recompress_context *cxt, bool last)
-{
-	ZSAttributeCompressedItem *citem;
-
-	if (cxt->compressed_items == 0)
-		return;
-
-	/*
-	 * If we've seen all the entries, and the last batch fits on the page without
-	 * compression, then just store it. Compression doesn't really buy us
-	 * anything, if the data would fit without it. This also gives the next insert
-	 * a chance to merge the new item into the last array item.
-	 */
-	if (last && cxt->compressor->rawsize <= PageGetFreeSpace(cxt->currpage))
-		citem = NULL;
-	else
-		citem = zs_compress_finish(cxt->compressor);
-
-	if (citem)
-		zsbt_attr_recompress_add_to_page(cxt, (ZSAttributeItem *) citem);
-	else
-	{
-		uint16 size = 0;
-		/*
-		 * compression failed hence add items uncompressed. We should maybe
-		 * note that these items/pattern are not compressible and skip future
-		 * attempts to compress but its possible this clubbed with some other
-		 * future items may compress. So, better avoid recording such info and
-		 * try compression again later if required.
-		 */
-		for (int i = 0; i < cxt->compressor->nitems; i++)
-		{
-			ZSAttributeItem *item = (ZSAttributeItem *) (cxt->compressor->uncompressedbuffer + size);
-
-			zsbt_attr_recompress_add_to_page(cxt, item);
-
-			size += MAXALIGN(item->t_size);
-		}
-	}
-
-	cxt->compressed_items = 0;
-}
-
 /*
  * Rewrite a leaf page, with given 'items' as the new content.
  *
- * If there are any uncompressed items in the list, we try to compress them.
- * Any already-compressed items are added as is.
+ * First, calls zsbt_attr_recompress_items(), which will try to combine
+ * short items, and compress uncompressed items. After that, will try to
+ * store all the items on the page, replacing old content on the page.
  *
- * If the items no longer fit on the page, then the page is split. It is
+ * The items may contain "exploded" items, as ZSExplodedItem. They will
+ * be converted to normal array items suitable for storing on-disk.
+ *
+ * If the items don't fit on the page, then the page is split. It is
  * entirely possible that they don't fit even on two pages; we split the page
  * into as many pages as needed. Hopefully not more than a few pages, though,
  * because otherwise you might hit limits on the number of buffer pins (with
@@ -1694,72 +736,87 @@ zsbt_attr_recompress_flush(zsbt_attr_recompress_context *cxt, bool last)
  * is released, but it's still pinned.
  */
 static void
-zsbt_attr_recompress_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *items)
+zsbt_attr_repack_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *items)
 {
+	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
 	ListCell   *lc;
-	zsbt_attr_recompress_context cxt;
+	zsbt_attr_repack_context cxt;
 	ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(BufferGetPage(oldbuf));
 	BlockNumber orignextblk;
 	zs_split_stack *stack;
 	List	   *downlinks = NIL;
+	List	   *recompressed_items;
 
+	/*
+	 * Check that the items in the input are in correct order and don't
+	 * overlap.
+	 */
+#ifdef USE_ASSERT_CHECKING
+	{
+		zstid		prev_endtid = 0;
+		ListCell   *lc;
+
+		foreach (lc, items)
+		{
+			ZSAttributeArrayItem *item = (ZSAttributeArrayItem *) lfirst(lc);
+			zstid		item_firsttid;
+			zstid		item_endtid;
+
+			if (item->t_size == 0)
+			{
+				ZSExplodedItem *eitem = (ZSExplodedItem *) item;
+				item_firsttid = eitem->tids[0];
+				item_endtid = eitem->tids[eitem->t_num_elements - 1] + 1;
+			}
+			else
+			{
+				item_firsttid = item->t_firsttid;
+				item_endtid = item->t_endtid;;
+			}
+
+			Assert(item_firsttid >= prev_endtid);
+			Assert(item_endtid > item_firsttid);
+			prev_endtid = item_endtid;
+		}
+	}
+#endif
+
+	/*
+	 * First, split, merge and compress the items as needed, into
+	 * suitable chunks.
+	 */
+	recompressed_items = zsbt_attr_recompress_items(attr, items);
+
+	/*
+	 * Then, store them on the page, creating new pages as needed.
+	 */
 	orignextblk = oldopaque->zs_next;
 	Assert(orignextblk != BufferGetBlockNumber(oldbuf));
 
 	cxt.currpage = NULL;
-	cxt.compressor = NULL;
-	cxt.compressed_items = 0;
 	cxt.stack_head = cxt.stack_tail = NULL;
 	cxt.attno = attno;
 	cxt.hikey = oldopaque->zs_hikey;
 
 	cxt.total_items = 0;
-	cxt.total_compressed_items = 0;
-	cxt.total_already_compressed_items = 0;
 
-	zsbt_attr_recompress_newpage(&cxt, oldopaque->zs_lokey, (oldopaque->zs_flags & ZSBT_ROOT));
+	zsbt_attr_repack_newpage(&cxt, oldopaque->zs_lokey, (oldopaque->zs_flags & ZSBT_ROOT));
 
-	foreach(lc, items)
+	foreach(lc, recompressed_items)
 	{
-		ZSAttributeItem *item = (ZSAttributeItem *) lfirst(lc);
+		ZSAttributeArrayItem *item = lfirst(lc);
 
-		if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
-		{
-			/* already compressed, add as it is. */
-			zsbt_attr_recompress_flush(&cxt, false);
-			cxt.total_already_compressed_items++;
-			zsbt_attr_recompress_add_to_page(&cxt, item);
-		}
-		else
-		{
-			/* try to add this item to the compressor */
-			if (!zsbt_attr_recompress_add_to_compressor(&cxt, item))
-			{
-				if (cxt.compressed_items > 0)
-				{
-					/* flush, and retry */
-					zsbt_attr_recompress_flush(&cxt, false);
+		if (PageGetFreeSpace(cxt.currpage) < MAXALIGN(item->t_size))
+			zsbt_attr_repack_newpage(&cxt, item->t_firsttid, 0);
 
-					if (!zsbt_attr_recompress_add_to_compressor(&cxt, item))
-					{
-						/* could not compress, even on its own. Store it uncompressed, then */
-						zsbt_attr_recompress_add_to_page(&cxt, item);
-					}
-				}
-				else
-				{
-					/* could not compress, even on its own. Store it uncompressed, then */
-					zsbt_attr_recompress_add_to_page(&cxt, item);
-				}
-			}
-		}
+		if (PageAddItemExtended(cxt.currpage,
+								(Item) item, item->t_size,
+								PageGetMaxOffsetNumber(cxt.currpage) + 1,
+								PAI_OVERWRITE) == InvalidOffsetNumber)
+			elog(ERROR, "could not add item to page while recompressing");
+
+		cxt.total_items++;
 	}
-
-	/* flush the last one, if any */
-	zsbt_attr_recompress_flush(&cxt, true);
-
-	if (cxt.compressor)
-		zs_compress_free(cxt.compressor);
 
 	/*
 	 * Ok, we now have a list of pages, to replace the original page, as private

@@ -419,17 +419,17 @@ pg_zs_btree_pages(PG_FUNCTION_ARGS)
 				}
 				else
 				{
-					ZSAttributeItem	*item = (ZSAttributeItem *) PageGetItem(page, iid);
+					ZSAttributeArrayItem *item = (ZSAttributeArrayItem *) PageGetItem(page, iid);
 
 					nitems++;
 					totalsz += item->t_size;
-
 					if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
 					{
 						ZSAttributeCompressedItem *citem = (ZSAttributeCompressedItem *) PageGetItem(page, iid);
 
 						ncompressed++;
-						uncompressedsz += citem->t_uncompressedsize;
+						uncompressedsz += offsetof(ZSAttributeCompressedItem, t_payload)
+							+ citem->t_uncompressed_size;
 					}
 					else
 						uncompressedsz += item->t_size;
