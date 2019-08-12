@@ -41,9 +41,13 @@ INSERT INTO results (testname, val) VALUES ('onecol, COPY, time', :after - :befo
 -- SELECT
 --
 
+VACUUM FREEZE onecol;
+
 select extract(epoch from now()) as before
 \gset
 
+SELECT SUM(i) FROM onecol;
+SELECT SUM(i) FROM onecol;
 SELECT SUM(i) FROM onecol;
 
 select extract(epoch from now()) as after
