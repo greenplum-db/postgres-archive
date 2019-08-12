@@ -1186,6 +1186,8 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 		zstid		this_tid;
 		Datum		datum;
 		bool        isnull;
+		ZSUndoSlotVisibility *visi_info;
+		uint8		slotno;
 
 		if (scan->state == ZSSCAN_STATE_UNSTARTED ||
 			scan->state == ZSSCAN_STATE_FINISHED_RANGE)
@@ -1236,85 +1238,75 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 			scan->state = ZSSCAN_STATE_SCANNING;
 		}
 
-		/* We now have a range to scan. Find the next visible TID. */
+		/*
+		 * We now have a range to scan. Find the next visible TID.
+		 */
 		Assert(scan->state == ZSSCAN_STATE_SCANNING);
-
 		this_tid = zsbt_tid_scan_next(&scan_proj->tid_scan);
 		if (this_tid == InvalidZSTid)
 		{
 			scan->state = ZSSCAN_STATE_FINISHED_RANGE;
-		}
-		else
-		{
-			Assert (this_tid < scan->cur_range_end);
-
-			if (callback)
-				callback(&scan_proj->tid_scan, this_tid, callback_state);
-
-			/* Note: We don't need to predicate-lock tuples in Serializable mode,
-			 * because in a sequential scan, we predicate-locked the whole table.
-			 */
-
-			/* Fetch the datums of each attribute for this row */
-			for (int i = 1; i < scan_proj->num_proj_atts; i++)
-			{
-				ZSAttrTreeScan *btscan = &scan_proj->attr_scans[i - 1];
-				Form_pg_attribute attr = btscan->attdesc;
-				int			natt;
-
-				if (!zsbt_attr_fetch(btscan, &datum, &isnull, this_tid))
-					zsbt_fill_missing_attribute_value(slot->tts_tupleDescriptor, btscan->attno,
-													  &datum, &isnull);
-
-				/*
-				 * flatten any ZS-TOASTed values, because the rest of the system
-				 * doesn't know how to deal with them.
-				 */
-				natt = scan_proj->proj_atts[i];
-
-				if (!isnull && attr->attlen == -1 &&
-					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
-				{
-					datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, this_tid, datum);
-				}
-
-				/* Check that the values coming out of the b-tree are aligned properly */
-				if (!isnull && attr->attlen == -1)
-				{
-					Assert (VARATT_IS_1B(datum) || INTALIGN(datum) == datum);
-				}
-
-				Assert(natt > 0);
-				slot_values[natt - 1] = datum;
-				slot_isnull[natt - 1] = isnull;
-			}
-		}
-
-		if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
-		{
 			zsbt_tid_end_scan(&scan_proj->tid_scan);
 			for (int i = 1; i < scan_proj->num_proj_atts; i++)
 				zsbt_attr_end_scan(&scan_proj->attr_scans[i - 1]);
+			continue;
 		}
-		else
+		Assert (this_tid < scan->cur_range_end);
+
+		if (callback)
+			callback(&scan_proj->tid_scan, this_tid, callback_state);
+
+		/* Note: We don't need to predicate-lock tuples in Serializable mode,
+		 * because in a sequential scan, we predicate-locked the whole table.
+		 */
+
+		/* Fetch the datums of each attribute for this row */
+		for (int i = 1; i < scan_proj->num_proj_atts; i++)
 		{
-			ZSUndoSlotVisibility *visi_info;
-			uint8 slotno;
-			Assert(scan->state == ZSSCAN_STATE_SCANNING);
+			ZSAttrTreeScan *btscan = &scan_proj->attr_scans[i - 1];
+			Form_pg_attribute attr = btscan->attdesc;
+			int			natt;
 
-			slotno = ZSTidScanCurUndoSlotNo(&scan_proj->tid_scan);
-			visi_info = &scan_proj->tid_scan.array_iter.undoslot_visibility[slotno];
-			((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->xmin;
-			((ZedstoreTupleTableSlot*)slot)->cmin = visi_info->cmin;
+			if (!zsbt_attr_fetch(btscan, &datum, &isnull, this_tid))
+				zsbt_fill_missing_attribute_value(slot->tts_tupleDescriptor, btscan->attno,
+												  &datum, &isnull);
 
-			slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
-			slot->tts_tid = ItemPointerFromZSTid(this_tid);
-			slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
-			slot->tts_flags &= ~TTS_FLAG_EMPTY;
+			/*
+			 * flatten any ZS-TOASTed values, because the rest of the system
+			 * doesn't know how to deal with them.
+			 */
+			natt = scan_proj->proj_atts[i];
 
-			pgstat_count_heap_getnext(scan->rs_scan.rs_rd);
-			return true;
+			if (!isnull && attr->attlen == -1 &&
+				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+			{
+				datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, this_tid, datum);
+			}
+
+			/* Check that the values coming out of the b-tree are aligned properly */
+			if (!isnull && attr->attlen == -1)
+			{
+				Assert (VARATT_IS_1B(datum) || INTALIGN(datum) == datum);
+			}
+
+			Assert(natt > 0);
+			slot_values[natt - 1] = datum;
+			slot_isnull[natt - 1] = isnull;
 		}
+
+		/* Fill in the rest of the fields in the slot, and return the tuple */
+		slotno = ZSTidScanCurUndoSlotNo(&scan_proj->tid_scan);
+		visi_info = &scan_proj->tid_scan.array_iter.undoslot_visibility[slotno];
+		((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->xmin;
+		((ZedstoreTupleTableSlot*)slot)->cmin = visi_info->cmin;
+
+		slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
+		slot->tts_tid = ItemPointerFromZSTid(this_tid);
+		slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
+		slot->tts_flags &= ~TTS_FLAG_EMPTY;
+
+		pgstat_count_heap_getnext(scan->rs_scan.rs_rd);
+		return true;
 	}
 
 	ExecClearTuple(slot);
