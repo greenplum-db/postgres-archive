@@ -58,14 +58,14 @@ zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid star
 	scan->attdesc = TupleDescAttr(tdesc, attno - 1);
 
 	scan->context = CurrentMemoryContext;
-	scan->nexttid = starttid;
+	scan->starttid = starttid;
 	scan->endtid = endtid;
 	scan->array_datums = MemoryContextAlloc(scan->context, sizeof(Datum));
 	scan->array_isnulls = MemoryContextAlloc(scan->context, sizeof(bool) + 7);
 	scan->array_tids = MemoryContextAlloc(scan->context, sizeof(zstid));
 	scan->array_datums_allocated_size = 1;
 	scan->array_num_elements = 0;
-	scan->array_next_datum = 0;
+	scan->array_curr_idx = -1;
 
 	scan->decompress_buf = NULL;
 	scan->decompress_buf_size = 0;
@@ -75,25 +75,6 @@ zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid star
 	scan->active = true;
 	scan->lastbuf = InvalidBuffer;
 	scan->lastoff = InvalidOffsetNumber;
-}
-
-/*
- * Reset the 'next' TID in a scan to the given TID.
- */
-void
-zsbt_attr_reset_scan(ZSAttrTreeScan *scan, zstid starttid)
-{
-	if (starttid < scan->nexttid)
-	{
-		/* have to restart from scratch. */
-		/* XXX: could check if it's within the current array, though */
-		scan->array_num_elements = 0;
-		scan->array_next_datum = 0;
-		scan->nexttid = starttid;
-		if (scan->lastbuf != InvalidBuffer)
-			ReleaseBuffer(scan->lastbuf);
-		scan->lastbuf = InvalidBuffer;
-	}
 }
 
 void
@@ -107,21 +88,24 @@ zsbt_attr_end_scan(ZSAttrTreeScan *scan)
 
 	scan->active = false;
 	scan->array_num_elements = 0;
-	scan->array_next_datum = 0;
+	scan->array_curr_idx = -1;
 }
 
 /*
- * Advance scan to next array item.
+ * Fetch the array item whose firsttid-endtid range contains 'nexttid',
+ * if any.
  *
- * Return true if there was another item. The Datum/isnull data of are
+ * Return true if an item was found. The Datum/isnull data of are
  * placed into scan->array_* fields. The data is valid until the next
- * call of this function.
+ * call of this function. Note that the item's range contains 'nexttid',
+ * but its TID list might not include the exact TID itself. The caller
+ * must scan the array to check for that.
  *
  * This is normally not used directly. Use the zsbt_attr_fetch() wrapper,
  * instead.
  */
 bool
-zsbt_attr_scan_next_array(ZSAttrTreeScan *scan)
+zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid nexttid)
 {
 	if (!scan->active)
 		return InvalidZSTid;
@@ -131,20 +115,18 @@ zsbt_attr_scan_next_array(ZSAttrTreeScan *scan)
 	 *
 	 * This advances scan->nexttid as it goes.
 	 */
-	while (scan->nexttid < scan->endtid)
+	while (nexttid < scan->endtid)
 	{
 		Buffer		buf;
 		Page		page;
-		ZSBtreePageOpaque *opaque;
 		OffsetNumber off;
 		OffsetNumber maxoff;
-		BlockNumber	next;
 
 		/*
 		 * Find and lock the leaf page containing scan->nexttid.
 		 */
 		buf = zsbt_find_and_lock_leaf_containing_tid(scan->rel, scan->attno,
-													 scan->lastbuf, scan->nexttid,
+													 scan->lastbuf, nexttid,
 													 BUFFER_LOCK_SHARE);
 		scan->lastbuf = buf;
 		if (!BufferIsValid(buf))
@@ -157,8 +139,6 @@ zsbt_attr_scan_next_array(ZSAttrTreeScan *scan)
 			break;
 		}
 		page = BufferGetPage(buf);
-		opaque = ZSBtreePageGetOpaque(page);
-		Assert(opaque->zs_page_id == ZS_BTREE_PAGE_ID);
 
 		/*
 		 * Scan the items on the page, to find the next one that covers
@@ -171,14 +151,11 @@ zsbt_attr_scan_next_array(ZSAttrTreeScan *scan)
 			ItemId		iid = PageGetItemId(page, off);
 			ZSAttributeArrayItem *item = (ZSAttributeArrayItem *) PageGetItem(page, iid);
 
-			if (scan->nexttid >= item->t_endtid)
+			if (item->t_endtid <= nexttid)
 				continue;
 
-			if (item->t_firsttid >= scan->endtid)
-			{
-				scan->nexttid = scan->endtid;
+			if (item->t_firsttid > nexttid)
 				break;
-			}
 
 			/*
 			 * Extract the data into scan->array_* fields.
@@ -187,7 +164,7 @@ zsbt_attr_scan_next_array(ZSAttrTreeScan *scan)
 			 * so we can release the lock on the page after doing this.
 			 */
 			zsbt_attr_item_extract(scan, item);
-			scan->array_next_datum = 0;
+			scan->array_curr_idx = -1;
 
 			if (scan->array_num_elements > 0)
 			{
@@ -197,27 +174,18 @@ zsbt_attr_scan_next_array(ZSAttrTreeScan *scan)
 			}
 		}
 
-		/* No more items on this page. Walk right, if possible */
-		if (scan->nexttid < opaque->zs_hikey)
-			scan->nexttid = opaque->zs_hikey;
-		next = opaque->zs_next;
-		if (next == BufferGetBlockNumber(buf))
-			elog(ERROR, "btree page %u next-pointer points to itself", next);
+		/* No matching items. XXX: we should remember the 'next' block, for
+		 * the next call. When we're seqscanning, we will almost certainly need
+		 * that next.
+		 */
 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-		if (next == InvalidBlockNumber || scan->nexttid >= scan->endtid)
-		{
-			/* reached end of scan */
-			break;
-		}
-
-		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
+		return false;
 	}
 
 	/* Reached end of scan. */
 	scan->active = false;
 	scan->array_num_elements = 0;
-	scan->array_next_datum = 0;
+	scan->array_curr_idx = -1;
 	if (BufferIsValid(scan->lastbuf))
 		ReleaseBuffer(scan->lastbuf);
 	scan->lastbuf = InvalidBuffer;

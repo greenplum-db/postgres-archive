@@ -67,11 +67,13 @@ zsbt_tid_begin_scan(Relation rel, zstid starttid,
 	scan->rel = rel;
 	scan->snapshot = snapshot;
 	scan->context = CurrentMemoryContext;
-	scan->nexttid = starttid;
+	scan->starttid = starttid;
 	scan->endtid = endtid;
+	scan->currtid = starttid - 1;
 	memset(&scan->recent_oldest_undo, 0, sizeof(scan->recent_oldest_undo));
 	memset(&scan->array_iter, 0, sizeof(scan->array_iter));
 	scan->array_iter.context = CurrentMemoryContext;
+	scan->array_curr_idx = -1;
 
 	scan->active = true;
 	scan->lastbuf = InvalidBuffer;
@@ -84,54 +86,10 @@ zsbt_tid_begin_scan(Relation rel, zstid starttid,
  * Reset the 'next' TID in a scan to the given TID.
  */
 void
-zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid)
+zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid currtid)
 {
-	/*
-	 * If the new starting position is within the currently processed array,
-	 * we can just reposition within the array.
-	 */
-	if (scan->array_iter.num_tids > 0)
-	{
-		if (scan->array_iter.tids[0] <= starttid &&
-			starttid <= scan->array_iter.tids[scan->array_iter.num_tids - 1])
-		{
-			/* TODO: could do a binary search here */
-			int			i;
-
-			for (i = 0; i < scan->array_iter.num_tids; i++)
-			{
-				if (scan->array_iter.tids[i] >= starttid)
-					break;
-			}
-			Assert(i < scan->array_iter.num_tids);
-			scan->array_iter.next_idx = i;
-			scan->nexttid = scan->array_iter.tids[i];
-			return;
-		}
-		else
-		{
-			scan->array_iter.num_tids = 0;
-			scan->array_iter.next_idx = 0;
-		}
-	}
-
-	if (starttid < scan->nexttid)
-	{
-		/* have to restart from scratch. */
-		/* TODO: if the new starting point lands on the same page, we could
-		 * keep 'lastbuf' */
-		scan->array_iter.num_tids = 0;
-		scan->array_iter.next_idx = 0;
-		scan->nexttid = starttid;
-		if (scan->lastbuf != InvalidBuffer)
-			ReleaseBuffer(scan->lastbuf);
-		scan->lastbuf = InvalidBuffer;
-		scan->lastoff = InvalidOffsetNumber;
-	}
-	else
-	{
-		scan->nexttid = starttid;
-	}
+	scan->currtid = currtid;
+	scan->array_curr_idx = -1;
 }
 
 void
@@ -145,11 +103,11 @@ zsbt_tid_end_scan(ZSTidTreeScan *scan)
 
 	scan->active = false;
 	scan->array_iter.num_tids = 0;
-	scan->array_iter.next_idx = 0;
+	scan->array_curr_idx = -1;
 }
 
 /*
- * Helper function of zsbt_scan_next(), to extract Datums from the given
+ * Helper function of zsbt_tid_scan_next_array(), to extract Datums from the given
  * array item into the scan->array_* fields.
  */
 static void
@@ -162,9 +120,6 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 	int			continue_at;
 
 	zsbt_tid_item_unpack(aitem, &scan->array_iter);
-
-	if (scan->nexttid < scan->array_iter.tids[0])
-		scan->nexttid = scan->array_iter.tids[0];
 
 	slots_visible[ZSBT_OLD_UNDO_SLOT] = true;
 	slots_visible[ZSBT_DEAD_UNDO_SLOT] = false;
@@ -193,7 +148,7 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 	 */
 	for (first = 0; first < scan->array_iter.num_tids; first++)
 	{
-		if (scan->array_iter.tids[first] >= scan->nexttid)
+		if (scan->array_iter.tids[first] >= scan->starttid)
 			break;
 	}
 	for (last = scan->array_iter.num_tids - 1; last >= first; last--)
@@ -232,7 +187,7 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 		}
 	}
 	scan->array_iter.num_tids = num_visible_tids;
-	scan->array_iter.next_idx = 0;
+	scan->array_curr_idx = -1;
 }
 
 /*
@@ -249,7 +204,7 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
  * This is normally not used directly, see zsbt_tid_scan_next() wrapper.
  */
 bool
-zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
+zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid)
 {
 	if (!scan->active)
 		return InvalidZSTid;
@@ -257,9 +212,9 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
 	/*
 	 * Process items, until we find something that is visible to the snapshot.
 	 *
-	 * This advances scan->nexttid as it goes.
+	 * This advances nexttid as it goes.
 	 */
-	while (scan->nexttid < scan->endtid)
+	while (nexttid < scan->endtid)
 	{
 		Buffer		buf;
 		Page		page;
@@ -269,10 +224,10 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
 		BlockNumber	next;
 
 		/*
-		 * Find and lock the leaf page containing scan->nexttid.
+		 * Find and lock the leaf page containing nexttid.
 		 */
 		buf = zsbt_find_and_lock_leaf_containing_tid(scan->rel, ZS_META_ATTRIBUTE_NUM,
-													 scan->lastbuf, scan->nexttid,
+													 scan->lastbuf, nexttid,
 													 BUFFER_LOCK_SHARE);
 		if (buf != scan->lastbuf)
 			scan->lastoff = InvalidOffsetNumber;
@@ -306,7 +261,7 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
 
 			lasttid = zsbt_tid_item_lasttid(item);
 
-			if (scan->nexttid > lasttid)
+			if (nexttid > lasttid)
 				off = scan->lastoff + 1;
 		}
 
@@ -318,34 +273,38 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
 
 			lasttid = zsbt_tid_item_lasttid(item);
 
-			if (scan->nexttid > lasttid)
+			if (nexttid > lasttid)
 				continue;
 
 			if (item->t_firsttid >= scan->endtid)
 			{
-				scan->nexttid = scan->endtid;
+				nexttid = scan->endtid;
 				break;
 			}
 
 			zsbt_tid_scan_extract_array(scan, item);
 
-			if (scan->array_iter.next_idx < scan->array_iter.num_tids)
+			if (scan->array_iter.num_tids > 0)
 			{
-				LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
-				scan->lastoff = off;
-				return true;
+				if (scan->array_iter.tids[scan->array_iter.num_tids - 1] >= nexttid)
+				{
+					LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
+					scan->lastoff = off;
+					return true;
+				}
+				nexttid = scan->array_iter.tids[scan->array_iter.num_tids - 1] + 1;
 			}
 		}
 
 		/* No more items on this page. Walk right, if possible */
-		if (scan->nexttid < opaque->zs_hikey)
-			scan->nexttid = opaque->zs_hikey;
+		if (nexttid < opaque->zs_hikey)
+			nexttid = opaque->zs_hikey;
 		next = opaque->zs_next;
 		if (next == BufferGetBlockNumber(buf))
 			elog(ERROR, "btree page %u next-pointer points to itself", next);
 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
-		if (next == InvalidBlockNumber || scan->nexttid >= scan->endtid)
+		if (next == InvalidBlockNumber || nexttid >= scan->endtid)
 		{
 			/* reached end of scan */
 			break;
@@ -357,7 +316,6 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan)
 	/* Reached end of scan. */
 	scan->active = false;
 	scan->array_iter.num_tids = 0;
-	scan->array_iter.next_idx = 0;
 	if (BufferIsValid(scan->lastbuf))
 		ReleaseBuffer(scan->lastbuf);
 	scan->lastbuf = InvalidBuffer;

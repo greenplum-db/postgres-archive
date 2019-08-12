@@ -586,7 +586,6 @@ typedef struct ZSTidItemIterator
 	int			tids_allocated_size;
 	zstid	   *tids;
 	uint8	   *tid_undoslotnos;
-	int			next_idx;
 	int			num_tids;
 	MemoryContext context;
 
@@ -612,9 +611,16 @@ typedef struct ZSTidTreeScan
 	bool		active;
 	Buffer		lastbuf;
 	OffsetNumber lastoff;
-	zstid		nexttid;
-	zstid		endtid;
 	Snapshot	snapshot;
+
+	/*
+	 * starttid and endtid define a range of TIDs to scan. currtid is the previous
+	 * TID that was returned from the scan. They determine what zsbt_tid_scan_next()
+	 * will return.
+	 */
+	zstid		starttid;
+	zstid		endtid;
+	zstid		currtid;
 
 	/* in the "real" UNDO-log, this would probably be a global variable */
 	ZSUndoRecPtr recent_oldest_undo;
@@ -627,6 +633,7 @@ typedef struct ZSTidTreeScan
 	 * These fields are used, when the scan is processing an array item.
 	 */
 	ZSTidItemIterator array_iter;
+	int			array_curr_idx;
 } ZSTidTreeScan;
 
 /*
@@ -638,9 +645,9 @@ typedef struct ZSTidTreeScan
 static inline uint8
 ZSTidScanCurUndoSlotNo(ZSTidTreeScan *scan)
 {
-	Assert(scan->array_iter.next_idx > 0);
+	Assert(scan->array_curr_idx >= 0 && scan->array_curr_idx < scan->array_iter.num_tids);
 	Assert(scan->array_iter.tid_undoslotnos != NULL);
-	return (scan->array_iter.tid_undoslotnos[scan->array_iter.next_idx - 1]);
+	return (scan->array_iter.tid_undoslotnos[scan->array_curr_idx]);
 }
 
 /*
@@ -663,7 +670,11 @@ typedef struct ZSAttrTreeScan
 	bool		active;
 	Buffer		lastbuf;
 	OffsetNumber lastoff;
-	zstid		nexttid;
+
+	/*
+	 * starttid and endtid define a range of rows to scan.
+	 */
+	zstid		starttid;
 	zstid		endtid;
 
 	/*
@@ -676,7 +687,7 @@ typedef struct ZSAttrTreeScan
 	zstid	   *array_tids;
 	int			array_num_elements;
 
-	int			array_next_datum;
+	int			array_curr_idx;
 
 	/* working areas for zsbt_attr_item_extract() */
 	char	   *decompress_buf;
@@ -760,47 +771,90 @@ struct zs_split_stack
 };
 
 /* prototypes for functions in zedstore_tidpage.c */
-extern void zsbt_tid_begin_scan(Relation rel,
-								zstid starttid, zstid endtid, Snapshot snapshot, ZSTidTreeScan *scan);
-extern void zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid);
+extern void zsbt_tid_begin_scan(Relation rel, zstid starttid, zstid endtid,
+								Snapshot snapshot, ZSTidTreeScan *scan);
+extern void zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid currtid);
 extern void zsbt_tid_end_scan(ZSTidTreeScan *scan);
+extern bool zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid);
 
-extern bool zsbt_tid_scan_next_array(ZSTidTreeScan *scan);
-
+/*
+ * Return the next TID in the scan.
+ *
+ * The next TID means the first TID > scan->currtid. Each call moves
+ * scan->currtid to the last returned TID. You can call zsbt_tid_reset_scan()
+ * to change the position, scan->starttid and scan->endtid define the
+ * boundaries of the search.
+ */
 static inline zstid
 zsbt_tid_scan_next(ZSTidTreeScan *scan)
 {
-	zstid		result;
+	zstid		nexttid;
+	int			idx;
 
-	if (scan->nexttid >= scan->endtid)
+	nexttid = scan->currtid + 1;
+	if (!scan->active || nexttid >= scan->endtid)
 		return InvalidZSTid;
 
-	while (scan->array_iter.next_idx >= scan->array_iter.num_tids)
+	if (scan->array_iter.num_tids == 0 ||
+		nexttid < scan->array_iter.tids[0] ||
+		nexttid > scan->array_iter.tids[scan->array_iter.num_tids - 1])
 	{
-		if (!zsbt_tid_scan_next_array(scan))
+		scan->array_curr_idx = -1;
+		if (!zsbt_tid_scan_next_array(scan, nexttid))
+		{
+			scan->currtid = scan->endtid;
 			return InvalidZSTid;
+		}
 	}
-
-	result = scan->array_iter.tids[scan->array_iter.next_idx];
 
 	/*
-	 * Callers using SnapshotDirty need some extra visibility information.
+	 * Optimize for the common case that we're scanning forward from the previous
+	 * TID.
 	 */
-	if (scan->snapshot->snapshot_type == SNAPSHOT_DIRTY)
-	{
-		int			slotno = scan->array_iter.tid_undoslotnos[scan->array_iter.next_idx];
-		ZSUndoSlotVisibility *visi_info = &scan->array_iter.undoslot_visibility[slotno];
+	if (scan->array_curr_idx >= 0 && scan->array_iter.tids[scan->array_curr_idx] < nexttid)
+		idx = scan->array_curr_idx + 1;
+	else
+		idx = 0;
 
-		if (visi_info->xmin != FrozenTransactionId)
-			scan->snapshot->xmin = visi_info->xmin;
-		scan->snapshot->xmax = visi_info->xmax;
-		scan->snapshot->speculativeToken = visi_info->speculativeToken;
+	for (; idx < scan->array_iter.num_tids; idx++)
+	{
+		zstid		this_tid = scan->array_iter.tids[idx];
+
+		if (this_tid >= scan->endtid)
+		{
+			scan->currtid = scan->endtid;
+			return InvalidZSTid;
+		}
+
+		if (this_tid >= nexttid)
+		{
+			/*
+			 * Callers using SnapshotDirty need some extra visibility information.
+			 */
+			if (scan->snapshot->snapshot_type == SNAPSHOT_DIRTY)
+			{
+				int			slotno = scan->array_iter.tid_undoslotnos[idx];
+				ZSUndoSlotVisibility *visi_info = &scan->array_iter.undoslot_visibility[slotno];
+
+				if (visi_info->xmin != FrozenTransactionId)
+					scan->snapshot->xmin = visi_info->xmin;
+				scan->snapshot->xmax = visi_info->xmax;
+				scan->snapshot->speculativeToken = visi_info->speculativeToken;
+			}
+
+			/* on next call, continue the scan at the next TID */
+			scan->currtid = this_tid;
+			scan->array_curr_idx = idx;
+			return this_tid;
+		}
 	}
 
-	/* on next call, continue the scan at the next TID */
-	scan->nexttid = result + 1;
-	scan->array_iter.next_idx++;
-	return result;
+	/*
+	 * unreachable, because zsbt_tid_scan_next_array() should never return an array
+	 * that doesn't contain a matching TID.
+	 */
+	Assert(false);
+	return InvalidZSTid;
 }
 
 
@@ -842,9 +896,8 @@ extern List *zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, Int
 /* prototypes for functions in zedstore_attpage.c */
 extern void zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
 								zstid starttid, zstid endtid, ZSAttrTreeScan *scan);
-extern void zsbt_attr_reset_scan(ZSAttrTreeScan *scan, zstid starttid);
 extern void zsbt_attr_end_scan(ZSAttrTreeScan *scan);
-extern bool zsbt_attr_scan_next_array(ZSAttrTreeScan *scan);
+extern bool zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid tid);
 
 extern void zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 							  Datum *datums, bool *isnulls, zstid *tids, int ndatums);
@@ -885,52 +938,53 @@ extern bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int
 static inline bool
 zsbt_attr_fetch(ZSAttrTreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 {
-	zstid			next_scan_tid;
+	int			idx;
 
-	if (!scan->active)
-		return false;
-
-	if (tid < scan->nexttid)
-	{
-		/* The next item from this scan is beyond the TID we're looking for. */
-		return false;
-	}
+	/* The next item from this scan is beyond the TID we're looking for. */
+	Assert(tid >= scan->starttid && tid < scan->endtid);
 
 	/*
 	 * Fetch the next item from the scan. The item we're looking for might
 	 * already be in scan->array_*.
 	 */
-	do
+	if (scan->array_num_elements == 0 ||
+		tid < scan->array_tids[0] ||
+		scan->array_tids[scan->array_num_elements - 1] < tid)
 	{
-		next_scan_tid = scan->nexttid;
-		while (scan->array_next_datum < scan->array_num_elements)
-		{
-			next_scan_tid = scan->array_tids[scan->array_next_datum];
-
-			if (tid > next_scan_tid)
-			{
-				scan->array_next_datum++;
-				next_scan_tid++;
-			}
-			else if (tid == next_scan_tid)
-			{
-				*isnull = scan->array_isnulls[scan->array_next_datum];
-				*datum = scan->array_datums[scan->array_next_datum];
-				scan->array_next_datum++;
-				scan->nexttid = tid + 1;
-				return true;
-			}
-			else /* tid < next_scan_tid */
-			{
-				scan->nexttid = next_scan_tid;
-				return false;
-			}
-		}
-
-		/* processed all of this array. Fetch another item */
-		scan->nexttid = next_scan_tid;
+		if (!zsbt_attr_scan_fetch_array(scan, tid))
+			return false;
+		scan->array_curr_idx = -1;
 	}
-	while (zsbt_attr_scan_next_array(scan));
+	Assert(scan->array_num_elements > 0 &&
+		   scan->array_tids[0] <= tid &&
+		   scan->array_tids[scan->array_num_elements - 1] >= tid);
+
+	/*
+	 * Optimize for the common case that we're scanning forward from the previous
+	 * TID.
+	 */
+	if (scan->array_curr_idx != -1 && scan->array_tids[scan->array_curr_idx] < tid)
+		idx = scan->array_curr_idx + 1;
+	else
+		idx = 0;
+
+	for (idx = 0; idx < scan->array_num_elements; idx++)
+	{
+		zstid		this_tid = scan->array_tids[idx];
+
+		if (this_tid == tid)
+		{
+			*isnull = scan->array_isnulls[idx];
+			*datum = scan->array_datums[idx];
+			scan->array_curr_idx = idx;
+			return true;
+		}
+		if (this_tid > tid)
+		{
+			scan->array_curr_idx = idx - 1;
+			return false;
+		}
+	}
 
 	return false;
 }

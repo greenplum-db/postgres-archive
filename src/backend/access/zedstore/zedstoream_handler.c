@@ -2372,7 +2372,7 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				elog(ERROR, "CLUSTER does not support lossy index conditions");
 
 			fetchtid = ZSTidFromItemPointer(*itemptr);
-			zsbt_tid_reset_scan(&tid_scan, fetchtid);
+			zsbt_tid_reset_scan(&tid_scan, fetchtid - 1);
 			old_tid = zsbt_tid_scan_next(&tid_scan);
 			if (old_tid == InvalidZSTid)
 				continue;
@@ -2407,9 +2407,6 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				}
 				else
 				{
-					if (indexScan)
-						zsbt_attr_reset_scan(&attr_scans[attno - 1], old_tid);
-
 					if (!zsbt_attr_fetch(&attr_scans[attno - 1], &datum, &isnull, old_tid))
 						zsbt_fill_missing_attribute_value(olddesc, attno, &datum, &isnull);
 				}
