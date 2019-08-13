@@ -45,10 +45,10 @@ SELECT ctid,cmin,* FROM combocidtest;
 COMMIT;
 -- combo data is not there anymore, but should still see tuples
 SELECT ctid,cmin,* FROM combocidtest;
- ctid  |    cmin    | foobar 
--------+------------+--------
- (0,1) | 4294967295 |      1
- (0,2) | 4294967295 |      2
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   10 |      1
+ (0,2) |   11 |      2
 (2 rows)
 
 -- Test combo cids with portals
@@ -57,19 +57,19 @@ INSERT INTO combocidtest VALUES (333);
 DECLARE c CURSOR FOR SELECT ctid,cmin,* FROM combocidtest;
 DELETE FROM combocidtest;
 FETCH ALL FROM c;
- ctid  |    cmin    | foobar 
--------+------------+--------
- (0,1) | 4294967295 |      1
- (0,2) | 4294967295 |      2
- (0,5) |          0 |    333
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   10 |      1
+ (0,2) |   11 |      2
+ (0,5) |    0 |    333
 (3 rows)
 
 ROLLBACK;
 SELECT ctid,cmin,* FROM combocidtest;
- ctid  |    cmin    | foobar 
--------+------------+--------
- (0,1) | 4294967295 |      1
- (0,2) | 4294967295 |      2
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   10 |      1
+ (0,2) |   11 |      2
 (2 rows)
 
 -- check behavior with locked tuples
@@ -87,29 +87,29 @@ INSERT INTO combocidtest SELECT 1 LIMIT 0;
 INSERT INTO combocidtest SELECT 1 LIMIT 0;
 INSERT INTO combocidtest VALUES (444);
 SELECT ctid,cmin,* FROM combocidtest;
- ctid  |    cmin    | foobar 
--------+------------+--------
- (0,1) | 4294967295 |      1
- (0,2) | 4294967295 |      2
- (0,6) |         10 |    444
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   10 |      1
+ (0,2) |   11 |      2
+ (0,6) |   10 |    444
 (3 rows)
 
 SAVEPOINT s1;
 -- this doesn't affect cmin
 SELECT ctid,cmin,* FROM combocidtest FOR UPDATE;
- ctid  |    cmin    | foobar 
--------+------------+--------
- (0,1) | 4294967295 |      1
- (0,2) | 4294967295 |      2
- (0,6) |         10 |    444
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   10 |      1
+ (0,2) |   11 |      2
+ (0,6) |   10 |    444
 (3 rows)
 
 SELECT ctid,cmin,* FROM combocidtest;
- ctid  |    cmin    | foobar 
--------+------------+--------
- (0,1) | 4294967295 |      1
- (0,2) | 4294967295 |      2
- (0,6) |         10 |    444
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   10 |      1
+ (0,2) |   11 |      2
+ (0,6) |   10 |    444
 (3 rows)
 
 -- but this does
@@ -124,20 +124,20 @@ SELECT ctid,cmin,* FROM combocidtest;
 
 ROLLBACK TO s1;
 SELECT ctid,cmin,* FROM combocidtest;
- ctid  |    cmin    | foobar 
--------+------------+--------
- (0,1) | 4294967295 |      1
- (0,2) | 4294967295 |      2
- (0,6) |         10 |    444
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   10 |      1
+ (0,2) |   11 |      2
+ (0,6) |   10 |    444
 (3 rows)
 
 COMMIT;
 SELECT ctid,cmin,* FROM combocidtest;
- ctid  |    cmin    | foobar 
--------+------------+--------
- (0,1) | 4294967295 |      1
- (0,2) | 4294967295 |      2
- (0,6) | 4294967295 |    444
+ ctid  | cmin | foobar 
+-------+------+--------
+ (0,1) |   10 |      1
+ (0,2) |   11 |      2
+ (0,6) |   10 |    444
 (3 rows)
 
 -- test for bug reported in
