@@ -959,7 +959,7 @@ zsbt_attr_fetch(ZSAttrTreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 	else
 		idx = 0;
 
-	for (idx = 0; idx < scan->array_num_elements; idx++)
+	for (; idx < scan->array_num_elements; idx++)
 	{
 		zstid		this_tid = scan->array_tids[idx];
 
@@ -971,10 +971,7 @@ zsbt_attr_fetch(ZSAttrTreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 			return true;
 		}
 		if (this_tid > tid)
-		{
-			scan->array_curr_idx = idx - 1;
 			return false;
-		}
 	}
 
 	return false;
