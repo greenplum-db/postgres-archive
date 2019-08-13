@@ -303,8 +303,6 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid)
 		if (nexttid < opaque->zs_hikey)
 			nexttid = opaque->zs_hikey;
 		next = opaque->zs_next;
-		if (next == BufferGetBlockNumber(buf))
-			elog(ERROR, "btree page %u next-pointer points to itself", next);
 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
 
 		if (next == InvalidBlockNumber || nexttid >= scan->endtid)

@@ -263,8 +263,6 @@ zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buff
 	if (opaque->zs_page_id != ZS_BTREE_PAGE_ID)
 		return false;
 
-	Assert(opaque->zs_next != BufferGetBlockNumber(buf));
-
 	if (opaque->zs_attno != attno)
 		return false;
 
@@ -281,6 +279,10 @@ zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buff
 
 	if (opaque->zs_lokey > key || opaque->zs_hikey <= key)
 		return false;
+
+	/* extra checks for corrupted pages */
+	if (opaque->zs_next == BufferGetBlockNumber(buf))
+		elog(ERROR, "btree page %u next-pointer points to itself", opaque->zs_next);
 
 	return true;
 }
