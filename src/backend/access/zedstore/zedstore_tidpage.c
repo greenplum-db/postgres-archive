@@ -211,7 +211,7 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
  * This is normally not used directly, see zsbt_tid_scan_next() wrapper.
  */
 bool
-zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid)
+zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid, ScanDirection direction)
 {
 	if (!scan->active)
 		return InvalidZSTid;
@@ -221,7 +221,7 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid)
 	 *
 	 * This advances nexttid as it goes.
 	 */
-	while (nexttid < scan->endtid)
+	while (nexttid < scan->endtid && nexttid >= scan->starttid)
 	{
 		Buffer		buf;
 		Page		page;
@@ -259,59 +259,101 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid)
 		 * We check the last offset first, as an optimization
 		 */
 		maxoff = PageGetMaxOffsetNumber(page);
-
-		/* Search for the next item >= nexttid */
-		off = FirstOffsetNumber;
-		if (scan->lastoff > FirstOffsetNumber && scan->lastoff <= maxoff)
+		if (direction == ForwardScanDirection)
 		{
-			ItemId		iid = PageGetItemId(page, scan->lastoff);
-			ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
-
-			if (nexttid >= item->t_endtid)
-				off = scan->lastoff + 1;
-		}
-
-		for (; off <= maxoff; off++)
-		{
-			ItemId		iid = PageGetItemId(page, off);
-			ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
-
-			if (nexttid >= item->t_endtid)
-				continue;
-
-			if (item->t_firsttid >= scan->endtid)
+			/* Search for the next item >= nexttid */
+			off = FirstOffsetNumber;
+			if (scan->lastoff > FirstOffsetNumber && scan->lastoff <= maxoff)
 			{
-				nexttid = scan->endtid;
+				ItemId		iid = PageGetItemId(page, scan->lastoff);
+				ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
+
+				if (nexttid >= item->t_endtid)
+					off = scan->lastoff + 1;
+			}
+
+			for (; off <= maxoff; off++)
+			{
+				ItemId		iid = PageGetItemId(page, off);
+				ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
+
+				if (nexttid >= item->t_endtid)
+					continue;
+
+				if (item->t_firsttid >= scan->endtid)
+				{
+					nexttid = scan->endtid;
+					break;
+				}
+
+				zsbt_tid_scan_extract_array(scan, item);
+
+				if (scan->array_iter.num_tids > 0)
+				{
+					if (scan->array_iter.tids[scan->array_iter.num_tids - 1] >= nexttid)
+					{
+						LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
+						scan->lastoff = off;
+						return true;
+					}
+					nexttid = scan->array_iter.tids[scan->array_iter.num_tids - 1] + 1;
+				}
+			}
+			/* No more items on this page. Walk right, if possible */
+			if (nexttid < opaque->zs_hikey)
+				nexttid = opaque->zs_hikey;
+			next = opaque->zs_next;
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			if (next == InvalidBlockNumber || nexttid >= scan->endtid)
+			{
+				/* reached end of scan */
 				break;
 			}
 
-			zsbt_tid_scan_extract_array(scan, item);
-
-			if (scan->array_iter.num_tids > 0)
-			{
-				if (scan->array_iter.tids[scan->array_iter.num_tids - 1] >= nexttid)
-				{
-					LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
-					scan->lastoff = off;
-					return true;
-				}
-				nexttid = scan->array_iter.tids[scan->array_iter.num_tids - 1] + 1;
-			}
+			scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
 		}
-
-		/* No more items on this page. Walk right, if possible */
-		if (nexttid < opaque->zs_hikey)
-			nexttid = opaque->zs_hikey;
-		next = opaque->zs_next;
-		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-		if (next == InvalidBlockNumber || nexttid >= scan->endtid)
+		else
 		{
-			/* reached end of scan */
-			break;
-		}
+			/* Search for the next item <= nexttid */
+			for (off = maxoff; off >= FirstOffsetNumber; off--)
+			{
+				ItemId		iid = PageGetItemId(page, off);
+				ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
 
-		scan->lastbuf = ReleaseAndReadBuffer(scan->lastbuf, scan->rel, next);
+				if (nexttid < item->t_firsttid)
+					continue;
+
+				if (item->t_endtid < scan->starttid)
+				{
+					nexttid = scan->starttid - 1;
+					break;
+				}
+
+				zsbt_tid_scan_extract_array(scan, item);
+
+				if (scan->array_iter.num_tids > 0)
+				{
+					if (scan->array_iter.tids[0] <= nexttid)
+					{
+						LockBuffer(scan->lastbuf, BUFFER_LOCK_UNLOCK);
+						scan->lastoff = off;
+						return true;
+					}
+					nexttid = scan->array_iter.tids[0] - 1;
+				}
+			}
+			/* No more items on this page. Loop back to find the left sibling. */
+			if (nexttid >= opaque->zs_lokey)
+				nexttid = opaque->zs_lokey - 1;
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+			if (nexttid < scan->starttid)
+			{
+				/* reached end of scan */
+				break;
+			}
+			scan->lastbuf = InvalidBuffer;
+		}
 	}
 
 	/* Reached end of scan. */

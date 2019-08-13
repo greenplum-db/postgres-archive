@@ -760,7 +760,7 @@ extern void zsbt_tid_begin_scan(Relation rel, zstid starttid, zstid endtid,
 								Snapshot snapshot, ZSTidTreeScan *scan);
 extern void zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid, zstid endtid, zstid currtid);
 extern void zsbt_tid_end_scan(ZSTidTreeScan *scan);
-extern bool zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid);
+extern bool zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid, ScanDirection direction);
 
 /*
  * Return the next TID in the scan.
@@ -771,20 +771,26 @@ extern bool zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid);
  * boundaries of the search.
  */
 static inline zstid
-zsbt_tid_scan_next(ZSTidTreeScan *scan)
+zsbt_tid_scan_next(ZSTidTreeScan *scan, ScanDirection direction)
 {
 	zstid		nexttid;
 	int			idx;
 
 	Assert(scan->active);
 
-	nexttid = scan->currtid + 1;
+	if (direction == ForwardScanDirection)
+		nexttid = scan->currtid + 1;
+	else if (direction == BackwardScanDirection)
+		nexttid = scan->currtid - 1;
+	else
+		nexttid = scan->currtid;
+
 	if (scan->array_iter.num_tids == 0 ||
 		nexttid < scan->array_iter.tids[0] ||
 		nexttid > scan->array_iter.tids[scan->array_iter.num_tids - 1])
 	{
 		scan->array_curr_idx = -1;
-		if (!zsbt_tid_scan_next_array(scan, nexttid))
+		if (!zsbt_tid_scan_next_array(scan, nexttid, direction))
 		{
 			scan->currtid = nexttid;
 			return InvalidZSTid;

@@ -1163,8 +1163,8 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 	ZSUndoSlotVisibility *visi_info;
 	uint8		slotno;
 
-	if (direction != ForwardScanDirection)
-		elog(ERROR, "backward scan not implemented");
+	if (direction != ForwardScanDirection && scan->rs_scan.rs_parallel)
+		elog(ERROR, "parallel backward scan not implemented");
 
 	if (!scan->started)
 	{
@@ -1226,7 +1226,7 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 	 */
 	for (;;)
 	{
-		this_tid = zsbt_tid_scan_next(&scan_proj->tid_scan);
+		this_tid = zsbt_tid_scan_next(&scan_proj->tid_scan, direction);
 		if (this_tid == InvalidZSTid)
 		{
 			if (scan->rs_scan.rs_parallel)
@@ -1355,7 +1355,7 @@ zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	/* Use the meta-data tree for the visibility information. */
 	zsbt_tid_begin_scan(rel, tid, tid + 1, snapshot, &meta_scan);
 
-	found = zsbt_tid_scan_next(&meta_scan) != InvalidZSTid;
+	found = zsbt_tid_scan_next(&meta_scan, ForwardScanDirection) != InvalidZSTid;
 
 	zsbt_tid_end_scan(&meta_scan);
 
@@ -1489,7 +1489,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 
 	zsbt_tid_begin_scan(rel, tid, tid + 1, snapshot, &fetch_proj->tid_scan);
 	fetch_proj->tid_scan.serializable = true;
-	found = zsbt_tid_scan_next(&fetch_proj->tid_scan) != InvalidZSTid;
+	found = zsbt_tid_scan_next(&fetch_proj->tid_scan, ForwardScanDirection) != InvalidZSTid;
 	if (found)
 	{
 		for (int i = 1; i < fetch_proj->num_proj_atts; i++)
@@ -2365,13 +2365,13 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 			fetchtid = ZSTidFromItemPointer(*itemptr);
 			zsbt_tid_reset_scan(&tid_scan, MinZSTid, MaxPlusOneZSTid, fetchtid - 1);
-			old_tid = zsbt_tid_scan_next(&tid_scan);
+			old_tid = zsbt_tid_scan_next(&tid_scan, ForwardScanDirection);
 			if (old_tid == InvalidZSTid)
 				continue;
 		}
 		else
 		{
-			old_tid = zsbt_tid_scan_next(&tid_scan);
+			old_tid = zsbt_tid_scan_next(&tid_scan, ForwardScanDirection);
 			if (old_tid == InvalidZSTid)
 				break;
 			fetchtid = old_tid;
@@ -2465,7 +2465,7 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 	 * so that it could skip over to it more efficiently.
 	 */
 	ntuples = 0;
-	while ((tid = zsbt_tid_scan_next(&tid_scan)) != InvalidZSTid)
+	while ((tid = zsbt_tid_scan_next(&tid_scan, ForwardScanDirection)) != InvalidZSTid)
 	{
 		Assert(ZSTidGetBlockNumber(tid) == blockno);
 		scan->bmscan_tids[ntuples] = tid;
@@ -2750,7 +2750,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 						&tid_scan);
 	tid_scan.serializable = true;
 	noff = 0;
-	while ((tid = zsbt_tid_scan_next(&tid_scan)) != InvalidZSTid)
+	while ((tid = zsbt_tid_scan_next(&tid_scan, ForwardScanDirection)) != InvalidZSTid)
 	{
 		ItemPointerData itemptr;
 
@@ -2938,7 +2938,7 @@ zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstat
 						ZSTidFromBlkOff(blockno + 1, 1),
 						scan->rs_scan.rs_snapshot,
 						&tid_scan);
-	while ((tid = zsbt_tid_scan_next(&tid_scan)) != InvalidZSTid)
+	while ((tid = zsbt_tid_scan_next(&tid_scan, ForwardScanDirection)) != InvalidZSTid)
 	{
 		Assert(ZSTidGetBlockNumber(tid) == blockno);
 		scan->bmscan_tids[ntuples] = tid;
