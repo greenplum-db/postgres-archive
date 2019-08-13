@@ -89,6 +89,17 @@ zsbt_attr_end_scan(ZSAttrTreeScan *scan)
 	scan->active = false;
 	scan->array_num_elements = 0;
 	scan->array_curr_idx = -1;
+
+	if (scan->array_datums)
+		pfree(scan->array_datums);
+	if (scan->array_isnulls)
+		pfree(scan->array_isnulls);
+	if (scan->array_tids)
+		pfree(scan->array_tids);
+	if (scan->decompress_buf)
+		pfree(scan->decompress_buf);
+	if (scan->attr_buf)
+		pfree(scan->attr_buf);
 }
 
 /*

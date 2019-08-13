@@ -104,6 +104,11 @@ zsbt_tid_end_scan(ZSTidTreeScan *scan)
 	scan->active = false;
 	scan->array_iter.num_tids = 0;
 	scan->array_curr_idx = -1;
+
+	if (scan->array_iter.tids)
+		pfree(scan->array_iter.tids);
+	if (scan->array_iter.tid_undoslotnos)
+		pfree(scan->array_iter.tid_undoslotnos);
 }
 
 /*
