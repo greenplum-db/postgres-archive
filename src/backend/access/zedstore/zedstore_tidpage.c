@@ -86,8 +86,10 @@ zsbt_tid_begin_scan(Relation rel, zstid starttid,
  * Reset the 'next' TID in a scan to the given TID.
  */
 void
-zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid currtid)
+zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid, zstid endtid, zstid currtid)
 {
+	scan->starttid = starttid;
+	scan->endtid = endtid;
 	scan->currtid = currtid;
 	scan->array_curr_idx = -1;
 }
@@ -257,6 +259,8 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid)
 		 * We check the last offset first, as an optimization
 		 */
 		maxoff = PageGetMaxOffsetNumber(page);
+
+		/* Search for the next item >= nexttid */
 		off = FirstOffsetNumber;
 		if (scan->lastoff > FirstOffsetNumber && scan->lastoff <= maxoff)
 		{
@@ -313,7 +317,6 @@ zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid)
 	}
 
 	/* Reached end of scan. */
-	scan->active = false;
 	scan->array_iter.num_tids = 0;
 	if (BufferIsValid(scan->lastbuf))
 		ReleaseBuffer(scan->lastbuf);

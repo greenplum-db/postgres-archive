@@ -758,7 +758,7 @@ struct zs_split_stack
 /* prototypes for functions in zedstore_tidpage.c */
 extern void zsbt_tid_begin_scan(Relation rel, zstid starttid, zstid endtid,
 								Snapshot snapshot, ZSTidTreeScan *scan);
-extern void zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid currtid);
+extern void zsbt_tid_reset_scan(ZSTidTreeScan *scan, zstid starttid, zstid endtid, zstid currtid);
 extern void zsbt_tid_end_scan(ZSTidTreeScan *scan);
 extern bool zsbt_tid_scan_next_array(ZSTidTreeScan *scan, zstid nexttid);
 
@@ -776,10 +776,9 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 	zstid		nexttid;
 	int			idx;
 
-	nexttid = scan->currtid + 1;
-	if (!scan->active || nexttid >= scan->endtid)
-		return InvalidZSTid;
+	Assert(scan->active);
 
+	nexttid = scan->currtid + 1;
 	if (scan->array_iter.num_tids == 0 ||
 		nexttid < scan->array_iter.tids[0] ||
 		nexttid > scan->array_iter.tids[scan->array_iter.num_tids - 1])
@@ -787,7 +786,7 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 		scan->array_curr_idx = -1;
 		if (!zsbt_tid_scan_next_array(scan, nexttid))
 		{
-			scan->currtid = scan->endtid;
+			scan->currtid = nexttid;
 			return InvalidZSTid;
 		}
 	}
@@ -807,7 +806,7 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan)
 
 		if (this_tid >= scan->endtid)
 		{
-			scan->currtid = scan->endtid;
+			scan->currtid = nexttid;
 			return InvalidZSTid;
 		}
 

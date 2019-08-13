@@ -68,10 +68,9 @@ typedef struct ZedStoreDescData
 	TableScanDescData rs_scan;  /* */
 	ZedStoreProjectData proj_data;
 
-	zs_scan_state state;
+	bool		started;
 	zstid		cur_range_start;
 	zstid		cur_range_end;
-	bool		finished;
 
 	/* These fields are used for bitmap scans, to hold a "block's" worth of data */
 #define	MAX_ITEMS_PER_LOGICAL_BLOCK		MaxHeapTuplesPerPage
@@ -1041,7 +1040,6 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	/*
 	 * we can use page-at-a-time mode if it's an MVCC-safe snapshot
 	 */
-	scan->state = ZSSCAN_STATE_UNSTARTED;
 
 	/*
 	 * we do this here instead of in initscan() because heap_rescan also calls
@@ -1144,12 +1142,9 @@ zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
 
 	if (scan->proj_data.num_proj_atts > 0)
 	{
-		zsbt_tid_end_scan(&scan->proj_data.tid_scan);
-		for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
-			zsbt_attr_end_scan(&scan->proj_data.attr_scans[i - 1]);
+		zsbt_tid_reset_scan(&scan->proj_data.tid_scan,
+							scan->cur_range_start, scan->cur_range_end, scan->cur_range_start - 1);
 	}
-
-	scan->state = ZSSCAN_STATE_UNSTARTED;
 }
 
 static bool
@@ -1162,12 +1157,57 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 	int			slot_natts = slot->tts_tupleDescriptor->natts;
 	Datum	   *slot_values = slot->tts_values;
 	bool	   *slot_isnull = slot->tts_isnull;
+	zstid		this_tid;
+	Datum		datum;
+	bool        isnull;
+	ZSUndoSlotVisibility *visi_info;
+	uint8		slotno;
 
 	if (direction != ForwardScanDirection)
-		elog(ERROR, "backward scan not implemented in zedstore");
+		elog(ERROR, "backward scan not implemented");
 
-	if (scan_proj->num_proj_atts == 0)
+	if (!scan->started)
+	{
+		MemoryContext oldcontext;
+
 		zs_initialize_proj_attributes(slot->tts_tupleDescriptor, scan_proj);
+
+		if (scan->rs_scan.rs_parallel)
+		{
+			/* Allocate next range of TIDs to scan */
+			if (!zs_parallelscan_nextrange(scan->rs_scan.rs_rd,
+										   (ParallelZSScanDesc) scan->rs_scan.rs_parallel,
+										   &scan->cur_range_start, &scan->cur_range_end))
+			{
+				ExecClearTuple(slot);
+				return false;
+			}
+		}
+		else
+		{
+			scan->cur_range_start = MinZSTid;
+			scan->cur_range_end = MaxPlusOneZSTid;
+		}
+
+		oldcontext = MemoryContextSwitchTo(scan_proj->context);
+		zsbt_tid_begin_scan(scan->rs_scan.rs_rd,
+							scan->cur_range_start,
+							scan->cur_range_end,
+							scan->rs_scan.rs_snapshot,
+							&scan_proj->tid_scan);
+		scan_proj->tid_scan.serializable = true;
+		for (int i = 1; i < scan_proj->num_proj_atts; i++)
+		{
+			int			attno = scan_proj->proj_atts[i];
+
+			zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
+								 slot->tts_tupleDescriptor,
+								 attno,
+								 &scan_proj->attr_scans[i - 1]);
+		}
+		MemoryContextSwitchTo(oldcontext);
+		scan->started = true;
+	}
 	Assert((scan_proj->num_proj_atts - 1) <= slot_natts);
 
 	/*
@@ -1181,19 +1221,14 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 	for (int i = 0; i < slot_natts; i++)
 		slot_isnull[i] = true;
 
-	while (scan->state != ZSSCAN_STATE_FINISHED)
+	/*
+	 * Find the next visible TID.
+	 */
+	for (;;)
 	{
-		zstid		this_tid;
-		Datum		datum;
-		bool        isnull;
-		ZSUndoSlotVisibility *visi_info;
-		uint8		slotno;
-
-		if (scan->state == ZSSCAN_STATE_UNSTARTED ||
-			scan->state == ZSSCAN_STATE_FINISHED_RANGE)
+		this_tid = zsbt_tid_scan_next(&scan_proj->tid_scan);
+		if (this_tid == InvalidZSTid)
 		{
-			MemoryContext oldcontext;
-
 			if (scan->rs_scan.rs_parallel)
 			{
 				/* Allocate next range of TIDs to scan */
@@ -1201,114 +1236,78 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 											   (ParallelZSScanDesc) scan->rs_scan.rs_parallel,
 											   &scan->cur_range_start, &scan->cur_range_end))
 				{
-					scan->state = ZSSCAN_STATE_FINISHED;
-					break;
+					ExecClearTuple(slot);
+					return false;
 				}
+
+				zsbt_tid_reset_scan(&scan_proj->tid_scan,
+									scan->cur_range_start, scan->cur_range_end, scan->cur_range_start - 1);
+				continue;
 			}
 			else
 			{
-				if (scan->state == ZSSCAN_STATE_FINISHED_RANGE)
-				{
-					scan->state = ZSSCAN_STATE_FINISHED;
-					break;
-				}
-				scan->cur_range_start = MinZSTid;
-				scan->cur_range_end = MaxPlusOneZSTid;
+				ExecClearTuple(slot);
+				return false;
 			}
-
-			oldcontext = MemoryContextSwitchTo(scan_proj->context);
-			zsbt_tid_begin_scan(scan->rs_scan.rs_rd,
-								scan->cur_range_start,
-								scan->cur_range_end,
-								scan->rs_scan.rs_snapshot,
-								&scan_proj->tid_scan);
-			scan_proj->tid_scan.serializable = true;
-			for (int i = 1; i < scan_proj->num_proj_atts; i++)
-			{
-				int			attno = scan_proj->proj_atts[i];
-
-				zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
-									 slot->tts_tupleDescriptor,
-									 attno,
-									 &scan_proj->attr_scans[i - 1]);
-			}
-			MemoryContextSwitchTo(oldcontext);
-			scan->state = ZSSCAN_STATE_SCANNING;
-		}
-
-		/*
-		 * We now have a range to scan. Find the next visible TID.
-		 */
-		Assert(scan->state == ZSSCAN_STATE_SCANNING);
-		this_tid = zsbt_tid_scan_next(&scan_proj->tid_scan);
-		if (this_tid == InvalidZSTid)
-		{
-			scan->state = ZSSCAN_STATE_FINISHED_RANGE;
-			zsbt_tid_end_scan(&scan_proj->tid_scan);
-			for (int i = 1; i < scan_proj->num_proj_atts; i++)
-				zsbt_attr_end_scan(&scan_proj->attr_scans[i - 1]);
-			continue;
 		}
 		Assert (this_tid < scan->cur_range_end);
-
-		if (callback)
-			callback(&scan_proj->tid_scan, this_tid, callback_state);
-
-		/* Note: We don't need to predicate-lock tuples in Serializable mode,
-		 * because in a sequential scan, we predicate-locked the whole table.
-		 */
-
-		/* Fetch the datums of each attribute for this row */
-		for (int i = 1; i < scan_proj->num_proj_atts; i++)
-		{
-			ZSAttrTreeScan *btscan = &scan_proj->attr_scans[i - 1];
-			Form_pg_attribute attr = btscan->attdesc;
-			int			natt;
-
-			if (!zsbt_attr_fetch(btscan, &datum, &isnull, this_tid))
-				zsbt_fill_missing_attribute_value(slot->tts_tupleDescriptor, btscan->attno,
-												  &datum, &isnull);
-
-			/*
-			 * flatten any ZS-TOASTed values, because the rest of the system
-			 * doesn't know how to deal with them.
-			 */
-			natt = scan_proj->proj_atts[i];
-
-			if (!isnull && attr->attlen == -1 &&
-				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
-			{
-				datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, this_tid, datum);
-			}
-
-			/* Check that the values coming out of the b-tree are aligned properly */
-			if (!isnull && attr->attlen == -1)
-			{
-				Assert (VARATT_IS_1B(datum) || INTALIGN(datum) == datum);
-			}
-
-			Assert(natt > 0);
-			slot_values[natt - 1] = datum;
-			slot_isnull[natt - 1] = isnull;
-		}
-
-		/* Fill in the rest of the fields in the slot, and return the tuple */
-		slotno = ZSTidScanCurUndoSlotNo(&scan_proj->tid_scan);
-		visi_info = &scan_proj->tid_scan.array_iter.undoslot_visibility[slotno];
-		((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->xmin;
-		((ZedstoreTupleTableSlot*)slot)->cmin = visi_info->cmin;
-
-		slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
-		slot->tts_tid = ItemPointerFromZSTid(this_tid);
-		slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
-		slot->tts_flags &= ~TTS_FLAG_EMPTY;
-
-		pgstat_count_heap_getnext(scan->rs_scan.rs_rd);
-		return true;
+		break;
 	}
 
-	ExecClearTuple(slot);
-	return false;
+	if (callback)
+		callback(&scan_proj->tid_scan, this_tid, callback_state);
+
+	/* Note: We don't need to predicate-lock tuples in Serializable mode,
+	 * because in a sequential scan, we predicate-locked the whole table.
+	 */
+
+	/* Fetch the datums of each attribute for this row */
+	for (int i = 1; i < scan_proj->num_proj_atts; i++)
+	{
+		ZSAttrTreeScan *btscan = &scan_proj->attr_scans[i - 1];
+		Form_pg_attribute attr = btscan->attdesc;
+		int			natt;
+
+		if (!zsbt_attr_fetch(btscan, &datum, &isnull, this_tid))
+			zsbt_fill_missing_attribute_value(slot->tts_tupleDescriptor, btscan->attno,
+											  &datum, &isnull);
+
+		/*
+		 * flatten any ZS-TOASTed values, because the rest of the system
+		 * doesn't know how to deal with them.
+		 */
+		natt = scan_proj->proj_atts[i];
+
+		if (!isnull && attr->attlen == -1 &&
+			VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+		{
+			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, this_tid, datum);
+		}
+
+		/* Check that the values coming out of the b-tree are aligned properly */
+		if (!isnull && attr->attlen == -1)
+		{
+			Assert (VARATT_IS_1B(datum) || INTALIGN(datum) == datum);
+		}
+
+		Assert(natt > 0);
+		slot_values[natt - 1] = datum;
+		slot_isnull[natt - 1] = isnull;
+	}
+
+	/* Fill in the rest of the fields in the slot, and return the tuple */
+	slotno = ZSTidScanCurUndoSlotNo(&scan_proj->tid_scan);
+	visi_info = &scan_proj->tid_scan.array_iter.undoslot_visibility[slotno];
+	((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->xmin;
+	((ZedstoreTupleTableSlot*)slot)->cmin = visi_info->cmin;
+
+	slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
+	slot->tts_tid = ItemPointerFromZSTid(this_tid);
+	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
+	slot->tts_flags &= ~TTS_FLAG_EMPTY;
+
+	pgstat_count_heap_getnext(scan->rs_scan.rs_rd);
+	return true;
 }
 
 static bool
@@ -1877,7 +1876,6 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 										 &zscan_proj->attr_scans[i - 1]);
 				}
 			}
-			zscan->state = ZSSCAN_STATE_SCANNING;
 		}
 	}
 	else
@@ -2366,7 +2364,7 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				elog(ERROR, "CLUSTER does not support lossy index conditions");
 
 			fetchtid = ZSTidFromItemPointer(*itemptr);
-			zsbt_tid_reset_scan(&tid_scan, fetchtid - 1);
+			zsbt_tid_reset_scan(&tid_scan, MinZSTid, MaxPlusOneZSTid, fetchtid - 1);
 			old_tid = zsbt_tid_scan_next(&tid_scan);
 			if (old_tid == InvalidZSTid)
 				continue;
