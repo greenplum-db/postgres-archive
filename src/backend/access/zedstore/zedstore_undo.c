@@ -446,6 +446,12 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 						OldestXmin,
 						InvalidMultiXactId,
 						false);
+
+	/* report results to the stats collector, too */
+	pgstat_report_vacuum(RelationGetRelid(rel),
+						 rel->rd_rel->relisshared,
+						 pgcform->reltuples,
+						 0); /* FIXME: # of dead tuples */
 }
 
 /*
