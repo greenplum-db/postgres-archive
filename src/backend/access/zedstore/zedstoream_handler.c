@@ -2059,6 +2059,7 @@ zedstoream_relation_set_new_filenode(Relation rel,
 static void
 zedstoream_relation_nontransactional_truncate(Relation rel)
 {
+	zsmeta_invalidate_cache(rel);
 	RelationTruncate(rel, 0);
 }
 
