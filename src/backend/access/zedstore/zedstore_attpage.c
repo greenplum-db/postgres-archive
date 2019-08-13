@@ -250,6 +250,7 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 	Form_pg_attribute attr;
 	Buffer		buf;
 	Page		page;
+	ZSBtreePageOpaque *opaque;
 	OffsetNumber maxoff;
 	OffsetNumber off;
 	List	   *newitems = NIL;
@@ -270,10 +271,11 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 	if (!intset_iterate_next(tids, &nexttid))
 		nexttid = InvalidZSTid;
 
-	while (nexttid < MaxZSTid)
+	while (nexttid < MaxPlusOneZSTid)
 	{
 		buf = zsbt_descend(rel, attno, nexttid, 0, false);
 		page = BufferGetPage(buf);
+		opaque = ZSBtreePageGetOpaque(page);
 
 		newitems = NIL;
 
@@ -304,15 +306,15 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 			 * interrupted, after it has already removed the attribute data for
 			 * the dead tuples.
 			 */
-			while (nexttid != MaxZSTid && nexttid < item->t_firsttid)
+			while (nexttid < item->t_firsttid)
 			{
 				if (!intset_iterate_next(tids, &nexttid))
-					nexttid = MaxZSTid;
+					nexttid = MaxPlusOneZSTid;
 			}
 
 			/* If this item doesn't contain any of the items we're removing, keep it as it is. */
 			endtid = item->t_endtid;
-			if (nexttid == MaxZSTid || endtid < nexttid)
+			if (endtid < nexttid)
 			{
 				newitems = lappend(newitems, item);
 				continue;
@@ -329,13 +331,23 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 			{
 				tids_arr[num_to_remove++] = nexttid;
 				if (!intset_iterate_next(tids, &nexttid))
-					nexttid = MaxZSTid;
+					nexttid = MaxPlusOneZSTid;
 			}
-			tids_arr[num_to_remove++] = MaxZSTid;
+			tids_arr[num_to_remove++] = MaxPlusOneZSTid;
 			newitem = zsbt_attr_remove_from_item(attr, item, tids_arr);
 			pfree(tids_arr);
 			if (newitem)
 				newitems = lappend(newitems, newitem);
+		}
+
+		/*
+		 * Skip over any remaining TIDs in the dead TID list that would
+		 * be on this page, but are missing.
+		 */
+		while (nexttid < opaque->zs_hikey)
+		{
+			if (!intset_iterate_next(tids, &nexttid))
+				nexttid = MaxPlusOneZSTid;
 		}
 
 		/* Now pass the list to the recompressor. */

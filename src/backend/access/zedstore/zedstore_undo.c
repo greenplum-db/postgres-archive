@@ -418,7 +418,7 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 						intset_num_entries(dead_tids))));
 
 		starttid = endtid;
-	} while(starttid < MaxZSTid);
+	} while(starttid < MaxPlusOneZSTid);
 
 	/* Do post-vacuum cleanup and statistics update for each index */
 	for (int i = 0; i < nindexes; i++)
