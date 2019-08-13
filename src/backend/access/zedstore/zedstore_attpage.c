@@ -50,16 +50,14 @@ static void zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf,
  * Fills in the scan struct in *scan.
  */
 void
-zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno, zstid starttid,
-					 zstid endtid, ZSAttrTreeScan *scan)
+zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
+					 ZSAttrTreeScan *scan)
 {
 	scan->rel = rel;
 	scan->attno = attno;
 	scan->attdesc = TupleDescAttr(tdesc, attno - 1);
 
 	scan->context = CurrentMemoryContext;
-	scan->starttid = starttid;
-	scan->endtid = endtid;
 	scan->array_datums = MemoryContextAlloc(scan->context, sizeof(Datum));
 	scan->array_isnulls = MemoryContextAlloc(scan->context, sizeof(bool) + 7);
 	scan->array_tids = MemoryContextAlloc(scan->context, sizeof(zstid));
@@ -122,11 +120,9 @@ zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid nexttid)
 		return InvalidZSTid;
 
 	/*
-	 * Advance to the next TID >= nexttid.
-	 *
-	 * This advances scan->nexttid as it goes.
+	 * Find the item containing nexttid.
 	 */
-	while (nexttid < scan->endtid)
+	for (;;)
 	{
 		Buffer		buf;
 		Page		page;
@@ -194,7 +190,6 @@ zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid nexttid)
 	}
 
 	/* Reached end of scan. */
-	scan->active = false;
 	scan->array_num_elements = 0;
 	scan->array_curr_idx = -1;
 	if (BufferIsValid(scan->lastbuf))

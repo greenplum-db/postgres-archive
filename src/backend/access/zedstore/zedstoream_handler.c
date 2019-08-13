@@ -1230,8 +1230,6 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 				zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
 									 slot->tts_tupleDescriptor,
 									 attno,
-									 scan->cur_range_start,
-									 scan->cur_range_end,
 									 &scan_proj->attr_scans[i - 1]);
 			}
 			MemoryContextSwitchTo(oldcontext);
@@ -1503,8 +1501,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 			Datum		datum;
 			bool        isnull;
 
-			zsbt_attr_begin_scan(rel, slot->tts_tupleDescriptor, natt, tid, tid + 1,
-								 btscan);
+			zsbt_attr_begin_scan(rel, slot->tts_tupleDescriptor, natt, btscan);
 			attr = btscan->attdesc;
 			if (zsbt_attr_fetch(btscan, &datum, &isnull, tid))
 			{
@@ -1877,8 +1874,6 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 					zsbt_attr_begin_scan(zscan->rs_scan.rs_rd,
 										 RelationGetDescr(zscan->rs_scan.rs_rd),
 										 natt,
-										 zscan->cur_range_start,
-										 zscan->cur_range_end,
 										 &zscan_proj->attr_scans[i - 1]);
 				}
 			}
@@ -2301,8 +2296,6 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		zsbt_attr_begin_scan(OldHeap,
 							 olddesc,
 							 attno,
-							 MinZSTid,
-							 MaxPlusOneZSTid,
 							 &attr_scans[attno - 1]);
 	}
 
@@ -2498,8 +2491,6 @@ zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 			zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
 								 reldesc,
 								 attno,
-								 ZSTidFromBlkOff(blockno, 1),
-								 ZSTidFromBlkOff(blockno + 1, 1),
 								 &attr_scan);
 			for (int n = 0; n < ntuples; n++)
 			{
@@ -2820,8 +2811,6 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 			zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
 								 reldesc,
 								 attno,
-								 ZSTidFromBlkOff(tid_blkno, 1),
-								 ZSTidFromBlkOff(tid_blkno + 1, 1),
 								 &attr_scan);
 			for (int n = 0; n < ntuples; n++)
 			{
@@ -3030,7 +3019,6 @@ zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstat
 		zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
 							 slot->tts_tupleDescriptor,
 							 attno,
-							 tid, tid + 1,
 							 &attr_scan);
 		attr = attr_scan.attdesc;
 

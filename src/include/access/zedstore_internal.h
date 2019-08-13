@@ -663,12 +663,6 @@ typedef struct ZSAttrTreeScan
 	OffsetNumber lastoff;
 
 	/*
-	 * starttid and endtid define a range of rows to scan.
-	 */
-	zstid		starttid;
-	zstid		endtid;
-
-	/*
 	 * These fields are used, when the scan is processing an array tuple.
 	 * They are filled in by zsbt_attr_item_extract().
 	 */
@@ -886,7 +880,7 @@ extern List *zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, Int
 
 /* prototypes for functions in zedstore_attpage.c */
 extern void zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
-								zstid starttid, zstid endtid, ZSAttrTreeScan *scan);
+								 ZSAttrTreeScan *scan);
 extern void zsbt_attr_end_scan(ZSAttrTreeScan *scan);
 extern bool zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid tid);
 
@@ -930,9 +924,6 @@ static inline bool
 zsbt_attr_fetch(ZSAttrTreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 {
 	int			idx;
-
-	/* The next item from this scan is beyond the TID we're looking for. */
-	Assert(tid >= scan->starttid && tid < scan->endtid);
 
 	/*
 	 * Fetch the next item from the scan. The item we're looking for might
