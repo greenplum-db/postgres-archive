@@ -456,8 +456,7 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 			{
 				ZSAttributeArrayItem *item = (ZSAttributeArrayItem *) lfirst(lc);
 
-				Assert ((item->t_flags & 0x3) == item->t_flags);
-				Assert(item->t_size > 5);
+				Assert(item->t_size > 0);
 
 				if (PageAddItemExtended(page,
 										(Item) item, item->t_size,
