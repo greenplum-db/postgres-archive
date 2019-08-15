@@ -253,7 +253,6 @@ extern PGDLLIMPORT int log_min_messages;
 extern PGDLLIMPORT int client_min_messages;
 extern int	log_min_duration_statement;
 extern int	log_temp_files;
-extern double log_statement_sample_rate;
 extern double log_xact_sample_rate;
 
 extern int	temp_file_limit;
@@ -366,7 +365,7 @@ extern int	set_config_option(const char *name, const char *value,
 							  GucContext context, GucSource source,
 							  GucAction action, bool changeVal, int elevel,
 							  bool is_reload);
-extern void AlterSystemSetConfigFile(AlterSystemStmt *setstmt);
+extern void AlterSystemSetConfigFile(AlterSystemStmt *altersysstmt);
 extern char *GetConfigOptionByName(const char *name, const char **varname,
 								   bool missing_ok);
 extern void GetConfigOptionByNum(int varnum, const char **values, bool *noshow);

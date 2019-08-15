@@ -418,6 +418,15 @@ vacuum(List *relations, VacuumParams *params,
 					PopActiveSnapshot();
 					CommitTransactionCommand();
 				}
+				else
+				{
+					/*
+					 * If we're not using separate xacts, better separate the
+					 * ANALYZE actions with CCIs.  This avoids trouble if user
+					 * says "ANALYZE t, t".
+					 */
+					CommandCounterIncrement();
+				}
 			}
 		}
 	}
@@ -847,7 +856,7 @@ get_all_vacuum_rels(int options)
 }
 
 /*
- * vacuum_set_xid_limits() -- compute oldest-Xmin and freeze cutoff points
+ * vacuum_set_xid_limits() -- compute oldestXmin and freeze cutoff points
  *
  * The output parameters are:
  * - oldestXmin is the cutoff value used to distinguish whether tuples are

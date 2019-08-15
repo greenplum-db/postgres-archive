@@ -1189,8 +1189,7 @@ _bt_lock_branch_parent(Relation rel, BlockNumber child, BTStack stack,
 	 * non-unique high keys in leaf level pages.  Even heapkeyspace indexes
 	 * can have a stale stack due to insertions into the parent.
 	 */
-	stack->bts_btentry = child;
-	pbuf = _bt_getstackbuf(rel, stack);
+	pbuf = _bt_getstackbuf(rel, stack, child);
 	if (pbuf == InvalidBuffer)
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
@@ -1653,8 +1652,7 @@ _bt_mark_page_halfdead(Relation rel, Buffer leafbuf, BTStack stack)
 	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 	opaque->btpo_flags |= BTP_HALF_DEAD;
 
-	PageIndexTupleDelete(page, P_HIKEY);
-	Assert(PageGetMaxOffsetNumber(page) == 0);
+	Assert(PageGetMaxOffsetNumber(page) == P_HIKEY);
 	MemSet(&trunctuple, 0, sizeof(IndexTupleData));
 	trunctuple.t_info = sizeof(IndexTupleData);
 	if (target != leafblkno)
@@ -1662,9 +1660,9 @@ _bt_mark_page_halfdead(Relation rel, Buffer leafbuf, BTStack stack)
 	else
 		BTreeTupleSetTopParent(&trunctuple, InvalidBlockNumber);
 
-	if (PageAddItem(page, (Item) &trunctuple, sizeof(IndexTupleData), P_HIKEY,
-					false, false) == InvalidOffsetNumber)
-		elog(ERROR, "could not add dummy high key to half-dead page");
+	if (!PageIndexTupleOverwrite(page, P_HIKEY, (Item) &trunctuple,
+								 IndexTupleSize(&trunctuple)))
+		elog(ERROR, "could not overwrite high key in half-dead page");
 
 	/* Must mark buffers dirty before XLogInsert */
 	MarkBufferDirty(topparent);

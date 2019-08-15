@@ -1981,6 +1981,94 @@ executeComparison(JsonPathItem *cmp, JsonbValue *lv, JsonbValue *rv, void *p)
 }
 
 /*
+ * Perform per-byte comparison of two strings.
+ */
+static int
+binaryCompareStrings(const char *s1, int len1,
+					 const char *s2, int len2)
+{
+	int			cmp;
+
+	cmp = memcmp(s1, s2, Min(len1, len2));
+
+	if (cmp != 0)
+		return cmp;
+
+	if (len1 == len2)
+		return 0;
+
+	return len1 < len2 ? -1 : 1;
+}
+
+/*
+ * Compare two strings in the current server encoding using Unicode codepoint
+ * collation.
+ */
+static int
+compareStrings(const char *mbstr1, int mblen1,
+			   const char *mbstr2, int mblen2)
+{
+	if (GetDatabaseEncoding() == PG_SQL_ASCII ||
+		GetDatabaseEncoding() == PG_UTF8)
+	{
+		/*
+		 * It's known property of UTF-8 strings that their per-byte comparison
+		 * result matches codepoints comparison result.  ASCII can be
+		 * considered as special case of UTF-8.
+		 */
+		return binaryCompareStrings(mbstr1, mblen1, mbstr2, mblen2);
+	}
+	else
+	{
+		char	   *utf8str1,
+				   *utf8str2;
+		int			cmp,
+					utf8len1,
+					utf8len2;
+
+		/*
+		 * We have to convert other encodings to UTF-8 first, then compare.
+		 * Input strings may be not null-terminated and pg_server_to_any() may
+		 * return them "as is".  So, use strlen() only if there is real
+		 * conversion.
+		 */
+		utf8str1 = pg_server_to_any(mbstr1, mblen1, PG_UTF8);
+		utf8str2 = pg_server_to_any(mbstr2, mblen2, PG_UTF8);
+		utf8len1 = (mbstr1 == utf8str1) ? mblen1 : strlen(utf8str1);
+		utf8len2 = (mbstr2 == utf8str2) ? mblen2 : strlen(utf8str2);
+
+		cmp = binaryCompareStrings(utf8str1, utf8len1, utf8str2, utf8len2);
+
+		/*
+		 * If pg_server_to_any() did no real conversion, then we actually
+		 * compared original strings.  So, we already done.
+		 */
+		if (mbstr1 == utf8str1 && mbstr2 == utf8str2)
+			return cmp;
+
+		/* Free memory if needed */
+		if (mbstr1 != utf8str1)
+			pfree(utf8str1);
+		if (mbstr2 != utf8str2)
+			pfree(utf8str2);
+
+		/*
+		 * When all Unicode codepoints are equal, return result of binary
+		 * comparison.  In some edge cases, same characters may have different
+		 * representations in encoding.  Then our behavior could diverge from
+		 * standard.  However, that allow us to do simple binary comparison
+		 * for "==" operator, which is performance critical in typical cases.
+		 * In future to implement strict standard conformance, we can do
+		 * normalization of input JSON strings.
+		 */
+		if (cmp == 0)
+			return binaryCompareStrings(mbstr1, mblen1, mbstr2, mblen2);
+		else
+			return cmp;
+	}
+}
+
+/*
  * Compare two SQL/JSON items using comparison operation 'op'.
  */
 static JsonPathBool
@@ -2022,9 +2110,8 @@ compareItems(int32 op, JsonbValue *jb1, JsonbValue *jb2)
 						   jb2->val.string.val,
 						   jb1->val.string.len) ? jpbFalse : jpbTrue;
 
-			cmp = varstr_cmp(jb1->val.string.val, jb1->val.string.len,
-							 jb2->val.string.val, jb2->val.string.len,
-							 DEFAULT_COLLATION_OID);
+			cmp = compareStrings(jb1->val.string.val, jb1->val.string.len,
+								 jb2->val.string.val, jb2->val.string.len);
 			break;
 
 		case jbvBinary:

@@ -73,6 +73,7 @@ static int	ldapServiceLookup(const char *purl, PQconninfoOption *options,
 #include "common/ip.h"
 #include "common/link-canary.h"
 #include "common/scram-common.h"
+#include "common/string.h"
 #include "mb/pg_wchar.h"
 #include "port/pg_bswap.h"
 
@@ -3732,8 +3733,8 @@ internal_ping(PGconn *conn)
 	 * PQPING_NO_RESPONSE.  This result could be somewhat misleading for a
 	 * pre-7.4 server, since it won't send back a SQLSTATE, but those are long
 	 * out of support.  Another corner case where the server could return a
-	 * failure without a SQLSTATE is fork failure, but NO_RESPONSE isn't
-	 * totally unreasonable for that anyway.  We expect that every other
+	 * failure without a SQLSTATE is fork failure, but PQPING_NO_RESPONSE
+	 * isn't totally unreasonable for that anyway.  We expect that every other
 	 * failure case in a modern server will produce a report with a SQLSTATE.
 	 *
 	 * NOTE: whenever we get around to making libpq generate SQLSTATEs for
@@ -6911,12 +6912,8 @@ passwordFromFile(const char *hostname, const char *port, const char *dbname,
 		if (fgets(buf, sizeof(buf), fp) == NULL)
 			break;
 
-		len = strlen(buf);
-
-		/* Remove trailing newline, including \r in case we're on Windows */
-		while (len > 0 && (buf[len - 1] == '\n' ||
-						   buf[len - 1] == '\r'))
-			buf[--len] = '\0';
+		/* strip trailing newline and carriage return */
+		len = pg_strip_crlf(buf);
 
 		if (len == 0)
 			continue;

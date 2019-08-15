@@ -65,10 +65,7 @@ copies of tree pages are unshared.  Postgres shares in-memory buffers
 among backends.  As a result, we do page-level read locking on btree
 pages in order to guarantee that no record is modified while we are
 examining it.  This reduces concurrency but guarantees correct
-behavior.  An advantage is that when trading in a read lock for a
-write lock, we need not re-read the page after getting the write lock.
-Since we're also holding a pin on the shared buffer containing the
-page, we know that buffer still contains the page and is up-to-date.
+behavior.
 
 We support the notion of an ordered "scan" of an index as well as
 insertions, deletions, and simple lookups.  A scan in the forward
@@ -227,7 +224,13 @@ it, but it's still linked to its siblings.
 
 (Note: Lanin and Shasha prefer to make the key space move left, but their
 argument for doing so hinges on not having left-links, which we have
-anyway.  So we simplify the algorithm by moving key space right.)
+anyway.  So we simplify the algorithm by moving the key space right.  Note
+also that Lanin and Shasha optimistically avoid holding multiple locks as
+the tree is ascended.  They're willing to release all locks and retry in
+"rare" cases where the correct location for a new downlink cannot be found
+immediately.  We prefer to stick with Lehman and Yao's approach of
+pessimistically coupling buffer locks when ascending the tree, since it's
+far simpler.)
 
 To preserve consistency on the parent level, we cannot merge the key space
 of a page into its right sibling unless the right sibling is a child of
