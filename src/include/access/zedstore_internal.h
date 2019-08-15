@@ -925,6 +925,8 @@ extern zs_split_stack *zsbt_insert_downlinks(Relation rel, AttrNumber attno,
 					  List *downlinks);
 extern void zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids);
 extern zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level);
+extern zs_split_stack *zs_new_split_stack_entry(Buffer buf, Page page);
+extern void zs_apply_split_changes(Relation rel, zs_split_stack *stack);
 extern Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
 extern Buffer zsbt_find_and_lock_leaf_containing_tid(Relation rel, AttrNumber attno,
 													 Buffer buf, zstid nexttid, int lockmode);
@@ -1015,10 +1017,6 @@ extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, D
 extern Buffer zspage_getnewbuf(Relation rel, Buffer metabuf);
 extern Buffer zspage_extendrel_newbuf(Relation rel);
 extern void zspage_delete_page(Relation rel, Buffer buf);
-
-/* prototypes for functions in zedstore_utils.c */
-extern zs_split_stack *zs_new_split_stack_entry(Buffer buf, Page page);
-extern void zs_apply_split_changes(Relation rel, zs_split_stack *stack);
 
 typedef struct ZedstoreTupleTableSlot
 {

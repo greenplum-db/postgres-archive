@@ -21,6 +21,7 @@
 #include "postgres.h"
 
 #include "access/zedstore_internal.h"
+#include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/procarray.h"
 #include "utils/rel.h"
@@ -761,6 +762,62 @@ zsbt_merge_pages(Relation rel, AttrNumber attno, Buffer leftbuf, Buffer rightbuf
 	}
 
 	return stack_head;
+}
+
+/*
+ * Allocate a new zs_split_stack struct.
+ */
+zs_split_stack *
+zs_new_split_stack_entry(Buffer buf, Page page)
+{
+	zs_split_stack *stack;
+
+	stack = palloc(sizeof(zs_split_stack));
+	stack->next = NULL;
+	stack->buf = buf;
+	stack->page = page;
+	stack->recycle = false;		/* caller can change this */
+
+	return stack;
+}
+
+/*
+ * Apply all the changes represented by a list of zs_split_stack
+ * entries.
+ */
+void
+zs_apply_split_changes(Relation rel, zs_split_stack *stack)
+{
+	zs_split_stack *head = stack;
+
+	START_CRIT_SECTION();
+
+	while (stack)
+	{
+		PageRestoreTempPage(stack->page, BufferGetPage(stack->buf));
+		MarkBufferDirty(stack->buf);
+		stack = stack->next;
+	}
+
+	/* TODO: WAL-log all the changes  */
+
+	END_CRIT_SECTION();
+
+	stack = head;
+	while (stack)
+	{
+		zs_split_stack *next;
+
+		/* add this page to the Free Page Map for recycling */
+		if (stack->recycle)
+			zspage_delete_page(rel, stack->buf);
+
+		UnlockReleaseBuffer(stack->buf);
+
+		next = stack->next;
+		pfree(stack);
+		stack = next;
+	}
 }
 
 static int
