@@ -76,16 +76,15 @@ zsundo_insert(Relation rel, ZSUndoRec *rec)
 	Buffer		tail_buf = InvalidBuffer;
 	Page		tail_pg = NULL;
 	ZSUndoPageOpaque *tail_opaque = NULL;
+	uint64		next_counter;
 	char	   *dst;
 	ZSUndoRecPtr undorecptr;
 	int			offset;
-	uint64		undo_counter;
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	metapage = BufferGetPage(metabuf);
 
-	/* TODO: get share lock to begin with, for more concurrency */
-	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+	LockBuffer(metabuf, BUFFER_LOCK_SHARE);
 	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
 
 retry_lock_tail:
@@ -100,6 +99,23 @@ retry_lock_tail:
 		LockBuffer(tail_buf, BUFFER_LOCK_EXCLUSIVE);
 		tail_pg = BufferGetPage(tail_buf);
 		tail_opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(tail_pg);
+		Assert(tail_opaque->first_undorecptr.counter == metaopaque->zs_undo_tail_first_counter);
+
+		if (IsZSUndoRecPtrValid(&tail_opaque->last_undorecptr))
+		{
+			Assert(tail_opaque->last_undorecptr.counter >= metaopaque->zs_undo_tail_first_counter);
+			next_counter = tail_opaque->last_undorecptr.counter + 1;
+		}
+		else
+		{
+			next_counter = tail_opaque->first_undorecptr.counter;
+			Assert(next_counter == metaopaque->zs_undo_tail_first_counter);
+		}
+	}
+	else
+	{
+		next_counter = metaopaque->zs_undo_tail_first_counter;
+		Assert(next_counter == metaopaque->zs_undo_oldestptr.counter);
 	}
 	if (tail_blk == InvalidBlockNumber || PageGetExactFreeSpace(tail_pg) < rec->size)
 	{
@@ -136,16 +152,24 @@ retry_lock_tail:
 			goto retry_lock_tail;
 		}
 
+		if (tail_blk == InvalidBlockNumber)
+			next_counter = metaopaque->zs_undo_tail_first_counter;
+		else
+			next_counter = tail_opaque->last_undorecptr.counter + 1;
+
 		newblk = BufferGetBlockNumber(newbuf);
 		newpage = BufferGetPage(newbuf);
 		PageInit(newpage, BLCKSZ, sizeof(ZSUndoPageOpaque));
 		newopaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(newpage);
 		newopaque->next = InvalidBlockNumber;
-		newopaque->first_undorecptr = InvalidUndoPtr;
+		newopaque->first_undorecptr.blkno = newblk;
+		newopaque->first_undorecptr.offset = SizeOfPageHeaderData;
+		newopaque->first_undorecptr.counter = next_counter;
 		newopaque->last_undorecptr = InvalidUndoPtr;
 		newopaque->zs_page_id = ZS_UNDO_PAGE_ID;
 
 		metaopaque->zs_undo_tail = newblk;
+		metaopaque->zs_undo_tail_first_counter = next_counter;
 		if (tail_blk == InvalidBlockNumber)
 			metaopaque->zs_undo_head = newblk;
 
@@ -164,27 +188,18 @@ retry_lock_tail:
 		tail_opaque = newopaque;
 	}
 
-	undo_counter = metaopaque->zs_undo_counter++;
-	MarkBufferDirty(metabuf);
-
 	UnlockReleaseBuffer(metabuf);
 
 	/* insert the record to this page */
 	offset = ((PageHeader) tail_pg)->pd_lower;
 
-	undorecptr.counter = undo_counter;
+	undorecptr.counter = next_counter;
 	undorecptr.blkno = tail_blk;
 	undorecptr.offset = offset;
 	rec->undorecptr = undorecptr;
 	dst = ((char *) tail_pg) + offset;
 	memcpy(dst, rec, rec->size);
 
-	/*
-	 * if this is the first record on the page, initialize the field in
-	 * the page header, too.
-	 */
-	if (((PageHeader) tail_pg)->pd_lower == SizeOfPageHeaderData)
-		tail_opaque->first_undorecptr = undorecptr;
 	tail_opaque->last_undorecptr = undorecptr;
 	((PageHeader) tail_pg)->pd_lower += rec->size;
 
@@ -263,6 +278,7 @@ zsundo_fetch_lock(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmod
 
 	/* Check that this page contains the given record */
 	if (undoptr.counter < opaque->first_undorecptr.counter ||
+		!IsZSUndoRecPtrValid(&opaque->last_undorecptr) ||
 		undoptr.counter > opaque->last_undorecptr.counter)
 		goto record_missing;
 
@@ -765,6 +781,7 @@ zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr,
 	{
 		metaopaque->zs_undo_head = InvalidBlockNumber;
 		metaopaque->zs_undo_tail = InvalidBlockNumber;
+		metaopaque->zs_undo_tail_first_counter = oldest_undorecptr.counter;
 	}
 	else
 		metaopaque->zs_undo_head = oldest_undopage;

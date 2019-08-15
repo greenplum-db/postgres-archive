@@ -534,9 +534,22 @@ typedef struct ZSMetaPage
  */
 typedef struct ZSMetaPageOpaque
 {
-	uint64		zs_undo_counter;
+	/*
+	 * Head and tail page of the UNDO log.
+	 *
+	 * 'zs_undo_tail' is the newest page, where new UNDO records will be
+	 * inserted, and 'zs_undo_head' is the oldest page.
+	 * 'zs_undo_tail_first_counter' is the UNDO counter value of the first
+	 * record on the tail page (or if the tail page is empty, the counter
+	 * value the first trecord on the tail page will have, when it's
+	 * inserted). If there is no UNDO log at all,
+	 *  'zs_undo_tail_first_counter' is the new counter value to use. It's
+	 * actually redundant, except when there is no UNDO log at all, but it's
+	 * a nice cross-check at other times.
+	 */
 	BlockNumber	zs_undo_head;
 	BlockNumber	zs_undo_tail;
+	uint64		zs_undo_tail_first_counter;
 	ZSUndoRecPtr zs_undo_oldestptr;
 
 	BlockNumber zs_fpm_head;		/* head of the Free Page Map list */

@@ -152,7 +152,7 @@ typedef struct
 typedef struct
 {
 	BlockNumber	next;
-	ZSUndoRecPtr first_undorecptr;
+	ZSUndoRecPtr first_undorecptr;	/* note: this is set even if the page is empty! */
 	ZSUndoRecPtr last_undorecptr;
 	uint16		padding0;			/* padding, to put zs_page_id last */
 	uint16		padding1;			/* padding, to put zs_page_id last */
