@@ -97,7 +97,7 @@ extern void zsundo_insert_finish(zs_undo_reservation *reservation);
 
 extern char *zsundo_fetch(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode, bool missing_ok);
 
-extern void zsundo_discard(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumber oldest_undopage, List *unused_pages);
+extern void zsundo_discard(Relation rel, ZSUndoRecPtr oldest_undorecptr);
 
 extern void zsundo_newpage_redo(XLogReaderState *record);
 extern void zsundo_discard_redo(XLogReaderState *record);

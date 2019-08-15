@@ -331,88 +331,119 @@ record_missing:
 			 undoptr.counter, undoptr.blkno, undoptr.offset);
 }
 
-/* Update metapage with the oldest value */
+/*
+ * Discard old UNDO log, recycling any now-unused pages.
+ *
+ * Updates the metapage with the oldest value that remains after the discard.
+ */
 void
-zsundo_discard(Relation rel, ZSUndoRecPtr oldest_undorecptr,
-			   BlockNumber oldest_undopage, List *unused_pages)
+zsundo_discard(Relation rel, ZSUndoRecPtr oldest_undorecptr)
 {
 	/* Scan the undo log from oldest to newest */
 	Buffer		metabuf;
 	Page		metapage;
 	ZSMetaPageOpaque *metaopaque;
-	ListCell   *lc;
-
-	START_CRIT_SECTION();
+	BlockNumber	nextblk;
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	metapage = BufferGetPage(metabuf);
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
 
-	metaopaque->zs_undo_oldestptr = oldest_undorecptr;
-	if (oldest_undopage == InvalidBlockNumber)
+	nextblk = metaopaque->zs_undo_head;
+	while (nextblk != InvalidBlockNumber)
 	{
-		metaopaque->zs_undo_head = InvalidBlockNumber;
-		metaopaque->zs_undo_tail = InvalidBlockNumber;
-		metaopaque->zs_undo_tail_first_counter = oldest_undorecptr.counter;
-	}
-	else
-		metaopaque->zs_undo_head = oldest_undopage;
-
-	if (RelationNeedsWAL(rel))
-	{
-		wal_zedstore_undo_discard xlrec;
-		XLogRecPtr recptr;
-
-		xlrec.oldest_undorecptr = oldest_undorecptr;
-		xlrec.oldest_undopage = oldest_undopage;
-
-		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, SizeOfZSWalUndoDiscard);
-
-		XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
-
-		recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_UNDO_DISCARD);
-
-		PageSetLSN(BufferGetPage(metabuf), recptr);
-	}
-
-	MarkBufferDirty(metabuf);
-	UnlockReleaseBuffer(metabuf);
-
-	END_CRIT_SECTION();
-
-	foreach(lc, unused_pages)
-	{
-		BlockNumber blk = (BlockNumber) lfirst_int(lc);
+		BlockNumber blk = nextblk;
 		Buffer		buf;
 		Page		page;
 		ZSUndoPageOpaque *opaque;
+		bool		discard_this_page = false;
+		BlockNumber nextfreeblkno = InvalidBlockNumber;
 
-		/* check that the page still looks like what we'd expect. */
 		buf = ReadBuffer(rel, blk);
-		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		page = BufferGetPage(buf);
-		if (PageIsEmpty(page) ||
-			PageGetSpecialSize(page) != MAXALIGN(sizeof(ZSUndoPageOpaque)))
-		{
-			UnlockReleaseBuffer(buf);
-			continue;
-		}
+		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+		/*
+		 * check that the page still looks like what we'd expect.
+		 *
+		 * FIXME: how to recover? Should these be just warnings?
+		 */
+		if (PageIsEmpty(page))
+			elog(ERROR, "corrupted zedstore table; oldest UNDO log page is empty");
+
+		if (PageGetSpecialSize(page) != MAXALIGN(sizeof(ZSUndoPageOpaque)))
+			elog(ERROR, "corrupted zedstore table; oldest page in UNDO log is not an UNDO page");
 		opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(page);
 		if (opaque->zs_page_id != ZS_UNDO_PAGE_ID)
-		{
-			UnlockReleaseBuffer(buf);
-			continue;
-		}
-
+			elog(ERROR, "corrupted zedstore table; oldest page in UNDO log has unexpected page id %d",
+				 opaque->zs_page_id);
 		/* FIXME: Also check here that the max UndoRecPtr on the page is less
 		 * than the new 'oldest_undorecptr'
 		 */
 
-		zspage_delete_page(rel, buf);
+		if (!IsZSUndoRecPtrValid(&opaque->last_undorecptr) ||
+			opaque->last_undorecptr.counter < oldest_undorecptr.counter)
+			discard_this_page = true;
+
+		if (discard_this_page && blk == oldest_undorecptr.blkno)
+			elog(ERROR, "corrupted UNDO page chain, tried to discard active page");
+
+		nextblk = opaque->next;
+
+		START_CRIT_SECTION();
+
+		metaopaque->zs_undo_oldestptr = oldest_undorecptr;
+
+		if (discard_this_page)
+		{
+			if (nextblk == InvalidBlockNumber)
+			{
+				metaopaque->zs_undo_head = InvalidBlockNumber;
+				metaopaque->zs_undo_tail = InvalidBlockNumber;
+				metaopaque->zs_undo_tail_first_counter = oldest_undorecptr.counter;
+			}
+			else
+				metaopaque->zs_undo_head = nextblk;
+
+			/* Add the page to the free page list */
+			nextfreeblkno = metaopaque->zs_fpm_head;
+			zspage_mark_page_deleted(page, nextfreeblkno);
+			metaopaque->zs_fpm_head = blk;
+
+			MarkBufferDirty(buf);
+		}
+
+		MarkBufferDirty(metabuf);
+
+		if (RelationNeedsWAL(rel))
+		{
+			wal_zedstore_undo_discard xlrec;
+			XLogRecPtr recptr;
+
+			xlrec.oldest_undorecptr = oldest_undorecptr;
+
+			XLogBeginInsert();
+			XLogRegisterData((char *) &xlrec, SizeOfZSWalUndoDiscard);
+			XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+
+			if (discard_this_page)
+			{
+				XLogRegisterBuffer(1, buf, REGBUF_KEEP_DATA | REGBUF_WILL_INIT | REGBUF_STANDARD);
+				XLogRegisterBufData(1, (char *) &nextfreeblkno, sizeof(BlockNumber));
+			}
+
+			recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_UNDO_DISCARD);
+
+			PageSetLSN(BufferGetPage(metabuf), recptr);
+		}
+
+		END_CRIT_SECTION();
+
 		UnlockReleaseBuffer(buf);
 	}
+
+	UnlockReleaseBuffer(metabuf);
 }
 
 void
@@ -421,8 +452,11 @@ zsundo_discard_redo(XLogReaderState *record)
 	XLogRecPtr	lsn = record->EndRecPtr;
 	wal_zedstore_undo_discard *xlrec = (wal_zedstore_undo_discard *) XLogRecGetData(record);
 	ZSUndoRecPtr oldest_undorecptr = xlrec->oldest_undorecptr;
-	BlockNumber oldest_undopage = xlrec->oldest_undopage;
+	BlockNumber nextblk = xlrec->oldest_undopage;
 	Buffer		metabuf;
+	bool		discard_this_page;
+
+	discard_this_page = XLogRecHasBlockRef(record, 1);
 
 	if (XLogReadBufferForRedo(record, 0, &metabuf) == BLK_NEEDS_REDO)
 	{
@@ -431,18 +465,44 @@ zsundo_discard_redo(XLogReaderState *record)
 
 		metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
 		metaopaque->zs_undo_oldestptr = oldest_undorecptr;
-		if (oldest_undopage == InvalidBlockNumber)
+
+		if (discard_this_page)
 		{
-			metaopaque->zs_undo_head = InvalidBlockNumber;
-			metaopaque->zs_undo_tail = InvalidBlockNumber;
-			metaopaque->zs_undo_tail_first_counter = oldest_undorecptr.counter;
+			if (nextblk == InvalidBlockNumber)
+			{
+				metaopaque->zs_undo_head = InvalidBlockNumber;
+				metaopaque->zs_undo_tail = InvalidBlockNumber;
+				metaopaque->zs_undo_tail_first_counter = oldest_undorecptr.counter;
+			}
+			else
+				metaopaque->zs_undo_head = nextblk;
 		}
-		else
-			metaopaque->zs_undo_head = oldest_undopage;
 
 		PageSetLSN(metapage, lsn);
 		MarkBufferDirty(metabuf);
 	}
+
+	if (discard_this_page)
+	{
+		Size		datalen;
+		char	   *data;
+		BlockNumber	nextfreeblkno;
+		Buffer		discardedbuf;
+		Page		discardedpage;
+
+		data = XLogRecGetBlockData(record, 1, &datalen);
+		Assert(datalen == sizeof(BlockNumber));
+
+		memcpy(&nextfreeblkno, data, sizeof(BlockNumber));
+
+		discardedbuf = XLogInitBufferForRedo(record, 1);
+		discardedpage = BufferGetPage(discardedbuf);
+		zspage_mark_page_deleted(discardedpage, nextfreeblkno);
+
+		PageSetLSN(discardedpage, lsn);
+		MarkBufferDirty(discardedbuf);
+	}
+
 	if (BufferIsValid(metabuf))
 		UnlockReleaseBuffer(metabuf);
 }

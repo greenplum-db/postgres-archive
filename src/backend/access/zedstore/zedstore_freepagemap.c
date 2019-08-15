@@ -198,6 +198,17 @@ zspage_extendrel_newbuf(Relation rel)
 	return buf;
 }
 
+void
+zspage_mark_page_deleted(Page page, BlockNumber next_free_blk)
+{
+	ZSFreePageOpaque *opaque;
+
+	PageInit(page, BLCKSZ, sizeof(ZSFreePageOpaque));
+	opaque = (ZSFreePageOpaque *) PageGetSpecialPointer(page);
+	opaque->zs_page_id = ZS_FREE_PAGE_ID;
+	opaque->zs_next = next_free_blk;
+
+}
 
 /*
  * Explictly mark a page as deleted and recyclable, and add it to the FPM.
@@ -212,7 +223,6 @@ zspage_delete_page(Relation rel, Buffer buf)
 	Page		metapage;
 	ZSMetaPageOpaque *metaopaque;
 	Page		page;
-	ZSFreePageOpaque *opaque;
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
@@ -220,10 +230,7 @@ zspage_delete_page(Relation rel, Buffer buf)
 	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
 
 	page = BufferGetPage(buf);
-	PageInit(page, BLCKSZ, sizeof(ZSFreePageOpaque));
-	opaque = (ZSFreePageOpaque *) PageGetSpecialPointer(page);
-	opaque->zs_page_id = ZS_FREE_PAGE_ID;
-	opaque->zs_next = metaopaque->zs_fpm_head;
+	zspage_mark_page_deleted(page, metaopaque->zs_fpm_head);
 	metaopaque->zs_fpm_head = blk;
 
 	MarkBufferDirty(metabuf);

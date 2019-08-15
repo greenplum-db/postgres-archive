@@ -354,7 +354,6 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 	bool		can_advance_oldestundorecptr;
 	char	   *ptr;
 	char	   *endptr;
-	List	   *unused_pages = NIL;
 	BlockNumber deleted_undo_pages = 0;
 
 	oldest_undorecptr = InvalidUndoPtr;
@@ -380,7 +379,7 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 	/*
 	 * If we assume that only one process can call TRIM at a time, then we
 	 * don't need to hold the metapage locked. Alternatively, if multiple
-	 * concurrent trims is possible, we could check after reading the head
+	 * concurrent trims was possible, we could check after reading the head
 	 * page, that it is the page we expect, and re-read the metapage if it's
 	 * not.
 	 */
@@ -435,7 +434,7 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 
 			/*
 			 * No one thinks this transaction is in-progress anymore. If it
-			 * committed, we can just trim away its UNDO record. If it aborted,
+			 * committed, we can just discard away its UNDO record. If it aborted,
 			 * we need to apply the UNDO record first. (For deletions, it's
 			 * the other way round, though.)
 			 *
@@ -502,7 +501,6 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 		{
 			/* We processed all records on the page. Step to the next one, if any. */
 			Assert(ptr == endptr);
-			unused_pages = lappend_int(unused_pages, lastblk);
 			lastblk = opaque->next;
 			UnlockReleaseBuffer(buf);
 			if (lastblk != InvalidBlockNumber)
@@ -510,19 +508,21 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 		}
 	}
 
-	if (can_advance_oldestundorecptr && lastblk == InvalidBlockNumber)
-	{
-		/*
-		 * We stopped after the last valid record. Advance by one, to the next
-		 * record which hasn't been created yet, and which is still needed.
-		 */
-		oldest_undorecptr.counter++;
-		oldest_undorecptr.blkno = InvalidBlockNumber;
-		oldest_undorecptr.offset = 0;
-	}
-
 	if (can_advance_oldestundorecptr)
-		zsundo_discard(rel, oldest_undorecptr, lastblk, unused_pages);
+	{
+		if (lastblk == InvalidBlockNumber)
+		{
+			/*
+			 * We stopped after the last valid record. Advance by one, to the next
+			 * record which hasn't been created yet, and which is still needed.
+			 */
+			oldest_undorecptr.counter++;
+			oldest_undorecptr.blkno = InvalidBlockNumber;
+			oldest_undorecptr.offset = 0;
+		}
+
+		zsundo_discard(rel, oldest_undorecptr);
+	}
 
 	UnlockPage(rel, ZS_META_BLK, ExclusiveLock);
 

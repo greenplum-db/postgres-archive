@@ -971,6 +971,7 @@ extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, D
 /* prototypes for functions in zedstore_freepagemap.c */
 extern Buffer zspage_getnewbuf(Relation rel, Buffer metabuf);
 extern Buffer zspage_extendrel_newbuf(Relation rel);
+extern void zspage_mark_page_deleted(Page page, BlockNumber next_free_blk);
 extern void zspage_delete_page(Relation rel, Buffer buf);
 
 typedef struct ZedstoreTupleTableSlot

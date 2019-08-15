@@ -59,15 +59,30 @@ typedef struct wal_zedstore_undo_newpage
 
 /*
  * WAL record for updating the oldest undo pointer on the metapage, after
- * discarding an old portion the  UNDO log.
+ * discarding an old portion the UNDO log.
+ *
+ * blkref #0 is the metapage.
+ *
+ * If an old UNDO page was discarded away, advancing zs_undo_head, that page
+ * is stored as blkref #1. The new block number to store in zs_undo_head is
+ * stored as the data of blkref #0.
  */
 typedef struct wal_zedstore_undo_discard
 {
 	ZSUndoRecPtr oldest_undorecptr;
-	BlockNumber	oldest_undopage;		/* XXX: is this redundant with undorecptr.block? */
+
+	/*
+	 * Next oldest remaining block in the UNDO chain. This is not the same as
+	 * oldest_undorecptr.block, if we are discarding multiple UNDO blocks. We will
+	 * update oldest_undorecptr in the first iteration already, so that visibility
+	 * checks can use the latest value immediately. But we can't hold a potentially
+	 * unlimited number of pages locked while we mark them as deleted, so they are
+	 * deleted one by one, and each deletion is WAL-logged separately.
+	 */
+	BlockNumber	oldest_undopage;
 } wal_zedstore_undo_discard;
 
-#define SizeOfZSWalUndoDiscard (offsetof(wal_zedstore_undo_discard, oldest_undopage) + sizeof(BlockNumber))
+#define SizeOfZSWalUndoDiscard (offsetof(wal_zedstore_undo_discard, oldest_undorecptr) + sizeof(ZSUndoRecPtr))
 
 /*
  * WAL record for creating a new, empty, root page for an attribute.
@@ -97,7 +112,8 @@ typedef struct wal_zedstore_btree_leaf_items
  * WAL record for page splits, and other more complicated operations where
  * we just rewrite whole pages.
  *
- * block #0 is UNDO buffer, if any. The rest are the b-tree pages (numpages).
+ * block #0 is UNDO buffer, if any.
+ * The rest are the b-tree pages (numpages).
  */
 typedef struct wal_zedstore_btree_rewrite_pages
 {
