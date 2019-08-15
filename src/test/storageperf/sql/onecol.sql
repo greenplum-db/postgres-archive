@@ -1,6 +1,6 @@
 -- Tests with a narrow, single-column table.
 
-CREATE UNLOGGED TABLE onecol (i int4);
+CREATE /* UNLOGGED */ TABLE onecol (i int4);
 
 -- Populate the table with a bunch of INSERT ... SELECT statements.
 -- Measure how long it takes, and the resulting table size.
