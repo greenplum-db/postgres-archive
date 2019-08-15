@@ -217,15 +217,18 @@ zsmeta_initmetapage(Relation rel)
 	PageRestoreTempPage(page, BufferGetPage(buf));
 
 	MarkBufferDirty(buf);
-	/* TODO: WAL-log */
+
+	if (RelationNeedsWAL(rel))
 	{
 		wal_zedstore_init_metapage init_rec;
 		XLogRecPtr recptr;
-		init_rec.blocknum = BufferGetBlockNumber(buf);
+
 		init_rec.natts = natts;
+
 		XLogBeginInsert();
-		XLogRegisterBuffer(BufferGetBlockNumber(buf), buf, REGBUF_WILL_INIT);
-		XLogRegisterData((char *) &init_rec, SizeofZSWalInitMetapage);
+		XLogRegisterBuffer(0, buf,
+						   REGBUF_STANDARD | REGBUF_FORCE_IMAGE | REGBUF_KEEP_DATA);
+		XLogRegisterData((char *) &init_rec, SizeOfZSWalInitMetapage);
 
 		recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_INIT_METAPAGE);
 
@@ -241,20 +244,15 @@ void
 zsmeta_initmetapage_redo(XLogReaderState *record)
 {
 	Buffer		buf;
-	Page		page;
-	XLogRecPtr	lsn = record->EndRecPtr;
-	wal_zedstore_init_metapage *walrec = (wal_zedstore_init_metapage *) XLogRecGetData(record);
-	int			natts = walrec->natts;
 
-	page = zsmeta_initmetapage_internal(natts);
+	/*
+	 * Metapage changes are so rare that we rely on full-page images
+	 * for replay.
+	 */
+	if (XLogReadBufferForRedo(record, 0, &buf) != BLK_RESTORED)
+		elog(ERROR, "zedstore metapage init WAL record did not contain a full-page image");
 
-	buf = XLogInitBufferForRedo(record, walrec->blocknum);
 	Assert(BufferGetBlockNumber(buf) == ZS_META_BLK);
-
-	PageRestoreTempPage(page, BufferGetPage(buf));
-
-	MarkBufferDirty(buf);
-	PageSetLSN(BufferGetPage(buf), lsn);
 	UnlockReleaseBuffer(buf);
 }
 
