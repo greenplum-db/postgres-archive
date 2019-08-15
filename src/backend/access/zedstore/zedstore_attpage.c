@@ -434,11 +434,12 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 		last_existing_tid = lastitem->t_endtid;
 	}
 
+	/*
+	 * If the new items go to the end of the page, and they fit without splitting
+	 * the page, just add them to the end.
+	 */
 	if (((ZSAttributeArrayItem *) lfirst(nextnewlc))->t_firsttid >= last_existing_tid)
 	{
-		/*
-		 * The new items go to the end. Do they fit as is on the page?
-		 * */
 		growth = 0;
 		foreach (lc, newitems)
 		{

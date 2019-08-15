@@ -30,7 +30,7 @@ heap, like update, delete, serializable transactions etc...
 others separately. Provide flexibility of granularity on how to divide
 the columns. Columns accessed together can be stored together.
 
-* Provide better control over bloat (using zheap)
+* Provide better control over bloat.
 
 * Eliminate need for separate toast tables
 

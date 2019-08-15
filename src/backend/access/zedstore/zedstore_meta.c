@@ -171,7 +171,7 @@ zsmeta_initmetapage_internal(int natts)
 	opaque->zs_undo_tail_first_counter = 2; /* start at 2, so that 0 is always "old", and 1 means "dead" */
 	opaque->zs_undo_head = InvalidBlockNumber;
 	opaque->zs_undo_tail = InvalidBlockNumber;
-	opaque->zs_undo_oldestptr.counter = 1;
+	opaque->zs_undo_oldestptr.counter = 2;
 
 	opaque->zs_fpm_head = InvalidBlockNumber;
 

@@ -550,6 +550,11 @@ typedef struct ZSMetaPageOpaque
 	BlockNumber	zs_undo_head;
 	BlockNumber	zs_undo_tail;
 	uint64		zs_undo_tail_first_counter;
+
+	/*
+	 * Oldest UNDO record that is still needed. Anything older than this can
+	 * be discarded, and considered as visible to everyone.
+	 */
 	ZSUndoRecPtr zs_undo_oldestptr;
 
 	BlockNumber zs_fpm_head;		/* head of the Free Page Map list */
