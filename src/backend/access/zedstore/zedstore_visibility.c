@@ -308,11 +308,8 @@ static bool
 zs_SatisfiesAny(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr, ZSUndoSlotVisibility *visi_info)
 {
 	Relation	rel = scan->rel;
-	Snapshot	snapshot = scan->snapshot;
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
-
-	Assert (snapshot->snapshot_type == SNAPSHOT_ANY);
 
 	undo_ptr = item_undoptr;
 
@@ -398,8 +395,6 @@ zs_SatisfiesMVCC(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 	ZSUndoRec  *undorec;
 	bool		aborted;
 
-	Assert (snapshot->snapshot_type == SNAPSHOT_MVCC);
-
 	undo_ptr = item_undoptr;
 
 fetch_undo_record:
@@ -483,8 +478,6 @@ zs_SatisfiesSelf(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 	Relation	rel = scan->rel;
 	ZSUndoRec  *undorec;
 	ZSUndoRecPtr undo_ptr;
-
-	Assert (scan->snapshot->snapshot_type == SNAPSHOT_SELF);
 
 	undo_ptr = item_undoptr;
 
@@ -579,8 +572,6 @@ zs_SatisfiesDirty(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 	Snapshot	snapshot = scan->snapshot;
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
-
-	Assert (snapshot->snapshot_type == SNAPSHOT_DIRTY);
 
 	snapshot->xmin = snapshot->xmax = InvalidTransactionId;
 	snapshot->speculativeToken = INVALID_SPECULATIVE_TOKEN;
@@ -703,7 +694,6 @@ zs_SatisfiesNonVacuumable(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
 
-	Assert(scan->snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE);
 	Assert(TransactionIdIsValid(OldestXmin));
 
 	undo_ptr = item_undoptr;
