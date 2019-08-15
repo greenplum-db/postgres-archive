@@ -36,12 +36,15 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
+
 /* prototypes for local functions */
-static void zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items);
+static void zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items, zs_pending_undo_op *undo_op);
 static OffsetNumber zsbt_tid_fetch(Relation rel, zstid tid,
 								   Buffer *buf_p, ZSUndoRecPtr *undo_ptr_p, bool *isdead_p);
-static void zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems);
-static void zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber off, List *newitems);
+static void zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems,
+								  zs_pending_undo_op *pending_undo_op);
+static void zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber off, List *newitems,
+								  zs_pending_undo_op *pending_undo_op);
 
 static TM_Result zsbt_tid_update_lock_old(Relation rel, zstid otid,
 									  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot,
@@ -429,7 +432,7 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int ntuples,
 	OffsetNumber maxoff;
 	zstid		insert_target_key;
 	List	   *newitems;
-	ZSUndoRecPtr undorecptr;
+	zs_pending_undo_op *undo_op;
 	zstid		endtid;
 	zstid		tid;
 	ZSTidArrayItem *lastitem;
@@ -469,19 +472,19 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int ntuples,
 	/* Form an undo record */
 	if (xid != FrozenTransactionId)
 	{
-		undorecptr = zsundo_create_for_insert(rel, xid, cid, tid, ntuples,
-											  speculative_token, prevundoptr);
+		undo_op = zsundo_create_for_insert(rel, xid, cid, tid, ntuples,
+										   speculative_token, prevundoptr);
 	}
 	else
 	{
-		undorecptr = InvalidUndoPtr;
+		undo_op = NULL;
 	}
 
 	/*
 	 * Create an item to represent all the TIDs, merging with the last existing
 	 * item if possible.
 	 */
-	newitems = zsbt_tid_item_add_tids(lastitem, tid, ntuples, undorecptr,
+	newitems = zsbt_tid_item_add_tids(lastitem, tid, ntuples, undo_op ? undo_op->undorecptr : InvalidUndoPtr,
 									  &modified_orig);
 
 	/*
@@ -489,9 +492,9 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int ntuples,
 	 * This splits the page if necessary.
 	 */
 	if(modified_orig)
-		zsbt_tid_replace_item(rel, buf, maxoff, newitems);
+		zsbt_tid_replace_item(rel, buf, maxoff, newitems, undo_op);
 	else
-		zsbt_tid_add_items(rel, buf, newitems);
+		zsbt_tid_add_items(rel, buf, newitems, undo_op);
 	/* zsbt_tid_replace/add_item unlocked 'buf' */
 	ReleaseBuffer(buf);
 
@@ -513,7 +516,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 	bool		item_isdead;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
-	ZSUndoRecPtr undorecptr;
+	zs_pending_undo_op *undo_op;
 	OffsetNumber off;
 	ZSTidArrayItem *origitem;
 	Buffer		buf;
@@ -573,15 +576,15 @@ zsbt_tid_delete(Relation rel, zstid tid,
 	}
 
 	/* Create UNDO record. */
-	undorecptr = zsundo_create_for_delete(rel, xid, cid, tid, changingPart,
-										  keep_old_undo_ptr ? item_undoptr : InvalidUndoPtr);
+	undo_op = zsundo_create_for_delete(rel, xid, cid, tid, changingPart,
+									   keep_old_undo_ptr ? item_undoptr : InvalidUndoPtr);
 
 	/* Update the tid with the new UNDO pointer. */
 	page = BufferGetPage(buf);
 	origitem = (ZSTidArrayItem *) PageGetItem(page, PageGetItemId(page, off));
-	newitems = zsbt_tid_item_change_undoptr(origitem, tid, undorecptr,
+	newitems = zsbt_tid_item_change_undoptr(origitem, tid, undo_op->undorecptr,
 											recent_oldest_undo);
-	zsbt_tid_replace_item(rel, buf, off, newitems);
+	zsbt_tid_replace_item(rel, buf, off, newitems, undo_op);
 	list_free_deep(newitems);
 	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 
@@ -782,7 +785,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 	TM_FailureData tmfd;
-	ZSUndoRecPtr undorecptr;
+	zs_pending_undo_op *undo_op;
 	List	   *newitems;
 	ZSTidArrayItem *origitem;
 	zstid		next_tid;
@@ -815,31 +818,17 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 		elog(ERROR, "tuple concurrently updated - not implemented");
 	}
 
-	/* Create UNDO record. */
-	{
-		ZSUndoRec_Update undorec;
-
-		undorec.rec.size = sizeof(ZSUndoRec_Update);
-		undorec.rec.type = ZSUNDO_TYPE_UPDATE;
-		undorec.rec.xid = xid;
-		undorec.rec.cid = cid;
-		undorec.oldtid = otid;
-		undorec.newtid = newtid;
-		if (keep_old_undo_ptr)
-			undorec.rec.prevundorec = olditem_undoptr;
-		else
-			undorec.rec.prevundorec = InvalidUndoPtr;
-		undorec.key_update = key_update;
-
-		undorecptr = zsundo_insert(rel, &undorec.rec);
-	}
+	/* Prepare an UNDO record. */
+	undo_op = zsundo_create_for_update(rel, xid, cid, otid, newtid,
+									   keep_old_undo_ptr ? olditem_undoptr : InvalidUndoPtr,
+									   key_update);
 
 	/* Replace the ZSBreeItem with one with the updated undo pointer. */
 	page = BufferGetPage(buf);
 	origitem = (ZSTidArrayItem *) PageGetItem(page, PageGetItemId(page, off));
-	newitems = zsbt_tid_item_change_undoptr(origitem, otid, undorecptr,
+	newitems = zsbt_tid_item_change_undoptr(origitem, otid, undo_op->undorecptr,
 											recent_oldest_undo);
-	zsbt_tid_replace_item(rel, buf, off, newitems);
+	zsbt_tid_replace_item(rel, buf, off, newitems, undo_op);
 	list_free_deep(newitems);
 	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 }
@@ -858,7 +847,7 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 	OffsetNumber off;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
-	ZSUndoRecPtr undorecptr;
+	zs_pending_undo_op *undo_op;
 	List	   *newitems;
 	ZSTidArrayItem *origitem;
 
@@ -896,29 +885,15 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 	}
 
 	/* Create UNDO record. */
-	{
-		ZSUndoRec_TupleLock undorec;
-
-		undorec.rec.size = sizeof(ZSUndoRec_TupleLock);
-		undorec.rec.type = ZSUNDO_TYPE_TUPLE_LOCK;
-		undorec.rec.xid = xid;
-		undorec.rec.cid = cid;
-		undorec.tid = tid;
-		undorec.lockmode = mode;
-		if (keep_old_undo_ptr)
-			undorec.rec.prevundorec = item_undoptr;
-		else
-			undorec.rec.prevundorec = InvalidUndoPtr;
-
-		undorecptr = zsundo_insert(rel, &undorec.rec);
-	}
+	undo_op = zsundo_create_for_tuple_lock(rel, xid, cid, tid, mode,
+										   keep_old_undo_ptr ? item_undoptr : InvalidUndoPtr);
 
 	/* Replace the item with an identical one, but with updated undo pointer. */
 	page = BufferGetPage(buf);
 	origitem = (ZSTidArrayItem *) PageGetItem(page, PageGetItemId(page, off));
-	newitems = zsbt_tid_item_change_undoptr(origitem, tid, undorecptr,
+	newitems = zsbt_tid_item_change_undoptr(origitem, tid, undo_op->undorecptr,
 											recent_oldest_undo);
-	zsbt_tid_replace_item(rel, buf, off, newitems);
+	zsbt_tid_replace_item(rel, buf, off, newitems, undo_op);
 	list_free_deep(newitems);
 	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 	return TM_Ok;
@@ -1048,7 +1023,7 @@ zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo)
 	origitem = (ZSTidArrayItem *) PageGetItem(page, PageGetItemId(page, off));
 	newitems = zsbt_tid_item_change_undoptr(origitem, tid, DeadUndoPtr,
 											recent_oldest_undo);
-	zsbt_tid_replace_item(rel, buf, off, newitems);
+	zsbt_tid_replace_item(rel, buf, off, newitems, NULL);
 	list_free_deep(newitems);
 	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 }
@@ -1133,7 +1108,7 @@ zsbt_tid_remove(Relation rel, IntegerSet *tids)
 		IncrBufferRefCount(buf);
 		if (newitems)
 		{
-			zsbt_tid_recompress_replace(rel, buf, newitems);
+			zsbt_tid_recompress_replace(rel, buf, newitems, NULL);
 		}
 		else
 		{
@@ -1150,7 +1125,7 @@ zsbt_tid_remove(Relation rel, IntegerSet *tids)
 			}
 
 			/* apply the changes */
-			zs_apply_split_changes(rel, stack);
+			zs_apply_split_changes(rel, stack, NULL);
 		}
 
 		ReleaseBuffer(buf);
@@ -1199,7 +1174,7 @@ zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr,
 		origitem = (ZSTidArrayItem *) PageGetItem(page, PageGetItemId(page, off));
 		newitems = zsbt_tid_item_change_undoptr(origitem, tid, InvalidUndoPtr,
 												recent_oldest_undo);
-		zsbt_tid_replace_item(rel, buf, off, newitems);
+		zsbt_tid_replace_item(rel, buf, off, newitems, NULL);
 		list_free_deep(newitems);
 		ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
 	}
@@ -1315,7 +1290,7 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoRecPtr *undoptr_p, 
  * This function handles splitting the page if needed.
  */
 static void
-zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
+zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems, zs_pending_undo_op *undo_op)
 {
 	Page		page = BufferGetPage(buf);
 	OffsetNumber maxoff = PageGetMaxOffsetNumber(page);
@@ -1334,26 +1309,41 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
 	if (newitemsize <= PageGetExactFreeSpace(page))
 	{
 		/* The new items fit on the page. Add them. */
+		OffsetNumber startoff;
+		OffsetNumber off;
 
 		START_CRIT_SECTION();
 
-		off = maxoff;
+		startoff = maxoff + 1;
+		off = startoff;
 		foreach(lc, newitems)
 		{
 			ZSTidArrayItem *item = (ZSTidArrayItem *) lfirst(lc);
 
-			off++;
 			if (!PageAddItem(page, (Item) item, item->t_size, off, true, false))
 				elog(ERROR, "could not add item to TID tree page");
+			off++;
 		}
+
+		if (undo_op)
+			zsundo_finish_pending_op(undo_op, (char *) &undo_op->payload);
 
 		MarkBufferDirty(buf);
 
-		/* TODO: WAL-log */
+		if (RelationNeedsWAL(rel))
+			zsbt_wal_log_leaf_items(rel, ZS_META_ATTRIBUTE_NUM, buf,
+									startoff, false, newitems,
+									undo_op);
 
 		END_CRIT_SECTION();
 
 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+		if (undo_op)
+		{
+			UnlockReleaseBuffer(undo_op->undobuf);
+			pfree(undo_op);
+		}
 	}
 	else
 	{
@@ -1381,7 +1371,7 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
 		IncrBufferRefCount(buf);
 		if (items)
 		{
-			zsbt_tid_recompress_replace(rel, buf, items);
+			zsbt_tid_recompress_replace(rel, buf, items, undo_op);
 		}
 		else
 		{
@@ -1398,7 +1388,7 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
 			}
 
 			/* apply the changes */
-			zs_apply_split_changes(rel, stack);
+			zs_apply_split_changes(rel, stack, undo_op);
 		}
 
 		list_free(items);
@@ -1417,7 +1407,8 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems)
  * the page if needed.
  */
 static void
-zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *newitems)
+zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *newitems,
+					  zs_pending_undo_op *undo_op)
 {
 	Page		page = BufferGetPage(buf);
 	ItemId		iid;
@@ -1470,9 +1461,13 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *ne
 				off++;
 			}
 		}
-
 		MarkBufferDirty(buf);
-		/* TODO: WAL-log */
+
+		if (undo_op)
+			zsundo_finish_pending_op(undo_op, (char *) &undo_op->payload);
+
+		if (RelationNeedsWAL(rel))
+			zsbt_wal_log_leaf_items(rel, ZS_META_ATTRIBUTE_NUM, buf, targetoff, true, newitems, undo_op);
 		END_CRIT_SECTION();
 
 #ifdef USE_ASSERT_CHECKING
@@ -1492,6 +1487,12 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *ne
 #endif
 
 		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+		if (undo_op)
+		{
+			UnlockReleaseBuffer(undo_op->undobuf);
+			pfree(undo_op);
+		}
 	}
 	else
 	{
@@ -1541,7 +1542,7 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *ne
 		IncrBufferRefCount(buf);
 		if (items)
 		{
-			zsbt_tid_recompress_replace(rel, buf, items);
+			zsbt_tid_recompress_replace(rel, buf, items, undo_op);
 		}
 		else
 		{
@@ -1558,7 +1559,7 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *ne
 			}
 
 			/* apply the changes */
-			zs_apply_split_changes(rel, stack);
+			zs_apply_split_changes(rel, stack, undo_op);
 		}
 
 		list_free(items);
@@ -1721,7 +1722,7 @@ zsbt_tid_recompress_picksplit(zsbt_tid_recompress_context *cxt, List *items)
  * items.
  */
 static void
-zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items)
+zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items, zs_pending_undo_op *undo_op)
 {
 	ListCell   *lc;
 	zsbt_tid_recompress_context cxt;
@@ -1817,7 +1818,7 @@ zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items)
 	}
 
 	/* Finally, overwrite all the pages we had to modify */
-	zs_apply_split_changes(rel, cxt.stack_head);
+	zs_apply_split_changes(rel, cxt.stack_head, undo_op);
 }
 
 static OffsetNumber

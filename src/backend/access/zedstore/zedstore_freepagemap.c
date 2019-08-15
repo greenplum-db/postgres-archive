@@ -228,6 +228,8 @@ zspage_delete_page(Relation rel, Buffer buf)
 
 	MarkBufferDirty(metabuf);
 	MarkBufferDirty(buf);
+
+	/* FIXME: WAL-logging */
 	
 	UnlockReleaseBuffer(metabuf);
 }

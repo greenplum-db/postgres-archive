@@ -10,11 +10,16 @@
  */
 #include "postgres.h"
 
-#include "access/zedstore_compression.h"
+#include "access/xlogutils.h"
 #include "access/zedstore_internal.h"
+#include "access/zedstore_wal.h"
+#include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "utils/datum.h"
 #include "utils/rel.h"
+
+static void zstoast_wal_log_newpage(Buffer prevbuf, Buffer buf, zstid tid, AttrNumber attno,
+									int offset, int32 total_size);
 
 /*
  * Toast a datum, inside the ZedStore file.
@@ -37,6 +42,7 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid)
 	char	   *ptr;
 	int32		total_size;
 	int32		offset;
+	bool		is_first;
 
 	Assert(tid != InvalidZSTid);
 
@@ -54,7 +60,7 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid)
 	ptr = VARDATA_ANY(value);
 	total_size = VARSIZE_ANY_EXHDR(value);
 	offset = 0;
-
+	is_first = true;
 	while (total_size - offset > 0)
 	{
 		Size		thisbytes;
@@ -63,39 +69,46 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid)
 		if (prevbuf == InvalidBuffer)
 			firstblk = BufferGetBlockNumber(buf);
 
+		START_CRIT_SECTION();
+
 		page = BufferGetPage(buf);
 		PageInit(page, BLCKSZ, sizeof(ZSToastPageOpaque));
 
 		thisbytes = Min(total_size - offset, PageGetExactFreeSpace(page));
 
 		opaque = (ZSToastPageOpaque *) PageGetSpecialPointer(page);
-		opaque->zs_attno = attno;
 		opaque->zs_tid = tid;
+		opaque->zs_attno = attno;
 		opaque->zs_total_size = total_size;
 		opaque->zs_slice_offset = offset;
-		opaque->zs_prev = BufferIsValid(prevbuf) ? BufferGetBlockNumber(prevbuf) : InvalidBlockNumber;
+		opaque->zs_prev = is_first ? InvalidBlockNumber : BufferGetBlockNumber(prevbuf);
 		opaque->zs_next = InvalidBlockNumber;
 		opaque->zs_flags = 0;
 		opaque->zs_page_id = ZS_TOAST_PAGE_ID;
 
 		memcpy((char *) page + SizeOfPageHeaderData, ptr, thisbytes);
 		((PageHeader) page)->pd_lower += thisbytes;
-		ptr += thisbytes;
-		offset += thisbytes;
 
-		if (prevbuf != InvalidBuffer)
+		if (!is_first)
 		{
 			prevopaque->zs_next = BufferGetBlockNumber(buf);
 			MarkBufferDirty(prevbuf);
 		}
 
-		/* TODO: WAL-log */
 		MarkBufferDirty(buf);
+
+		if (RelationNeedsWAL(rel))
+			zstoast_wal_log_newpage(prevbuf, buf, tid, attno, offset, total_size);
+
+		END_CRIT_SECTION();
 
 		if (prevbuf != InvalidBuffer)
 			UnlockReleaseBuffer(prevbuf);
+		ptr += thisbytes;
+		offset += thisbytes;
 		prevbuf = buf;
 		prevopaque = opaque;
+		is_first = false;
 	}
 
 	UnlockReleaseBuffer(buf);
@@ -161,4 +174,77 @@ zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted)
 	Assert(ptr == result + total_size + VARHDRSZ);
 
 	return PointerGetDatum(result);
+}
+
+static void
+zstoast_wal_log_newpage(Buffer prevbuf, Buffer buf, zstid tid, AttrNumber attno,
+						int offset, int32 total_size)
+{
+	wal_zedstore_toast_newpage xlrec;
+	XLogRecPtr recptr;
+
+	Assert(offset <= total_size);
+
+	xlrec.tid = tid;
+	xlrec.attno = attno;
+	xlrec.offset = offset;
+	xlrec.total_size = total_size;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, SizeOfZSWalToastNewPage);
+
+	/*
+	 * It is easier to just force a full-page image, than WAL-log data. That
+	 * means that the information in the wal_zedstore_toast_newpage struct isn't
+	 * really necessary, but keep it for now, for the benefit of debugging with
+	 * pg_waldump.
+	 */
+	XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+
+	if (BufferIsValid(prevbuf))
+		XLogRegisterBuffer(1, prevbuf, REGBUF_STANDARD);
+
+	recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_TOAST_NEWPAGE);
+
+	PageSetLSN(BufferGetPage(buf), recptr);
+	if (BufferIsValid(prevbuf))
+		PageSetLSN(BufferGetPage(prevbuf), recptr);
+}
+
+void
+zstoast_newpage_redo(XLogReaderState *record)
+{
+	XLogRecPtr	lsn = record->EndRecPtr;
+#if UNUSED
+	wal_zedstore_toast_newpage *xlrec = (wal_zedstore_toast_newpage *) XLogRecGetData(record);
+#endif
+	BlockNumber	blkno;
+	Buffer		buf;
+	Buffer		prevbuf = InvalidBuffer;
+
+	XLogRecGetBlockTag(record, 0, NULL, NULL, &blkno);
+
+	if (XLogReadBufferForRedo(record, 0, &buf) != BLK_RESTORED)
+		elog(ERROR, "zedstore toast newpage WAL record did not contain a full-page image");
+
+	if (XLogRecHasBlockRef(record, 1))
+	{
+		if (XLogReadBufferForRedo(record, 1, &prevbuf) == BLK_NEEDS_REDO)
+		{
+			Page		prevpage = BufferGetPage(prevbuf);
+			ZSToastPageOpaque *prevopaque;
+
+			prevopaque = (ZSToastPageOpaque *) PageGetSpecialPointer(prevpage);
+			prevopaque->zs_next = BufferGetBlockNumber(buf);
+
+			PageSetLSN(prevpage, lsn);
+			MarkBufferDirty(prevbuf);
+		}
+	}
+	else
+		prevbuf = InvalidBuffer;
+
+	if (BufferIsValid(prevbuf))
+		UnlockReleaseBuffer(prevbuf);
+	UnlockReleaseBuffer(buf);
 }

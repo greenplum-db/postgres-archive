@@ -15,8 +15,11 @@
 
 #include "access/genam.h"
 #include "access/multixact.h"
+#include "access/xlogreader.h"
+#include "access/xlogutils.h"
 #include "access/zedstore_internal.h"
 #include "access/zedstore_undo.h"
+#include "access/zedstore_wal.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "lib/integerset.h"
@@ -63,11 +66,16 @@ static ZSUndoRecPtr zsundo_trim(Relation rel, TransactionId OldestXmin);
 static void zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr, BlockNumber oldest_undopage, List *unused_pages);
 static ZSUndoRec *zsundo_fetch_lock(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode, bool missing_ok);
 
+static void zsundo_wal_log_newpage(Buffer metabuf, Buffer prevbuf, Buffer newbuf,
+								   uint64 first_counter);
+static void zsundo_wal_log_trim(Buffer metabuf, ZSUndoRecPtr oldest_undorecptr,
+								BlockNumber oldest_undopage);
+
 /*
- * Insert the given UNDO record to the UNDO log.
+ * Reserve space in the UNDO log for an UNDO record.
  */
-ZSUndoRecPtr
-zsundo_insert(Relation rel, ZSUndoRec *rec)
+static zs_pending_undo_op *
+zsundo_reserve(Relation rel, size_t size)
 {
 	Buffer		metabuf;
 	Page		metapage;
@@ -77,9 +85,11 @@ zsundo_insert(Relation rel, ZSUndoRec *rec)
 	Page		tail_pg = NULL;
 	ZSUndoPageOpaque *tail_opaque = NULL;
 	uint64		next_counter;
-	char	   *dst;
 	ZSUndoRecPtr undorecptr;
 	int			offset;
+	zs_pending_undo_op *pendingop;
+
+	Assert(size < MaxUndoRecordSize);
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	metapage = BufferGetPage(metabuf);
@@ -100,24 +110,9 @@ retry_lock_tail:
 		tail_pg = BufferGetPage(tail_buf);
 		tail_opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(tail_pg);
 		Assert(tail_opaque->first_undorecptr.counter == metaopaque->zs_undo_tail_first_counter);
+	}
 
-		if (IsZSUndoRecPtrValid(&tail_opaque->last_undorecptr))
-		{
-			Assert(tail_opaque->last_undorecptr.counter >= metaopaque->zs_undo_tail_first_counter);
-			next_counter = tail_opaque->last_undorecptr.counter + 1;
-		}
-		else
-		{
-			next_counter = tail_opaque->first_undorecptr.counter;
-			Assert(next_counter == metaopaque->zs_undo_tail_first_counter);
-		}
-	}
-	else
-	{
-		next_counter = metaopaque->zs_undo_tail_first_counter;
-		Assert(next_counter == metaopaque->zs_undo_oldestptr.counter);
-	}
-	if (tail_blk == InvalidBlockNumber || PageGetExactFreeSpace(tail_pg) < rec->size)
+	if (tail_blk == InvalidBlockNumber || PageGetExactFreeSpace(tail_pg) < size)
 	{
 		Buffer 		newbuf;
 		BlockNumber newblk;
@@ -157,6 +152,8 @@ retry_lock_tail:
 		else
 			next_counter = tail_opaque->last_undorecptr.counter + 1;
 
+		START_CRIT_SECTION();
+
 		newblk = BufferGetBlockNumber(newbuf);
 		newpage = BufferGetPage(newbuf);
 		PageInit(newpage, BLCKSZ, sizeof(ZSUndoPageOpaque));
@@ -167,46 +164,104 @@ retry_lock_tail:
 		newopaque->first_undorecptr.counter = next_counter;
 		newopaque->last_undorecptr = InvalidUndoPtr;
 		newopaque->zs_page_id = ZS_UNDO_PAGE_ID;
+		MarkBufferDirty(newbuf);
 
 		metaopaque->zs_undo_tail = newblk;
 		metaopaque->zs_undo_tail_first_counter = next_counter;
 		if (tail_blk == InvalidBlockNumber)
 			metaopaque->zs_undo_head = newblk;
-
 		MarkBufferDirty(metabuf);
 
 		if (tail_blk != InvalidBlockNumber)
 		{
 			tail_opaque->next = newblk;
 			MarkBufferDirty(tail_buf);
-			UnlockReleaseBuffer(tail_buf);
 		}
+
+		if (RelationNeedsWAL(rel))
+			zsundo_wal_log_newpage(metabuf, tail_buf, newbuf, next_counter);
+
+		if (tail_blk != InvalidBlockNumber)
+			UnlockReleaseBuffer(tail_buf);
+
+		END_CRIT_SECTION();
 
 		tail_blk = newblk;
 		tail_buf = newbuf;
 		tail_pg = newpage;
 		tail_opaque = newopaque;
 	}
+	else
+	{
+		if (IsZSUndoRecPtrValid(&tail_opaque->last_undorecptr))
+		{
+			Assert(tail_opaque->last_undorecptr.counter >= metaopaque->zs_undo_tail_first_counter);
+			next_counter = tail_opaque->last_undorecptr.counter + 1;
+		}
+		else
+		{
+			next_counter = tail_opaque->first_undorecptr.counter;
+			Assert(next_counter == metaopaque->zs_undo_tail_first_counter);
+		}
+	}
 
 	UnlockReleaseBuffer(metabuf);
 
-	/* insert the record to this page */
+	/*
+	 * All set for writing the record. But don't actually do that yet, it will be
+	 * written in zsundo_finish_pending_op(). Since we haven't modified the page
+	 * yet, we are free to still turn back and release the lock without writing
+	 * anything.
+	 */
 	offset = ((PageHeader) tail_pg)->pd_lower;
 
 	undorecptr.counter = next_counter;
 	undorecptr.blkno = tail_blk;
 	undorecptr.offset = offset;
-	rec->undorecptr = undorecptr;
-	dst = ((char *) tail_pg) + offset;
-	memcpy(dst, rec, rec->size);
 
-	tail_opaque->last_undorecptr = undorecptr;
-	((PageHeader) tail_pg)->pd_lower += rec->size;
+	pendingop = palloc(offsetof(zs_pending_undo_op, payload) + size);
+	pendingop->undobuf = tail_buf;
+	pendingop->undorecptr = undorecptr;
+	pendingop->offset = offset;
+	pendingop->is_update = false;
+	pendingop->reservedsize = size;
 
-	MarkBufferDirty(tail_buf);
-	UnlockReleaseBuffer(tail_buf);
+	return pendingop;
+}
 
-	return undorecptr;
+void
+zsundo_finish_pending_op(zs_pending_undo_op *pendingop, char *payload)
+{
+	Buffer		undobuf = pendingop->undobuf;
+	Page		undopg;
+	ZSUndoPageOpaque *opaque;
+	char	   *dst;
+
+	/*
+	 * This should be used as part of a bigger critical section that
+	 * writes a WAL record of the change.
+	 */
+	Assert(CritSectionCount > 0);
+
+	undopg = BufferGetPage(undobuf);
+
+	if (!pendingop->is_update)
+	{
+		Assert(((PageHeader) undopg)->pd_lower == pendingop->offset);
+
+		opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(undopg);
+		opaque->last_undorecptr = pendingop->undorecptr;
+	}
+
+	dst = ((char *) undopg) + pendingop->offset;
+	memcpy(dst, payload, pendingop->reservedsize);
+
+	if (!pendingop->is_update)
+	{
+		((PageHeader) undopg)->pd_lower += pendingop->reservedsize;
+	}
+
+	MarkBufferDirty(undobuf);
 }
 
 /*
@@ -333,6 +388,8 @@ zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr)
 			 undorec->rec.type);
 
 	undorec->speculative_token = INVALID_SPECULATIVE_TOKEN;
+
+	/* FIXME: WAL-logging */
 
 	MarkBufferDirty(buf);
 	UnlockReleaseBuffer(buf);
@@ -760,6 +817,59 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 	return oldest_undorecptr;
 }
 
+static void
+zsundo_wal_log_trim(Buffer metabuf, ZSUndoRecPtr oldest_undorecptr,
+					BlockNumber oldest_undopage)
+{
+	wal_zedstore_undo_trim xlrec;
+	XLogRecPtr recptr;
+
+	xlrec.oldest_undorecptr = oldest_undorecptr;
+	xlrec.oldest_undopage = oldest_undopage;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, SizeOfZSWalUndoTrim);
+
+	XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+
+	recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_UNDO_TRIM);
+
+	PageSetLSN(BufferGetPage(metabuf), recptr);
+}
+
+void
+zsundo_trim_redo(XLogReaderState *record)
+{
+	XLogRecPtr	lsn = record->EndRecPtr;
+	wal_zedstore_undo_trim *xlrec = (wal_zedstore_undo_trim *) XLogRecGetData(record);
+	ZSUndoRecPtr oldest_undorecptr = xlrec->oldest_undorecptr;
+	BlockNumber oldest_undopage = xlrec->oldest_undopage;
+	Buffer		metabuf;
+
+	if (XLogReadBufferForRedo(record, 0, &metabuf) == BLK_NEEDS_REDO)
+	{
+		Page		metapage = BufferGetPage(metabuf);
+		ZSMetaPageOpaque *metaopaque;
+
+		metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
+		metaopaque->zs_undo_oldestptr = oldest_undorecptr;
+		if (oldest_undopage == InvalidBlockNumber)
+		{
+			metaopaque->zs_undo_head = InvalidBlockNumber;
+			metaopaque->zs_undo_tail = InvalidBlockNumber;
+			metaopaque->zs_undo_tail_first_counter = oldest_undorecptr.counter;
+		}
+		else
+			metaopaque->zs_undo_head = oldest_undopage;
+
+		PageSetLSN(metapage, lsn);
+		MarkBufferDirty(metabuf);
+	}
+	if (BufferIsValid(metabuf))
+		UnlockReleaseBuffer(metabuf);
+}
+
+
 /* Update metapage with the oldest value */
 static void
 zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr,
@@ -770,6 +880,8 @@ zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr,
 	Page		metapage;
 	ZSMetaPageOpaque *metaopaque;
 	ListCell   *lc;
+
+	START_CRIT_SECTION();
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	metapage = BufferGetPage(metabuf);
@@ -786,10 +898,13 @@ zsundo_update_oldest_ptr(Relation rel, ZSUndoRecPtr oldest_undorecptr,
 	else
 		metaopaque->zs_undo_head = oldest_undopage;
 
-	/* TODO: WAL-log */
+	if (RelationNeedsWAL(rel))
+		zsundo_wal_log_trim(metabuf, oldest_undorecptr, oldest_undopage);
 
 	MarkBufferDirty(metabuf);
 	UnlockReleaseBuffer(metabuf);
+
+	END_CRIT_SECTION();
 
 	foreach(lc, unused_pages)
 	{
@@ -873,12 +988,12 @@ zsundo_get_oldest_undo_ptr(Relation rel)
  * for UPDATEs as well, although they're more a bit more tricky, as we need
  * to also store the 'ctid' pointer to the new tuple in an UPDATE.
  */
-ZSUndoRecPtr
+zs_pending_undo_op *
 zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid tid,
 						 bool changedPart, ZSUndoRecPtr prev_undo_ptr)
 {
-	ZSUndoRec_Delete undorec;
-	ZSUndoRecPtr undoptr;
+	ZSUndoRec_Delete *undorec;
+	zs_pending_undo_op *pending_op;
 
 	static RelFileNode cached_relfilenode;
 	static TransactionId cached_xid;
@@ -894,24 +1009,33 @@ zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid t
 		prev_undo_ptr.counter == cached_prev_undo_ptr.counter)
 	{
 		Buffer		buf;
-		ZSUndoRec_Delete *undorec_p;
+		Page		page;
+		ZSUndoRec_Delete *orig_undorec;
 
-		undorec_p = (ZSUndoRec_Delete *) zsundo_fetch_lock(rel, cached_undo_ptr,
-														   &buf, BUFFER_LOCK_EXCLUSIVE, false);
+		orig_undorec = (ZSUndoRec_Delete *) zsundo_fetch_lock(rel, cached_undo_ptr,
+															  &buf, BUFFER_LOCK_EXCLUSIVE, false);
+		page = BufferGetPage(buf);
 
-		if (undorec_p->rec.type != ZSUNDO_TYPE_DELETE)
-			elog(ERROR, "unexpected undo record type %d, expected DELETE", undorec_p->rec.type);
+		if (orig_undorec->rec.type != ZSUNDO_TYPE_DELETE)
+			elog(ERROR, "unexpected undo record type %d, expected DELETE", orig_undorec->rec.type);
 
 		/* Is there space for a new TID in the record? */
-		if (undorec_p->num_tids < ZSUNDO_NUM_TIDS_PER_DELETE)
+		if (orig_undorec->num_tids < ZSUNDO_NUM_TIDS_PER_DELETE)
 		{
-			undorec_p->tids[undorec_p->num_tids] = tid;
-			undorec_p->num_tids++;
+			pending_op = palloc(offsetof(zs_pending_undo_op, payload) + sizeof(ZSUndoRec_Delete));
+			undorec = (ZSUndoRec_Delete *) pending_op->payload;
 
-			MarkBufferDirty(buf);
-			UnlockReleaseBuffer(buf);
+			pending_op->undobuf = buf;
+			pending_op->undorecptr = cached_undo_ptr;
+			pending_op->offset = ((char *) orig_undorec) - ((char *) page);
+			pending_op->is_update = true;
+			pending_op->reservedsize = sizeof(ZSUndoRec_Delete);
 
-			return cached_undo_ptr;
+			memcpy(undorec, orig_undorec, sizeof(ZSUndoRec_Delete));
+			undorec->tids[undorec->num_tids] = tid;
+			undorec->num_tids++;
+
+			return pending_op;
 		}
 		UnlockReleaseBuffer(buf);
 	}
@@ -919,25 +1043,30 @@ zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid t
 	/*
 	 * Cache miss. Create a new UNDO record.
 	 */
-	undorec.rec.size = sizeof(ZSUndoRec_Delete);
-	undorec.rec.type = ZSUNDO_TYPE_DELETE;
-	undorec.rec.xid = xid;
-	undorec.rec.cid = cid;
-	undorec.changedPart = changedPart;
-	undorec.rec.prevundorec = prev_undo_ptr;
-	undorec.tids[0] = tid;
-	undorec.num_tids = 1;
+	pending_op = zsundo_reserve(rel, sizeof(ZSUndoRec_Delete));
+	undorec = (ZSUndoRec_Delete *) pending_op->payload;
 
-	undoptr = zsundo_insert(rel, &undorec.rec);
+	undorec->rec.size = sizeof(ZSUndoRec_Delete);
+	undorec->rec.type = ZSUNDO_TYPE_DELETE;
+	undorec->rec.undorecptr = pending_op->undorecptr;
+	undorec->rec.xid = xid;
+	undorec->rec.cid = cid;
+	undorec->changedPart = changedPart;
+	undorec->rec.prevundorec = prev_undo_ptr;
+	undorec->tids[0] = tid;
+	undorec->num_tids = 1;
 
+	/* XXX: this caching mechanism assumes that once we've reserved the undo record,
+	 * we never change our minds and don't write the undo record, after all.
+	 */
 	cached_relfilenode = rel->rd_node;
 	cached_xid = xid;
 	cached_cid = cid;
 	cached_changedPart = changedPart;
 	cached_prev_undo_ptr = prev_undo_ptr;
-	cached_undo_ptr = undoptr;
+	cached_undo_ptr = pending_op->undorecptr;
 
-	return undoptr;
+	return pending_op;
 }
 
 /*
@@ -950,12 +1079,12 @@ zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid t
  * the range of TIDs in the same UNDO record, instead of creating new records.
  * That greatly reduces the space required for UNDO log of bulk inserts.
  */
-ZSUndoRecPtr
+zs_pending_undo_op *
 zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid, zstid tid,
 						 int nitems, uint32 speculative_token, ZSUndoRecPtr prev_undo_ptr)
 {
-	ZSUndoRec_Insert undorec;
-	ZSUndoRecPtr undoptr;
+	ZSUndoRec_Insert *undorec;
+	zs_pending_undo_op *pending_op;
 
 	static RelFileNode cached_relfilenode;
 	static TransactionId cached_xid;
@@ -972,40 +1101,52 @@ zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid, zstid t
 		prev_undo_ptr.counter == cached_prev_undo_ptr.counter)
 	{
 		Buffer		buf;
-		ZSUndoRec_Insert *undorec_p;
+		Page		page;
+		ZSUndoRec_Insert *orig_undorec;
 
-		undorec_p = (ZSUndoRec_Insert *) zsundo_fetch_lock(rel, cached_undo_ptr,
-														   &buf, BUFFER_LOCK_EXCLUSIVE, false);
+		orig_undorec = (ZSUndoRec_Insert *) zsundo_fetch_lock(rel, cached_undo_ptr,
+															  &buf, BUFFER_LOCK_EXCLUSIVE, false);
+		page = BufferGetPage(buf);
 
-		if (undorec_p->rec.type != ZSUNDO_TYPE_INSERT)
-			elog(ERROR, "unexpected undo record type %d, expected INSERT", undorec_p->rec.type);
+		if (orig_undorec->rec.type != ZSUNDO_TYPE_INSERT)
+			elog(ERROR, "unexpected undo record type %d, expected INSERT", orig_undorec->rec.type);
 
 		/* Extend the range of the old record to cover the new TID */
-		Assert(undorec_p->endtid == tid);
-		Assert(undorec_p->speculative_token == INVALID_SPECULATIVE_TOKEN);
-		undorec_p->endtid = tid + nitems;
+		Assert(orig_undorec->endtid == tid);
+		Assert(orig_undorec->speculative_token == INVALID_SPECULATIVE_TOKEN);
 
-		MarkBufferDirty(buf);
-		UnlockReleaseBuffer(buf);
+		pending_op = palloc(offsetof(zs_pending_undo_op, payload) + sizeof(ZSUndoRec_Delete));
+		undorec = (ZSUndoRec_Insert *) pending_op->payload;
+
+		pending_op->undobuf = buf;
+		pending_op->undorecptr = cached_undo_ptr;
+		pending_op->offset = ((char *) orig_undorec) - ((char *) page);
+		pending_op->is_update = true;
+		pending_op->reservedsize = sizeof(ZSUndoRec_Insert);
+
+		memcpy(undorec, orig_undorec, sizeof(ZSUndoRec_Insert));
+		undorec->endtid = tid + nitems;
 
 		cached_endtid = tid + nitems;
-		return cached_undo_ptr;
+
+		return pending_op;
 	}
 
 	/*
 	 * Cache miss. Create a new UNDO record.
 	 */
-	undorec.rec.size = sizeof(ZSUndoRec_Insert);
-	undorec.rec.type = ZSUNDO_TYPE_INSERT;
-	/* undorecptr will be filed in by zsundo_insert() */
-	undorec.rec.xid = xid;
-	undorec.rec.cid = cid;
-	undorec.rec.prevundorec = prev_undo_ptr;
-	undorec.firsttid = tid;
-	undorec.endtid = tid + nitems;
-	undorec.speculative_token = speculative_token;
+	pending_op = zsundo_reserve(rel, sizeof(ZSUndoRec_Insert));
+	undorec = (ZSUndoRec_Insert *) pending_op->payload;
 
-	undoptr = zsundo_insert(rel, &undorec.rec);
+	undorec->rec.size = sizeof(ZSUndoRec_Insert);
+	undorec->rec.type = ZSUNDO_TYPE_INSERT;
+	undorec->rec.undorecptr = pending_op->undorecptr;
+	undorec->rec.xid = xid;
+	undorec->rec.cid = cid;
+	undorec->rec.prevundorec = prev_undo_ptr;
+	undorec->firsttid = tid;
+	undorec->endtid = tid + nitems;
+	undorec->speculative_token = speculative_token;
 
 	if (speculative_token == INVALID_SPECULATIVE_TOKEN)
 	{
@@ -1014,8 +1155,194 @@ zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid, zstid t
 		cached_cid = cid;
 		cached_endtid = tid + nitems;
 		cached_prev_undo_ptr = prev_undo_ptr;
-		cached_undo_ptr = undoptr;
+		cached_undo_ptr = pending_op->undorecptr;
 	}
 
-	return undoptr;
+	return pending_op;
+}
+
+zs_pending_undo_op *
+zsundo_create_for_update(Relation rel, TransactionId xid, CommandId cid,
+						 zstid oldtid, zstid newtid, ZSUndoRecPtr prev_undo_ptr,
+						 bool key_update)
+{
+	ZSUndoRec_Update *undorec;
+	zs_pending_undo_op *pending_op;
+
+	/*
+	 * Create a new UNDO record.
+	 */
+	pending_op = zsundo_reserve(rel, sizeof(ZSUndoRec_Update));
+	undorec = (ZSUndoRec_Update *) pending_op->payload;
+
+	undorec->rec.size = sizeof(ZSUndoRec_Update);
+	undorec->rec.type = ZSUNDO_TYPE_UPDATE;
+	undorec->rec.undorecptr = pending_op->undorecptr;
+	undorec->rec.xid = xid;
+	undorec->rec.cid = cid;
+	undorec->rec.prevundorec = prev_undo_ptr;
+	undorec->oldtid = oldtid;
+	undorec->newtid = newtid;
+	undorec->key_update = key_update;
+
+	return pending_op;
+}
+
+
+zs_pending_undo_op *
+zsundo_create_for_tuple_lock(Relation rel, TransactionId xid, CommandId cid,
+							 zstid tid, LockTupleMode lockmode,
+							 ZSUndoRecPtr prev_undo_ptr)
+{
+	ZSUndoRec_TupleLock *undorec;
+	zs_pending_undo_op *pending_op;
+
+	/*
+	 * Create a new UNDO record.
+	 */
+	pending_op = zsundo_reserve(rel, sizeof(ZSUndoRec_TupleLock));
+	undorec = (ZSUndoRec_TupleLock *) pending_op->payload;
+
+	undorec->rec.size = sizeof(ZSUndoRec_TupleLock);
+	undorec->rec.type = ZSUNDO_TYPE_TUPLE_LOCK;
+	undorec->rec.undorecptr = pending_op->undorecptr;
+	undorec->rec.xid = xid;
+	undorec->rec.cid = cid;
+	undorec->rec.prevundorec = prev_undo_ptr;
+	undorec->lockmode = lockmode;
+
+	return pending_op;
+}
+
+
+
+void
+XLogRegisterUndoOp(uint8 block_id, zs_pending_undo_op *undo_op)
+{
+	XLogRegisterBuffer(block_id, undo_op->undobuf,
+					   REGBUF_STANDARD);
+	XLogRegisterBufData(block_id,
+						(char *) &undo_op->undorecptr,
+						offsetof(zs_pending_undo_op, payload) -
+						offsetof(zs_pending_undo_op, undorecptr) +
+						undo_op->reservedsize);
+}
+
+Buffer
+XLogRedoUndoOp(XLogReaderState *record, uint8 block_id)
+{
+	Buffer		buffer;
+	zs_pending_undo_op op;
+
+	if (XLogReadBufferForRedo(record, block_id, &buffer) == BLK_NEEDS_REDO)
+	{
+		Size		len;
+		char	   *p = XLogRecGetBlockData(record, block_id, &len);
+		const int	hdrlen = offsetof(zs_pending_undo_op, payload) -
+			offsetof(zs_pending_undo_op, undorecptr);
+
+		Assert(len >= hdrlen);
+		op.undobuf = buffer;
+		memcpy(&op.undorecptr, p, hdrlen);
+		p += hdrlen;
+
+		START_CRIT_SECTION();
+		zsundo_finish_pending_op(&op, p);
+		END_CRIT_SECTION();
+	}
+	return buffer;
+}
+
+static void
+zsundo_wal_log_newpage(Buffer metabuf, Buffer prevbuf, Buffer newbuf, uint64 first_counter)
+{
+	wal_zedstore_undo_newpage xlrec;
+	XLogRecPtr recptr;
+
+	xlrec.first_counter = first_counter;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, SizeOfZSWalUndoNewPage);
+
+	XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+	if (BufferIsValid(prevbuf))
+		XLogRegisterBuffer(1, prevbuf, REGBUF_STANDARD);
+	XLogRegisterBuffer(2, newbuf, REGBUF_WILL_INIT | REGBUF_STANDARD);
+
+	recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_UNDO_NEWPAGE);
+
+	PageSetLSN(BufferGetPage(metabuf), recptr);
+	if (BufferIsValid(prevbuf))
+		PageSetLSN(BufferGetPage(prevbuf), recptr);
+	PageSetLSN(BufferGetPage(newbuf), recptr);
+}
+
+void
+zsundo_newpage_redo(XLogReaderState *record)
+{
+	XLogRecPtr	lsn = record->EndRecPtr;
+	wal_zedstore_undo_newpage *xlrec = (wal_zedstore_undo_newpage *) XLogRecGetData(record);
+	Buffer		metabuf;
+	Buffer		prevbuf;
+	Buffer		newbuf;
+	BlockNumber newblk;
+	Page		newpage;
+	ZSUndoPageOpaque *newopaque;
+	bool		has_prev_block;
+
+	has_prev_block = XLogRecHasBlockRef(record, 1);
+	XLogRecGetBlockTag(record, 2, NULL, NULL, &newblk);
+
+	if (XLogReadBufferForRedo(record, 0, &metabuf) == BLK_NEEDS_REDO)
+	{
+		Page		metapage = BufferGetPage(metabuf);
+		ZSMetaPageOpaque *metaopaque;
+
+		metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
+		metaopaque->zs_undo_tail = newblk;
+		metaopaque->zs_undo_tail_first_counter = xlrec->first_counter;
+		if (!has_prev_block)
+			metaopaque->zs_undo_head = newblk;
+
+		PageSetLSN(metapage, lsn);
+		MarkBufferDirty(metabuf);
+	}
+
+	if (has_prev_block)
+	{
+		if (XLogReadBufferForRedo(record, 1, &prevbuf) == BLK_NEEDS_REDO)
+		{
+			Page		prevpage = BufferGetPage(prevbuf);
+			ZSUndoPageOpaque *prev_opaque;
+
+			prev_opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(prevpage);
+			prev_opaque->next = newblk;
+
+			PageSetLSN(prevpage, lsn);
+			MarkBufferDirty(prevbuf);
+		}
+	}
+	else
+		prevbuf = InvalidBuffer;
+
+	newbuf = XLogInitBufferForRedo(record, 2);
+	newblk = BufferGetBlockNumber(newbuf);
+	newpage = BufferGetPage(newbuf);
+	PageInit(newpage, BLCKSZ, sizeof(ZSUndoPageOpaque));
+	newopaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(newpage);
+	newopaque->next = InvalidBlockNumber;
+	newopaque->first_undorecptr.blkno = newblk;
+	newopaque->first_undorecptr.offset = SizeOfPageHeaderData;
+	newopaque->first_undorecptr.counter = xlrec->first_counter;
+	newopaque->last_undorecptr = InvalidUndoPtr;
+	newopaque->zs_page_id = ZS_UNDO_PAGE_ID;
+
+	PageSetLSN(newpage, lsn);
+	MarkBufferDirty(newbuf);
+
+	if (BufferIsValid(metabuf))
+		UnlockReleaseBuffer(metabuf);
+	if (BufferIsValid(prevbuf))
+		UnlockReleaseBuffer(prevbuf);
+	UnlockReleaseBuffer(newbuf);
 }

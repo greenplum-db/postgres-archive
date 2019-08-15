@@ -481,15 +481,14 @@ typedef struct ZSMetaPageOpaque
 	/*
 	 * Head and tail page of the UNDO log.
 	 *
-	 * 'zs_undo_tail' is the newest page, where new UNDO records will be
-	 * inserted, and 'zs_undo_head' is the oldest page.
-	 * 'zs_undo_tail_first_counter' is the UNDO counter value of the first
-	 * record on the tail page (or if the tail page is empty, the counter
-	 * value the first trecord on the tail page will have, when it's
-	 * inserted). If there is no UNDO log at all,
-	 *  'zs_undo_tail_first_counter' is the new counter value to use. It's
-	 * actually redundant, except when there is no UNDO log at all, but it's
-	 * a nice cross-check at other times.
+	 * 'zs_undo_tail' is the newest page, where new UNDO records will be inserted,
+	 * and 'zs_undo_head' is the oldest page. 'zs_undo_tail_first_counter' is the
+	 * UNDO counter value of the first record on the tail page (or if the tail
+	 * page is empty, the counter value the first record on the tail page will
+	 * have, when it's inserted.) If there is no UNDO log at all,
+	 * 'zs_undo_tail_first_counter' is the new counter value to use. It's actually
+	 * redundant, except when there is no UNDO log at all, but it's a nice
+	 * cross-check at other times.
 	 */
 	BlockNumber	zs_undo_head;
 	BlockNumber	zs_undo_tail;
@@ -875,11 +874,13 @@ extern zs_split_stack *zsbt_insert_downlinks(Relation rel, AttrNumber attno,
 extern void zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids);
 extern zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level);
 extern zs_split_stack *zs_new_split_stack_entry(Buffer buf, Page page);
-extern void zs_apply_split_changes(Relation rel, zs_split_stack *stack);
+extern void zs_apply_split_changes(Relation rel, zs_split_stack *stack, zs_pending_undo_op *undo_op);
 extern Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
 extern Buffer zsbt_find_and_lock_leaf_containing_tid(Relation rel, AttrNumber attno,
 													 Buffer buf, zstid nexttid, int lockmode);
 extern bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf);
+extern void zsbt_wal_log_leaf_items(Relation rel, AttrNumber attno, Buffer buf, OffsetNumber off, bool replace, List *items, zs_pending_undo_op *undo_op);
+extern void zsbt_wal_log_rewrite_pages(Relation rel, AttrNumber attno, List *buffers, zs_pending_undo_op *undo_op);
 
 /*
  * Return the value of row identified with 'tid' in a scan.
@@ -943,7 +944,6 @@ extern PGDLLIMPORT const TupleTableSlotOps TTSOpsZedstore;
 extern void zsmeta_initmetapage(Relation rel);
 extern void zsmeta_initmetapage_redo(XLogReaderState *record);
 extern BlockNumber zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool for_update);
-extern void zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno, Buffer metabuf, BlockNumber rootblk);
 extern void zsmeta_add_root_for_new_attributes(Relation rel, Page page);
 
 /* prototypes for functions in zedstore_visibility.c */

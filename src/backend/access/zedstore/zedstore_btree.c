@@ -20,7 +20,9 @@
  */
 #include "postgres.h"
 
+#include "access/xlogutils.h"
 #include "access/zedstore_internal.h"
+#include "access/zedstore_wal.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/procarray.h"
@@ -786,12 +788,27 @@ zs_new_split_stack_entry(Buffer buf, Page page)
  * entries.
  */
 void
-zs_apply_split_changes(Relation rel, zs_split_stack *stack)
+zs_apply_split_changes(Relation rel, zs_split_stack *stack, zs_pending_undo_op *undo_op)
 {
 	zs_split_stack *head = stack;
+	bool		wal_needed = RelationNeedsWAL(rel);
+	List	   *buffers = NIL;
+
+	if (wal_needed)
+	{
+		stack = head;
+		while (stack)
+		{
+			buffers = lappend_int(buffers, stack->buf);
+			stack = stack->next;
+		}
+
+		XLogEnsureRecordSpace(list_length(buffers), 0);
+	}
 
 	START_CRIT_SECTION();
 
+	stack = head;
 	while (stack)
 	{
 		PageRestoreTempPage(stack->page, BufferGetPage(stack->buf));
@@ -799,7 +816,19 @@ zs_apply_split_changes(Relation rel, zs_split_stack *stack)
 		stack = stack->next;
 	}
 
-	/* TODO: WAL-log all the changes  */
+	if (undo_op)
+		zsundo_finish_pending_op(undo_op, (char *) undo_op->payload);
+
+	if (RelationNeedsWAL(rel))
+	{
+		/*
+		 * FIXME: it would be good to add the 'recycle' flags to the WAL record,
+		 * so that we wouldn't leak the unused pages on crash.
+		 */
+		zsbt_wal_log_rewrite_pages(rel, 0 /* FIXME: attno. but not used for anything ATM */,
+								   buffers, undo_op);
+		list_free(buffers);
+	}
 
 	END_CRIT_SECTION();
 
@@ -817,6 +846,12 @@ zs_apply_split_changes(Relation rel, zs_split_stack *stack)
 		next = stack->next;
 		pfree(stack);
 		stack = next;
+	}
+
+	if (undo_op)
+	{
+		UnlockReleaseBuffer(undo_op->undobuf);
+		pfree(undo_op);
 	}
 }
 
@@ -839,4 +874,197 @@ zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems)
 			high = mid;
 	}
 	return low - 1;
+}
+
+
+void
+zsbt_wal_log_leaf_items(Relation rel, AttrNumber attno, Buffer buf,
+						OffsetNumber off, bool replace, List *items,
+						zs_pending_undo_op *undo_op)
+{
+	ListCell   *lc;
+	XLogRecPtr	recptr;
+	wal_zedstore_btree_leaf_items xlrec;
+
+	xlrec.attno = attno;
+	xlrec.nitems = list_length(items);
+	xlrec.off = off;
+
+	XLogBeginInsert();
+	XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
+	XLogRegisterData((char *) &xlrec, SizeOfZSWalBtreeLeafItems);
+
+	foreach(lc, items)
+	{
+		void	   *item = (void *) lfirst(lc);
+		size_t		itemsz;
+
+		if (attno == ZS_META_ATTRIBUTE_NUM)
+			itemsz = ((ZSTidArrayItem *) item)->t_size;
+		else
+			itemsz = ((ZSAttributeArrayItem *) item)->t_size;
+
+		XLogRegisterBufData(0, item, itemsz);
+	}
+
+	if (undo_op)
+		XLogRegisterUndoOp(1, undo_op);
+
+	recptr = XLogInsert(RM_ZEDSTORE_ID,
+						replace ? WAL_ZEDSTORE_BTREE_REPLACE_LEAF_ITEM : WAL_ZEDSTORE_BTREE_ADD_LEAF_ITEMS );
+
+	PageSetLSN(BufferGetPage(buf), recptr);
+	if (undo_op)
+		PageSetLSN(BufferGetPage(undo_op->undobuf), recptr);
+}
+
+void
+zsbt_leaf_items_redo(XLogReaderState *record, bool replace)
+{
+	XLogRecPtr	lsn = record->EndRecPtr;
+	wal_zedstore_btree_leaf_items *xlrec =
+		(wal_zedstore_btree_leaf_items *) XLogRecGetData(record);
+	Buffer		buffer;
+	Buffer		undobuf;
+
+	if (XLogRecHasBlockRef(record, 1))
+		undobuf = XLogRedoUndoOp(record, 1);
+	else
+		undobuf = InvalidBuffer;
+
+	if (XLogReadBufferForRedo(record, 0, &buffer) == BLK_NEEDS_REDO)
+	{
+		Page		page = (Page) BufferGetPage(buffer);
+		OffsetNumber off = xlrec->off;
+
+		if (xlrec->nitems == 0)
+		{
+			Assert(replace);
+			PageIndexTupleDelete(page, off);
+		}
+		else
+		{
+			char		itembuf[BLCKSZ + MAXIMUM_ALIGNOF];
+			char	   *itembufp;
+			Size		datasz;
+			char	   *data;
+			char	   *p;
+			int			i;
+
+			itembufp = (char *) MAXALIGN(itembuf);
+
+			data = XLogRecGetBlockData(record, 0, &datasz);
+			p = data;
+			for (i = 0; i < xlrec->nitems; i++)
+			{
+				uint16		itemsz;
+
+				/*
+				 * XXX: we assume that both ZSTidArrayItem and ZSAttributeArrayItem have
+				 * t_size as the first field.
+				 */
+				memcpy(&itemsz, p, sizeof(uint16));
+				Assert(itemsz > 0);
+				Assert(itemsz < BLCKSZ);
+				memcpy(itembufp, p, itemsz);
+				p += itemsz;
+
+				if (replace && i == 0)
+				{
+					if (!PageIndexTupleOverwrite(page, off, (Item) itembuf, itemsz))
+						elog(ERROR, "could not replace item on zedstore btree page at off %d", off);
+				}
+				else if (PageAddItem(page, (Item) itembufp, itemsz, off, false, false)
+						 == InvalidOffsetNumber)
+				{
+					elog(ERROR, "could not add item to zedstore btree page");
+				}
+				off++;
+			}
+			Assert(p - data == datasz);
+
+			PageSetLSN(page, lsn);
+			MarkBufferDirty(buffer);
+		}
+	}
+	if (BufferIsValid(buffer))
+		UnlockReleaseBuffer(buffer);
+	if (BufferIsValid(undobuf))
+		UnlockReleaseBuffer(undobuf);
+}
+
+#define MAX_BLOCKS_IN_REWRITE		100
+
+void
+zsbt_wal_log_rewrite_pages(Relation rel, AttrNumber attno, List *buffers, zs_pending_undo_op *undo_op)
+{
+	ListCell   *lc;
+	XLogRecPtr	recptr;
+	wal_zedstore_btree_rewrite_pages xlrec;
+	uint8		block_id;
+
+	if (1 /* for undo */ + list_length(buffers) > MAX_BLOCKS_IN_REWRITE)
+		elog(ERROR, "too many blocks for zedstore rewrite_pages record: %d", list_length(buffers));
+
+	xlrec.attno = attno;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, SizeOfZSWalBtreeRewritePages);
+
+	if (undo_op)
+		XLogRegisterUndoOp(0, undo_op);
+
+	block_id = 1;
+	foreach(lc, buffers)
+	{
+		Buffer buf = (Buffer) lfirst_int(lc);
+
+		XLogRegisterBuffer(block_id, buf,
+						   REGBUF_STANDARD | REGBUF_FORCE_IMAGE | REGBUF_KEEP_DATA);
+		block_id++;
+	}
+
+	recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_BTREE_REWRITE_PAGES);
+
+	if (undo_op)
+		PageSetLSN(BufferGetPage(undo_op->undobuf), recptr);
+	foreach(lc, buffers)
+	{
+		Buffer buf = (Buffer) lfirst_int(lc);
+
+		PageSetLSN(BufferGetPage(buf), recptr);
+	}
+}
+
+void
+zsbt_rewrite_pages_redo(XLogReaderState *record)
+{
+#ifdef UNUSED
+	XLogRecPtr	lsn = record->EndRecPtr;
+	wal_zedstore_btree_rewrite_pages *xlrec = (wal_zedstore_btree_rewrite_pages *) XLogRecGetData(record);
+#endif
+	Buffer		buffers[MAX_BLOCKS_IN_REWRITE];
+	uint8		block_id;
+
+	if (record->max_block_id >= MAX_BLOCKS_IN_REWRITE)
+		elog(ERROR, "too many blocks in zedstore rewrite_pages record: %d", record->max_block_id + 1);
+
+	if (XLogRecHasBlockRef(record, 0))
+		buffers[0] = XLogRedoUndoOp(record, 0);
+	else
+		buffers[0] = InvalidBuffer;
+
+	/* Iterate over blocks */
+	for (block_id = 1; block_id <= record->max_block_id; block_id++)
+	{
+		if (XLogReadBufferForRedo(record, block_id, &buffers[block_id]) != BLK_RESTORED)
+			elog(ERROR, "zedstore rewrite_pages WAL record did not contain a full-page image");
+	}
+
+	/* Changes are done: unlock and release all buffers */
+	for (block_id = 0; block_id <= record->max_block_id; block_id++)
+	{
+		if (BufferIsValid(buffers[block_id]))
+			UnlockReleaseBuffer(buffers[block_id]);
+	}
 }

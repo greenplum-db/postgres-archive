@@ -27,6 +27,8 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
+static void zsmeta_wal_log_metapage(Buffer buf, int natts);
+
 static ZSMetaCacheData *
 zsmeta_populate_cache_from_metapage(Relation rel, Page page)
 {
@@ -134,7 +136,9 @@ zsmeta_expand_metapage_for_new_attributes(Relation rel)
 		((PageHeader) page)->pd_lower = new_pd_lower;
 
 		MarkBufferDirty(metabuf);
-		/* TODO: WAL-log */
+
+		if (RelationNeedsWAL(rel))
+			zsmeta_wal_log_metapage(metabuf, natts);
 
 		END_CRIT_SECTION();
 	}
@@ -219,25 +223,50 @@ zsmeta_initmetapage(Relation rel)
 	MarkBufferDirty(buf);
 
 	if (RelationNeedsWAL(rel))
-	{
-		wal_zedstore_init_metapage init_rec;
-		XLogRecPtr recptr;
-
-		init_rec.natts = natts;
-
-		XLogBeginInsert();
-		XLogRegisterBuffer(0, buf,
-						   REGBUF_STANDARD | REGBUF_FORCE_IMAGE | REGBUF_KEEP_DATA);
-		XLogRegisterData((char *) &init_rec, SizeOfZSWalInitMetapage);
-
-		recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_INIT_METAPAGE);
-
-		PageSetLSN(BufferGetPage(buf), recptr);
-	}
+		zsmeta_wal_log_metapage(buf, natts);
 
 	END_CRIT_SECTION();
 
 	UnlockReleaseBuffer(buf);
+}
+
+static void
+zsmeta_wal_log_metapage(Buffer buf, int natts)
+{
+	Page		page = BufferGetPage(buf);
+	wal_zedstore_init_metapage init_rec;
+	XLogRecPtr recptr;
+
+	init_rec.natts = natts;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &init_rec, SizeOfZSWalInitMetapage);
+	XLogRegisterBuffer(0, buf, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+
+	recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_INIT_METAPAGE);
+
+	PageSetLSN(page, recptr);
+}
+
+static void
+zsmeta_wal_log_new_att_root(Buffer metabuf, Buffer rootbuf, AttrNumber attno)
+{
+	Page		metapage = BufferGetPage(metabuf);
+	Page		rootpage = BufferGetPage(rootbuf);
+	wal_zedstore_btree_new_root xlrec;
+	XLogRecPtr recptr;
+
+	xlrec.attno = attno;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, SizeOfZSWalBtreeNewRoot);
+	XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+	XLogRegisterBuffer(1, rootbuf, REGBUF_WILL_INIT | REGBUF_STANDARD);
+
+	recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_BTREE_NEW_ROOT);
+
+	PageSetLSN(metapage, recptr);
+	PageSetLSN(rootpage, recptr);
 }
 
 void
@@ -254,6 +283,57 @@ zsmeta_initmetapage_redo(XLogReaderState *record)
 
 	Assert(BufferGetBlockNumber(buf) == ZS_META_BLK);
 	UnlockReleaseBuffer(buf);
+}
+
+void
+zsmeta_new_btree_root_redo(XLogReaderState *record)
+{
+	XLogRecPtr	lsn = record->EndRecPtr;
+	wal_zedstore_btree_new_root *xlrec =
+		(wal_zedstore_btree_new_root *) XLogRecGetData(record);
+	AttrNumber	attno = xlrec->attno;
+	Buffer		metabuf;
+	Buffer		rootbuf;
+	Page		rootpage;
+	BlockNumber	rootblk;
+	ZSBtreePageOpaque *opaque;
+
+	rootbuf = XLogInitBufferForRedo(record, 1);
+	rootpage = (Page) BufferGetPage(rootbuf);
+	rootblk = BufferGetBlockNumber(rootbuf);
+	/* initialize the page to look like a root leaf */
+	rootpage = BufferGetPage(rootbuf);
+	PageInit(rootpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
+	opaque = ZSBtreePageGetOpaque(rootpage);
+	opaque->zs_attno = attno;
+	opaque->zs_next = InvalidBlockNumber;
+	opaque->zs_lokey = MinZSTid;
+	opaque->zs_hikey = MaxPlusOneZSTid;
+	opaque->zs_level = 0;
+	opaque->zs_flags = ZSBT_ROOT;
+	opaque->zs_page_id = ZS_BTREE_PAGE_ID;
+
+	PageSetLSN(rootpage, lsn);
+	MarkBufferDirty(rootbuf);
+
+	/* Update the metapage to point to it */
+	if (XLogReadBufferForRedo(record, 0, &metabuf) == BLK_NEEDS_REDO)
+	{
+		Page		metapage = (Page) BufferGetPage(metabuf);
+		ZSMetaPage *metapg = (ZSMetaPage *) PageGetContents(metapage);
+
+		Assert(BufferGetBlockNumber(metabuf) == ZS_META_BLK);
+		Assert(metapg->tree_root_dir[attno].root == InvalidBlockNumber);
+
+		metapg->tree_root_dir[attno].root = rootblk;
+
+		PageSetLSN(metapage, lsn);
+		MarkBufferDirty(metabuf);
+	}
+
+	if (BufferIsValid(metabuf))
+		UnlockReleaseBuffer(metabuf);
+	UnlockReleaseBuffer(rootbuf);
 }
 
 /*
@@ -348,6 +428,8 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 			rootbuf = zspage_getnewbuf(rel, metabuf);
 			rootblk = BufferGetBlockNumber(rootbuf);
 
+			START_CRIT_SECTION();
+
 			metapg->tree_root_dir[attno].root = rootblk;
 
 			/* initialize the page to look like a root leaf */
@@ -364,34 +446,18 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 
 			MarkBufferDirty(rootbuf);
 			MarkBufferDirty(metabuf);
-			/* TODO: WAL-log both pages */
+
+			if (RelationNeedsWAL(rel))
+				zsmeta_wal_log_new_att_root(metabuf, rootbuf, attno);
+
+			END_CRIT_SECTION();
 
 			UnlockReleaseBuffer(rootbuf);
 		}
-		metacache->cache_attrs[attno].root = rootblk;
 		UnlockReleaseBuffer(metabuf);
+
+		metacache->cache_attrs[attno].root = rootblk;
 	}
 
 	return rootblk;
-}
-
-/*
- *
- * Caller is responsible for WAL-logging this.
- */
-void
-zsmeta_update_root_for_attribute(Relation rel, AttrNumber attno,
-								 Buffer metabuf, BlockNumber rootblk)
-{
-	ZSMetaPage *metapg;
-
-	metapg = (ZSMetaPage *) PageGetContents(BufferGetPage(metabuf));
-
-	if ((attno != ZS_META_ATTRIBUTE_NUM) && (attno <= 0 || attno > metapg->nattributes))
-		elog(ERROR, "invalid attribute number %d (table \"%s\" has only %d attributes)",
-			 attno, RelationGetRelationName(rel), metapg->nattributes);
-
-	metapg->tree_root_dir[attno].root = rootblk;
-
-	MarkBufferDirty(metabuf);
 }

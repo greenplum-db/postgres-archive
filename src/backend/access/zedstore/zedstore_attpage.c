@@ -366,7 +366,7 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 			}
 
 			/* apply the changes */
-			zs_apply_split_changes(rel, stack);
+			zs_apply_split_changes(rel, stack, NULL);
 		}
 		ReleaseBuffer(buf); 	/* zsbt_apply_split_changes unlocked 'buf' */
 
@@ -451,8 +451,13 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 		if (growth <= PageGetExactFreeSpace(page))
 		{
 			/* The new items fit on the page. Add them. */
+			OffsetNumber startoff;
+			OffsetNumber off;
+
 			START_CRIT_SECTION();
 
+			startoff = PageGetMaxOffsetNumber(page) + 1;
+			off = startoff;
 			foreach(lc, newitems)
 			{
 				ZSAttributeArrayItem *item = (ZSAttributeArrayItem *) lfirst(lc);
@@ -460,15 +465,16 @@ zsbt_attr_add_items(Relation rel, AttrNumber attno, Buffer buf, List *newitems)
 				Assert(item->t_size > 0);
 
 				if (PageAddItemExtended(page,
-										(Item) item, item->t_size,
-										PageGetMaxOffsetNumber(page) + 1,
+										(Item) item, item->t_size, off,
 										PAI_OVERWRITE) == InvalidOffsetNumber)
 					elog(ERROR, "could not add item to attribute page");
+				off++;
 			}
 
 			MarkBufferDirty(buf);
 
-			/* TODO: WAL-log */
+			if (RelationNeedsWAL(rel))
+				zsbt_wal_log_leaf_items(rel, attno, buf, startoff, false, newitems, NULL);
 
 			END_CRIT_SECTION();
 
@@ -829,5 +835,5 @@ zsbt_attr_repack_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *it
 	}
 
 	/* Finally, overwrite all the pages we had to modify */
-	zs_apply_split_changes(rel, cxt.stack_head);
+	zs_apply_split_changes(rel, cxt.stack_head, NULL);
 }

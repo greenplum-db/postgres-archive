@@ -10,8 +10,13 @@
 #ifndef ZEDSTORE_UNDO_H
 #define ZEDSTORE_UNDO_H
 
-#include "commands/vacuum.h"
+#include "nodes/lockoptions.h"
+#include "storage/buf.h"
+#include "storage/off.h"
 #include "utils/relcache.h"
+
+// fixme: arbitrary
+#define MaxUndoRecordSize		(BLCKSZ / 2)
 
 /* this must match the definition in zedstore_internal.h */
 typedef uint64	zstid;
@@ -187,17 +192,46 @@ IsZSUndoRecPtrValid(ZSUndoRecPtr *uptr)
 	return uptr->counter != 0;
 }
 
+typedef struct
+{
+	Buffer		undobuf;
+
+	ZSUndoRecPtr undorecptr;
+	uint16		offset;
+	bool		is_update;
+	size_t		reservedsize;
+
+	/* more data follows (defined as uint64, to force alignment) */
+	uint64		payload[FLEXIBLE_ARRAY_MEMBER];
+} zs_pending_undo_op;
+
 /* prototypes for functions in zstore_undo.c */
-extern ZSUndoRecPtr zsundo_insert(Relation rel, ZSUndoRec *rec);
+extern void zsundo_finish_pending_op(zs_pending_undo_op *pendingop, char *payload);
+
 extern ZSUndoRec *zsundo_fetch(Relation rel, ZSUndoRecPtr undorecptr);
 extern void zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr);
-extern void zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy,
+
+struct VacuumParams;
+extern void zsundo_vacuum(Relation rel, struct VacuumParams *params, BufferAccessStrategy bstrategy,
 			  TransactionId OldestXmin);
 extern ZSUndoRecPtr zsundo_get_oldest_undo_ptr(Relation rel);
-extern ZSUndoRecPtr zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid tid,
-									  bool changedPart, ZSUndoRecPtr prev_undo_ptr);
-extern ZSUndoRecPtr zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid,
-											 zstid tid, int nitems,
-											 uint32 speculative_token, ZSUndoRecPtr prev_undo_ptr);
+
+extern zs_pending_undo_op *zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid tid,
+													bool changedPart, ZSUndoRecPtr prev_undo_ptr);
+extern zs_pending_undo_op *zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid,
+													zstid tid, int nitems,
+													uint32 speculative_token, ZSUndoRecPtr prev_undo_ptr);
+extern zs_pending_undo_op *zsundo_create_for_update(Relation rel, TransactionId xid, CommandId cid,
+													zstid oldtid, zstid newtid, ZSUndoRecPtr prev_undo_ptr,
+													bool key_update);
+extern zs_pending_undo_op *zsundo_create_for_tuple_lock(Relation rel, TransactionId xid, CommandId cid,
+														zstid tid, LockTupleMode lockmode,
+														ZSUndoRecPtr prev_undo_ptr);
+
+extern void XLogRegisterUndoOp(uint8 block_id, zs_pending_undo_op *undo_op);
+extern Buffer XLogRedoUndoOp(XLogReaderState *record, uint8 block_id);
+
+extern void zsundo_newpage_redo(XLogReaderState *record);
+extern void zsundo_trim_redo(XLogReaderState *record);
 
 #endif							/* ZEDSTORE_UNDO_H */
