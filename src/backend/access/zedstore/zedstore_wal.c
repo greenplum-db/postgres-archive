@@ -29,8 +29,8 @@ zedstore_redo(XLogReaderState *record)
 		case WAL_ZEDSTORE_UNDO_NEWPAGE:
 			zsundo_newpage_redo(record);
 			break;
-		case WAL_ZEDSTORE_UNDO_TRIM:
-			zsundo_trim_redo(record);
+		case WAL_ZEDSTORE_UNDO_DISCARD:
+			zsundo_discard_redo(record);
 			break;
 		case WAL_ZEDSTORE_BTREE_NEW_ROOT:
 			zsmeta_new_btree_root_redo(record);

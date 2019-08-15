@@ -60,7 +60,7 @@
 #include "access/relscan.h"
 #include "access/table.h"
 #include "access/zedstore_internal.h"
-#include "access/zedstore_undo.h"
+#include "access/zedstore_undorec.h"
 #include "commands/vacuum.h"
 #include "funcapi.h"
 #include "utils/builtins.h"

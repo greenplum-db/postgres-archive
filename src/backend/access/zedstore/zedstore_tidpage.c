@@ -27,7 +27,7 @@
 #include "postgres.h"
 
 #include "access/zedstore_internal.h"
-#include "access/zedstore_undo.h"
+#include "access/zedstore_undorec.h"
 #include "lib/integerset.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
@@ -484,7 +484,7 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int ntuples,
 	 * Create an item to represent all the TIDs, merging with the last existing
 	 * item if possible.
 	 */
-	newitems = zsbt_tid_item_add_tids(lastitem, tid, ntuples, undo_op ? undo_op->undorecptr : InvalidUndoPtr,
+	newitems = zsbt_tid_item_add_tids(lastitem, tid, ntuples, undo_op ? undo_op->reservation.undorecptr : InvalidUndoPtr,
 									  &modified_orig);
 
 	/*
@@ -582,7 +582,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 	/* Update the tid with the new UNDO pointer. */
 	page = BufferGetPage(buf);
 	origitem = (ZSTidArrayItem *) PageGetItem(page, PageGetItemId(page, off));
-	newitems = zsbt_tid_item_change_undoptr(origitem, tid, undo_op->undorecptr,
+	newitems = zsbt_tid_item_change_undoptr(origitem, tid, undo_op->reservation.undorecptr,
 											recent_oldest_undo);
 	zsbt_tid_replace_item(rel, buf, off, newitems, undo_op);
 	list_free_deep(newitems);
@@ -826,7 +826,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	/* Replace the ZSBreeItem with one with the updated undo pointer. */
 	page = BufferGetPage(buf);
 	origitem = (ZSTidArrayItem *) PageGetItem(page, PageGetItemId(page, off));
-	newitems = zsbt_tid_item_change_undoptr(origitem, otid, undo_op->undorecptr,
+	newitems = zsbt_tid_item_change_undoptr(origitem, otid, undo_op->reservation.undorecptr,
 											recent_oldest_undo);
 	zsbt_tid_replace_item(rel, buf, off, newitems, undo_op);
 	list_free_deep(newitems);
@@ -891,7 +891,7 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 	/* Replace the item with an identical one, but with updated undo pointer. */
 	page = BufferGetPage(buf);
 	origitem = (ZSTidArrayItem *) PageGetItem(page, PageGetItemId(page, off));
-	newitems = zsbt_tid_item_change_undoptr(origitem, tid, undo_op->undorecptr,
+	newitems = zsbt_tid_item_change_undoptr(origitem, tid, undo_op->reservation.undorecptr,
 											recent_oldest_undo);
 	zsbt_tid_replace_item(rel, buf, off, newitems, undo_op);
 	list_free_deep(newitems);
@@ -1341,7 +1341,7 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems, zs_pending_undo_op 
 
 		if (undo_op)
 		{
-			UnlockReleaseBuffer(undo_op->undobuf);
+			UnlockReleaseBuffer(undo_op->reservation.undobuf);
 			pfree(undo_op);
 		}
 	}
@@ -1490,7 +1490,7 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *ne
 
 		if (undo_op)
 		{
-			UnlockReleaseBuffer(undo_op->undobuf);
+			UnlockReleaseBuffer(undo_op->reservation.undobuf);
 			pfree(undo_op);
 		}
 	}

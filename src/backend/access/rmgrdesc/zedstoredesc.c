@@ -32,9 +32,9 @@ zedstore_desc(StringInfo buf, XLogReaderState *record)
 
 		appendStringInfo(buf, "first_counter " UINT64_FORMAT, walrec->first_counter);
 	}
-	else if (info == WAL_ZEDSTORE_UNDO_TRIM)
+	else if (info == WAL_ZEDSTORE_UNDO_DISCARD)
 	{
-		wal_zedstore_undo_trim *walrec = (wal_zedstore_undo_trim *) rec;
+		wal_zedstore_undo_discard *walrec = (wal_zedstore_undo_discard *) rec;
 
 		appendStringInfo(buf, "oldest_undorecptr " UINT64_FORMAT ", oldest_undopage %u",
 						 walrec->oldest_undorecptr.counter,
@@ -81,8 +81,8 @@ zedstore_identify(uint8 info)
 		case WAL_ZEDSTORE_UNDO_NEWPAGE:
 			id = "UNDO_NEWPAGE";
 			break;
-		case WAL_ZEDSTORE_UNDO_TRIM:
-			id = "UNDO_TRIM";
+		case WAL_ZEDSTORE_UNDO_DISCARD:
+			id = "UNDO_DISCARD";
 			break;
 		case WAL_ZEDSTORE_BTREE_NEW_ROOT:
 			id = "BTREE_NEW_ROOT";

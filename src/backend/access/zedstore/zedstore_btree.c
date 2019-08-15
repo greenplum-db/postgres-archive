@@ -22,6 +22,7 @@
 
 #include "access/xlogutils.h"
 #include "access/zedstore_internal.h"
+#include "access/zedstore_undorec.h"
 #include "access/zedstore_wal.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
@@ -850,7 +851,7 @@ zs_apply_split_changes(Relation rel, zs_split_stack *stack, zs_pending_undo_op *
 
 	if (undo_op)
 	{
-		UnlockReleaseBuffer(undo_op->undobuf);
+		UnlockReleaseBuffer(undo_op->reservation.undobuf);
 		pfree(undo_op);
 	}
 }
@@ -915,7 +916,7 @@ zsbt_wal_log_leaf_items(Relation rel, AttrNumber attno, Buffer buf,
 
 	PageSetLSN(BufferGetPage(buf), recptr);
 	if (undo_op)
-		PageSetLSN(BufferGetPage(undo_op->undobuf), recptr);
+		PageSetLSN(BufferGetPage(undo_op->reservation.undobuf), recptr);
 }
 
 void
@@ -1027,7 +1028,7 @@ zsbt_wal_log_rewrite_pages(Relation rel, AttrNumber attno, List *buffers, zs_pen
 	recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_BTREE_REWRITE_PAGES);
 
 	if (undo_op)
-		PageSetLSN(BufferGetPage(undo_op->undobuf), recptr);
+		PageSetLSN(BufferGetPage(undo_op->reservation.undobuf), recptr);
 	foreach(lc, buffers)
 	{
 		Buffer buf = (Buffer) lfirst_int(lc);

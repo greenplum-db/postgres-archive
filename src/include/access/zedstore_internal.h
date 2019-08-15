@@ -13,13 +13,19 @@
 #include "access/tableam.h"
 #include "access/zedstore_compression.h"
 #include "access/zedstore_tid.h"
-#include "access/zedstore_undo.h"
+#include "access/zedstore_undolog.h"
 #include "lib/integerset.h"
 #include "storage/bufmgr.h"
 #include "storage/smgr.h"
 #include "utils/datum.h"
 
+struct zs_pending_undo_op;
+
 #define ZS_META_ATTRIBUTE_NUM 0
+
+
+
+#define INVALID_SPECULATIVE_TOKEN 0
 
 /*
  * A ZedStore table contains different kinds of pages, all in the same file.
@@ -874,13 +880,13 @@ extern zs_split_stack *zsbt_insert_downlinks(Relation rel, AttrNumber attno,
 extern void zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids);
 extern zs_split_stack *zsbt_unlink_page(Relation rel, AttrNumber attno, Buffer buf, int level);
 extern zs_split_stack *zs_new_split_stack_entry(Buffer buf, Page page);
-extern void zs_apply_split_changes(Relation rel, zs_split_stack *stack, zs_pending_undo_op *undo_op);
+extern void zs_apply_split_changes(Relation rel, zs_split_stack *stack, struct zs_pending_undo_op *undo_op);
 extern Buffer zsbt_descend(Relation rel, AttrNumber attno, zstid key, int level, bool readonly);
 extern Buffer zsbt_find_and_lock_leaf_containing_tid(Relation rel, AttrNumber attno,
 													 Buffer buf, zstid nexttid, int lockmode);
 extern bool zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buffer buf);
-extern void zsbt_wal_log_leaf_items(Relation rel, AttrNumber attno, Buffer buf, OffsetNumber off, bool replace, List *items, zs_pending_undo_op *undo_op);
-extern void zsbt_wal_log_rewrite_pages(Relation rel, AttrNumber attno, List *buffers, zs_pending_undo_op *undo_op);
+extern void zsbt_wal_log_leaf_items(Relation rel, AttrNumber attno, Buffer buf, OffsetNumber off, bool replace, List *items, struct zs_pending_undo_op *undo_op);
+extern void zsbt_wal_log_rewrite_pages(Relation rel, AttrNumber attno, List *buffers, struct zs_pending_undo_op *undo_op);
 
 /*
  * Return the value of row identified with 'tid' in a scan.

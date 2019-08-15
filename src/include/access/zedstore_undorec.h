@@ -1,52 +1,27 @@
 /*
- * zedstore_undo.h
- *		internal declarations for ZedStore undo logging
+ * zedstore_undorec.h
+ *		Declarations for different kinds of UNDO records in Zedstore.
  *
  * Copyright (c) 2019, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *		src/include/access/zedstore_undo.h
+ *		src/include/access/zedstore_undorec.h
  */
-#ifndef ZEDSTORE_UNDO_H
-#define ZEDSTORE_UNDO_H
+#ifndef ZEDSTORE_UNDOREC_H
+#define ZEDSTORE_UNDOREC_H
 
+#include "access/zedstore_tid.h"
 #include "nodes/lockoptions.h"
 #include "storage/buf.h"
 #include "storage/off.h"
 #include "utils/relcache.h"
 
-// fixme: arbitrary
-#define MaxUndoRecordSize		(BLCKSZ / 2)
+#define ZSUNDO_TYPE_INSERT		1
+#define ZSUNDO_TYPE_DELETE		2
+#define ZSUNDO_TYPE_UPDATE		3
+#define ZSUNDO_TYPE_TUPLE_LOCK	4
 
-/* this must match the definition in zedstore_internal.h */
-typedef uint64	zstid;
-
-/*
- * An UNDO-pointer.
- *
- * In the "real" UNDO-logging work from EDB, an UndoRecPtr is only 64 bits.
- * But we make life easier for us, by encoding more information in it.
- *
- * 'counter' is a number that's incremented every time a new undo record is
- * created. It can be used to determine if an undo pointer is too old to be
- * of interest to anyone.
- *
- * 'blkno' and 'offset' are the physical location of the UNDO record. They
- * can be used to easily fetch a given record.
- */
-typedef struct
-{
-	uint64		counter;
-	BlockNumber blkno;
-	int32		offset;
-} ZSUndoRecPtr;
-
-/* TODO: assert that blkno and offset match, too, if counter matches */
-#define ZSUndoRecPtrEquals(a, b) ((a).counter == (b).counter)
-
-#define INVALID_SPECULATIVE_TOKEN 0
-
-typedef struct
+struct ZSUndoRec
 {
 	int16		size;			/* size of this record, including header */
 	uint8		type;			/* ZSUNDO_TYPE_* */
@@ -65,12 +40,8 @@ typedef struct
 	 * the tuple from being updated.
 	 */
 	ZSUndoRecPtr prevundorec;
-} ZSUndoRec;
-
-#define ZSUNDO_TYPE_INSERT		1
-#define ZSUNDO_TYPE_DELETE		2
-#define ZSUNDO_TYPE_UPDATE		3
-#define ZSUNDO_TYPE_TUPLE_LOCK	4
+};
+typedef struct ZSUndoRec ZSUndoRec;
 
 /*
  * Type-specific record formats.
@@ -154,67 +125,47 @@ typedef struct
 	LockTupleMode	lockmode;
 } ZSUndoRec_TupleLock;
 
-typedef struct
-{
-	BlockNumber	next;
-	ZSUndoRecPtr first_undorecptr;	/* note: this is set even if the page is empty! */
-	ZSUndoRecPtr last_undorecptr;
-	uint16		padding0;			/* padding, to put zs_page_id last */
-	uint16		padding1;			/* padding, to put zs_page_id last */
-	uint16		padding2;			/* padding, to put zs_page_id last */
-	uint16		zs_page_id; /* ZS_UNDO_PAGE_ID */
-} ZSUndoPageOpaque;
-
 /*
- * "invalid" undo pointer. The value is chosen so that an invalid pointer
- * is less than any real UNDO pointer value. Therefore, a tuple with an
- * invalid UNDO pointer is considered visible to everyone.
+ * zs_pending_undo_op encapsulates the insertion or modification of an UNDO
+ * record. The zsundo_create_* functions don't insert UNDO records directly,
+ * because the callers are not in a critical section yet, and may still need
+ * to abort. For example, to inserting a new TID to the TID tree, we first
+ * construct the UNDO record for the insertion, and then lock the correct
+ * TID tree page to insert to. But if e.g. we need to split the TID page,
+ * we might still have to error out.
  */
-static const ZSUndoRecPtr InvalidUndoPtr = {
-	.blkno = InvalidBlockNumber,
-	.offset = InvalidOffsetNumber,
-	.counter = 0
-};
-
-/*
- * A special value used on TID items, to mean that a tuple is not visible to
- * anyone
- */
-static const ZSUndoRecPtr DeadUndoPtr = {
-	.blkno = InvalidBlockNumber,
-	.offset = InvalidOffsetNumber,
-	.counter = 1
-};
-
-static inline bool
-IsZSUndoRecPtrValid(ZSUndoRecPtr *uptr)
+struct zs_pending_undo_op
 {
-	return uptr->counter != 0;
-}
+	zs_undo_reservation	reservation;
 
-typedef struct
-{
-	Buffer		undobuf;
-
-	ZSUndoRecPtr undorecptr;
-	uint16		offset;
 	bool		is_update;
-	size_t		reservedsize;
-
 	/* more data follows (defined as uint64, to force alignment) */
 	uint64		payload[FLEXIBLE_ARRAY_MEMBER];
-} zs_pending_undo_op;
+};
+typedef struct zs_pending_undo_op  zs_pending_undo_op;
 
-/* prototypes for functions in zstore_undo.c */
-extern void zsundo_finish_pending_op(zs_pending_undo_op *pendingop, char *payload);
+/*
+ * These are used in WAL records, to represent insertion or modification
+ * of an UNDO record.
+ *
+ * We use this same record for all UNDO operations. It's a bit wasteful;
+ * if an existing UNDO record is modified, we wouldn't need to overwrite
+ * the whole record. Also, no need to WAL-log the command ids, because
+ * they don't matter after crash/replay.
+ */
+typedef struct
+{
+	ZSUndoRecPtr undoptr;
+	uint16		length;
+	bool		is_update;
 
-extern ZSUndoRec *zsundo_fetch(Relation rel, ZSUndoRecPtr undorecptr);
-extern void zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr);
+	char		payload[FLEXIBLE_ARRAY_MEMBER];
+} zs_wal_undo_op;
 
-struct VacuumParams;
-extern void zsundo_vacuum(Relation rel, struct VacuumParams *params, BufferAccessStrategy bstrategy,
-			  TransactionId OldestXmin);
-extern ZSUndoRecPtr zsundo_get_oldest_undo_ptr(Relation rel);
+#define SizeOfZSWalUndoOp	offsetof(zs_wal_undo_op, payload)
+
+/* prototypes for functions in zedstore_undorec.c */
+extern struct ZSUndoRec *zsundo_fetch_record(Relation rel, ZSUndoRecPtr undorecptr);
 
 extern zs_pending_undo_op *zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid tid,
 													bool changedPart, ZSUndoRecPtr prev_undo_ptr);
@@ -227,11 +178,15 @@ extern zs_pending_undo_op *zsundo_create_for_update(Relation rel, TransactionId 
 extern zs_pending_undo_op *zsundo_create_for_tuple_lock(Relation rel, TransactionId xid, CommandId cid,
 														zstid tid, LockTupleMode lockmode,
 														ZSUndoRecPtr prev_undo_ptr);
+extern void zsundo_finish_pending_op(zs_pending_undo_op *pendingop, char *payload);
+extern void zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr);
 
 extern void XLogRegisterUndoOp(uint8 block_id, zs_pending_undo_op *undo_op);
 extern Buffer XLogRedoUndoOp(XLogReaderState *record, uint8 block_id);
 
-extern void zsundo_newpage_redo(XLogReaderState *record);
-extern void zsundo_trim_redo(XLogReaderState *record);
+struct VacuumParams;
+extern void zsundo_vacuum(Relation rel, struct VacuumParams *params, BufferAccessStrategy bstrategy,
+			  TransactionId OldestXmin);
+extern ZSUndoRecPtr zsundo_get_oldest_undo_ptr(Relation rel);
 
-#endif							/* ZEDSTORE_UNDO_H */
+#endif							/* ZEDSTORE_UNDOREC_H */

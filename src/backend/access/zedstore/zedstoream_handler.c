@@ -27,7 +27,7 @@
 #include "access/tuptoaster.h"
 #include "access/xact.h"
 #include "access/zedstore_internal.h"
-#include "access/zedstore_undo.h"
+#include "access/zedstore_undorec.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
 #include "catalog/storage.h"
@@ -258,12 +258,14 @@ static void
 zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 spekToken,
 								bool succeeded)
 {
-	zstid tid;
+	zstid		tid;
 
 	tid = ZSTidFromItemPointer(slot->tts_tid);
 	zsbt_tid_clear_speculative_token(relation, tid, spekToken, true /* for complete */);
 	/*
 	 * there is a conflict
+	 *
+	 * FIXME: Shouldn't we mark the TID dead first?
 	 */
 	if (!succeeded)
 	{
@@ -2138,7 +2140,7 @@ zs_cluster_process_tuple(Relation OldHeap, Relation NewHeap,
 		}
 
 		/* Fetch the next UNDO record. */
-		undorec = zsundo_fetch(OldHeap, undo_ptr);
+		undorec = zsundo_fetch_record(OldHeap, undo_ptr);
 
 		if (undorec->type == ZSUNDO_TYPE_INSERT)
 		{

@@ -13,7 +13,7 @@
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "access/zedstore_internal.h"
-#include "access/zedstore_undo.h"
+#include "access/zedstore_undorec.h"
 #include "storage/procarray.h"
 
 static bool
@@ -102,7 +102,7 @@ retry_fetch:
 	}
 
 	/* have to fetch the UNDO record */
-	undorec = zsundo_fetch(rel, undo_ptr);
+	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
 		recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
@@ -323,7 +323,7 @@ fetch_undo_record:
 	}
 
 	/* have to fetch the UNDO record */
-	undorec = zsundo_fetch(rel, undo_ptr);
+	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
 		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
@@ -407,7 +407,7 @@ fetch_undo_record:
 	}
 
 	/* have to fetch the UNDO record */
-	undorec = zsundo_fetch(rel, undo_ptr);
+	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
 		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
@@ -490,7 +490,7 @@ fetch_undo_record:
 	}
 
 	/* have to fetch the UNDO record */
-	undorec = zsundo_fetch(rel, undo_ptr);
+	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
 		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
@@ -587,7 +587,7 @@ fetch_undo_record:
 	}
 
 	/* have to fetch the UNDO record */
-	undorec = zsundo_fetch(rel, undo_ptr);
+	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
 		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
@@ -709,7 +709,7 @@ fetch_undo_record:
 	}
 
 	/* have to fetch the UNDO record */
-	undorec = zsundo_fetch(rel, undo_ptr);
+	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
 		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
@@ -767,7 +767,7 @@ fetch_undo_record:
 
 			if (prevptr.counter < scan->recent_oldest_undo.counter)
 				return true;
-			undorec = zsundo_fetch(rel, prevptr);
+			undorec = zsundo_fetch_record(rel, prevptr);
 			if (!undorec)
 			{
 				scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);

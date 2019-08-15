@@ -12,13 +12,14 @@
 
 #include "access/attnum.h"
 #include "access/xlogreader.h"
-#include "access/zedstore_undo.h"
+#include "access/zedstore_tid.h"
+#include "access/zedstore_undolog.h"
 #include "lib/stringinfo.h"
 #include "storage/off.h"
 
 #define WAL_ZEDSTORE_INIT_METAPAGE			0x00
 #define WAL_ZEDSTORE_UNDO_NEWPAGE			0x10
-#define WAL_ZEDSTORE_UNDO_TRIM				0x20
+#define WAL_ZEDSTORE_UNDO_DISCARD			0x20
 #define WAL_ZEDSTORE_BTREE_NEW_ROOT			0x30
 #define WAL_ZEDSTORE_BTREE_ADD_LEAF_ITEMS	0x40
 #define WAL_ZEDSTORE_BTREE_REPLACE_LEAF_ITEM	0x50
@@ -57,16 +58,16 @@ typedef struct wal_zedstore_undo_newpage
 #define SizeOfZSWalUndoNewPage (offsetof(wal_zedstore_undo_newpage, first_counter) + sizeof(uint64))
 
 /*
- * WAL record for updating the oldest undo pointer on the metapage, after trimming
- * the UNDO log.
+ * WAL record for updating the oldest undo pointer on the metapage, after
+ * discarding an old portion the  UNDO log.
  */
-typedef struct wal_zedstore_undo_trim
+typedef struct wal_zedstore_undo_discard
 {
 	ZSUndoRecPtr oldest_undorecptr;
 	BlockNumber	oldest_undopage;		/* XXX: is this redundant with undorecptr.block? */
-} wal_zedstore_undo_trim;
+} wal_zedstore_undo_discard;
 
-#define SizeOfZSWalUndoTrim (offsetof(wal_zedstore_undo_trim, oldest_undopage) + sizeof(BlockNumber))
+#define SizeOfZSWalUndoDiscard (offsetof(wal_zedstore_undo_discard, oldest_undopage) + sizeof(BlockNumber))
 
 /*
  * WAL record for creating a new, empty, root page for an attribute.
