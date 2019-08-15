@@ -905,7 +905,7 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
  * This is used during VACUUM.
  */
 IntegerSet *
-zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid)
+zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid, uint64 *num_live_tuples)
 {
 	Buffer		buf = InvalidBuffer;
 	IntegerSet *result;
@@ -958,6 +958,7 @@ zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid)
 
 			for (int j = 0; j < iter.num_tids; j++)
 			{
+				(*num_live_tuples)++;
 				if (iter.tid_undoslotnos[j] == ZSBT_DEAD_UNDO_SLOT)
 					intset_add_member(result, iter.tids[j]);
 			}

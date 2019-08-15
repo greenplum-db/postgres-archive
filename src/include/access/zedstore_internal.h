@@ -829,7 +829,7 @@ extern TM_Result zsbt_tid_update(Relation rel, zstid otid,
 								 bool wait, TM_FailureData *hufd, zstid *newtid_p);
 extern void zsbt_tid_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete);
 extern void zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo);
-extern IntegerSet *zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid);
+extern IntegerSet *zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid, uint64 *num_live_tuples);
 extern void zsbt_tid_remove(Relation rel, IntegerSet *tids);
 extern TM_Result zsbt_tid_lock(Relation rel, zstid tid,
 							   TransactionId xid, CommandId cid,

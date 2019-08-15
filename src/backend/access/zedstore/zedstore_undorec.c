@@ -664,9 +664,9 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 	Relation   *Irel;
 	int			nindexes;
 	IndexBulkDeleteResult **indstats;
-	Form_pg_class pgcform;
 	zstid		starttid;
 	zstid		endtid;
+	uint64		num_live_tuples;
 
 	/* do nothing if the table is completely empty. */
 	if (RelationGetTargetBlock(rel) == 0 ||
@@ -705,12 +705,13 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 					RelationGetRelationName(rel))));
 
 	starttid = MinZSTid;
+	num_live_tuples = 0;
 	do
 	{
 		IntegerSet *dead_tids;
 
 		/* Scan the TID tree, to collect TIDs that have been marked dead. */
-		dead_tids = zsbt_collect_dead_tids(rel, starttid, &endtid);
+		dead_tids = zsbt_collect_dead_tids(rel, starttid, &endtid, &num_live_tuples);
 		vacrelstats->dead_tids = dead_tids;
 
 		if (intset_num_entries(dead_tids) > 0)
@@ -752,13 +753,11 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 	 * invalid to avoid update. Plus, using false for relallisvisible as don't
 	 * know that either.
 	 *
-	 * FIXME: pass correct numbers for relpages, reltuples and other
-	 * arguments.
+	 * FIXME: pass correct numbers for other arguments.
 	 */
-	pgcform = RelationGetForm(rel);
 	vac_update_relstats(rel,
-						pgcform->relpages,
-						pgcform->reltuples,
+						RelationGetNumberOfBlocks(rel),
+						num_live_tuples,
 						false,
 						nindexes > 0,
 						OldestXmin,
@@ -768,7 +767,7 @@ zsundo_vacuum(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 	/* report results to the stats collector, too */
 	pgstat_report_vacuum(RelationGetRelid(rel),
 						 rel->rd_rel->relisshared,
-						 pgcform->reltuples,
+						 num_live_tuples,
 						 0); /* FIXME: # of dead tuples */
 }
 
