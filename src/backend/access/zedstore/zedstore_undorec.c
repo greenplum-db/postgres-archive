@@ -161,6 +161,7 @@ zsundo_create_for_delete(Relation rel, TransactionId xid, CommandId cid, zstid t
 	 * Cache miss. Create a new UNDO record.
 	 */
 	pending_op = palloc(offsetof(zs_pending_undo_op, payload) + sizeof(ZSUndoRec_Delete));
+	pending_op->is_update = false;
 
 	zsundo_insert_reserve(rel, sizeof(ZSUndoRec_Delete), &pending_op->reservation);
 
@@ -253,6 +254,7 @@ zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid, zstid t
 	 * Cache miss. Create a new UNDO record.
 	 */
 	pending_op = palloc(offsetof(zs_pending_undo_op, payload) + sizeof(ZSUndoRec_Insert));
+	pending_op->is_update = false;
 	zsundo_insert_reserve(rel, sizeof(ZSUndoRec_Insert), &pending_op->reservation);
 	undorec = (ZSUndoRec_Insert *) pending_op->payload;
 
@@ -291,6 +293,7 @@ zsundo_create_for_update(Relation rel, TransactionId xid, CommandId cid,
 	 * Create a new UNDO record.
 	 */
 	pending_op = palloc(offsetof(zs_pending_undo_op, payload) + sizeof(ZSUndoRec_Update));
+	pending_op->is_update = false;
 	zsundo_insert_reserve(rel, sizeof(ZSUndoRec_Update), &pending_op->reservation);
 
 	undorec = (ZSUndoRec_Update *) pending_op->payload;
@@ -319,6 +322,7 @@ zsundo_create_for_tuple_lock(Relation rel, TransactionId xid, CommandId cid,
 	 * Create a new UNDO record.
 	 */
 	pending_op = palloc(offsetof(zs_pending_undo_op, payload) + sizeof(ZSUndoRec_TupleLock));
+	pending_op->is_update = false;
 	zsundo_insert_reserve(rel, sizeof(ZSUndoRec_TupleLock), &pending_op->reservation);
 
 	undorec = (ZSUndoRec_TupleLock *) pending_op->payload;
