@@ -104,6 +104,8 @@ static bool zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 								 ItemPointer tid_p,
 								 Snapshot snapshot,
 								 TupleTableSlot *slot);
+static bool zs_acquire_tuplock(Relation relation, ItemPointer tid, LockTupleMode mode,
+							   LockWaitPolicy wait_policy, bool *have_tuple_lock);
 
 static Size zs_parallelscan_estimate(Relation rel);
 static Size zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan);
@@ -362,10 +364,13 @@ zedstoream_delete(Relation relation, ItemPointer tid_p, CommandId cid,
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	TransactionId xid = GetCurrentTransactionId();
 	TM_Result result = TM_Ok;
+	bool		this_xact_has_lock = false;
+	bool		have_tuple_lock = false;
 
 retry:
 	result = zsbt_tid_delete(relation, tid, xid, cid,
-							 snapshot, crosscheck, wait, hufd, changingPart);
+							 snapshot, crosscheck, wait, hufd, changingPart,
+							 &this_xact_has_lock);
 
 	if (result != TM_Ok)
 	{
@@ -377,9 +382,18 @@ retry:
 		{
 			TransactionId	xwait = hufd->xmax;
 
-			/* TODO: use something like heap_acquire_tuplock() for priority */
 			if (!TransactionIdIsCurrentTransactionId(xwait))
 			{
+				/*
+				 * Acquire tuple lock to establish our priosity for the tuple
+				 * See zedstoream_lock_tuple().
+				 */
+				if (!this_xact_has_lock)
+				{
+					zs_acquire_tuplock(relation, tid_p, LockTupleExclusive, LockWaitBlock,
+									   &have_tuple_lock);
+				}
+
 				XactLockTableWait(xwait, relation, tid_p, XLTW_Delete);
 				goto retry;
 			}
@@ -849,6 +863,8 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	IndexFetchTableData *fetcher;
 	MemoryContext oldcontext;
 	MemoryContext insert_mcontext;
+	bool		this_xact_has_lock = false;
+	bool		have_tuple_lock = false;
 
 	/*
 	 * insert code performs allocations for creating items and merging
@@ -895,7 +911,7 @@ retry:
 
 	result = zsbt_tid_update(relation, otid,
 							 xid, cid, key_update, snapshot, crosscheck,
-							 wait, hufd, &newtid);
+							 wait, hufd, &newtid, &this_xact_has_lock);
 
 	*update_indexes = (result == TM_Ok);
 	if (result == TM_Ok)
@@ -940,13 +956,32 @@ retry:
 		{
 			TransactionId	xwait = hufd->xmax;
 
-			/* TODO: use something like heap_acquire_tuplock() for priority */
 			if (!TransactionIdIsCurrentTransactionId(xwait))
 			{
-				XactLockTableWait(xwait, relation, otid_p, XLTW_Delete);
+				/*
+				 * Acquire tuple lock to establish our priosity for the tuple
+				 * See zedstoream_lock_tuple().
+				 */
+				if (!this_xact_has_lock)
+				{
+					zs_acquire_tuplock(relation, otid_p, LockTupleExclusive, LockWaitBlock,
+									   &have_tuple_lock);
+				}
+
+				XactLockTableWait(xwait, relation, otid_p, XLTW_Update);
 				goto retry;
 			}
 		}
+	}
+
+	/*
+	 * Now that we have successfully updated the tuple, we can
+	 * release the lmgr tuple lock, if we had it.
+	 */
+	if (have_tuple_lock)
+	{
+		UnlockTupleTuplock(relation, otid_p, LockTupleExclusive);
+		have_tuple_lock = false;
 	}
 
 	zedstoream_end_index_fetch(fetcher);
@@ -2266,11 +2301,13 @@ zs_cluster_process_tuple(Relation OldHeap, Relation NewHeap,
 		if (this_xmax != InvalidTransactionId)
 		{
 			TM_Result	delete_result;
+			bool		this_xact_has_lock;
 
 			/* tuple was deleted. */
 			delete_result = zsbt_tid_delete(NewHeap, newtid,
 											this_xmax, this_cmax,
-											NULL, NULL, false, NULL, this_changedPart);
+											NULL, NULL, false, NULL, this_changedPart,
+											&this_xact_has_lock);
 			if (delete_result != TM_Ok)
 				elog(ERROR, "tuple deletion failed during table rewrite");
 		}

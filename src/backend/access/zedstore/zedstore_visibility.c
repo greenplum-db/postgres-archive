@@ -40,6 +40,53 @@ zs_tuplelock_compatible(LockTupleMode mode, LockTupleMode newmode)
 	}
 }
 
+static bool
+am_i_holding_lock(Relation rel, ZSUndoRecPtr undo_ptr,
+				  ZSUndoRecPtr recent_oldest_undo)
+{
+	ZSUndoRec  *undorec;
+
+	for (;;)
+	{
+		/* Is it visible? */
+		if (undo_ptr.counter < recent_oldest_undo.counter)
+			return false;
+
+		/* have to fetch the UNDO record */
+		undorec = zsundo_fetch_record(rel, undo_ptr);
+		if (!undorec)
+		{
+			recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+			if (undo_ptr.counter >= recent_oldest_undo.counter)
+				elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
+					 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
+			return false;
+		}
+
+		if (undorec->type == ZSUNDO_TYPE_INSERT)
+		{
+			if (TransactionIdIsCurrentTransactionId(undorec->xid))
+				return true;
+		}
+		else if (undorec->type == ZSUNDO_TYPE_TUPLE_LOCK)
+		{
+			if (TransactionIdIsCurrentTransactionId(undorec->xid))
+				return true;
+		}
+		else if (undorec->type == ZSUNDO_TYPE_DELETE)
+		{
+			if (TransactionIdIsCurrentTransactionId(undorec->xid))
+				return true;
+		}
+		else if (undorec->type == ZSUNDO_TYPE_UPDATE)
+		{
+			if (TransactionIdIsCurrentTransactionId(undorec->xid))
+				return true;
+		}
+		undo_ptr = undorec->prevundorec;
+	}
+}
+
 /*
  * Like HeapTupleSatisfiesUpdate.
  *
@@ -174,6 +221,11 @@ retry_fetch:
 			tmfd->ctid = ItemPointerFromZSTid(item_tid);
 			tmfd->xmax = undorec->xid;
 			tmfd->cmax = InvalidCommandId;
+
+			/* but am I holding a weaker lock already? */
+			if (!*this_xact_has_lock)
+				*this_xact_has_lock = am_i_holding_lock(rel, undorec->prevundorec, recent_oldest_undo);
+
 			return TM_BeingModified;
 		}
 
@@ -215,6 +267,10 @@ retry_fetch:
 			tmfd->ctid = ItemPointerFromZSTid(item_tid);
 			tmfd->xmax = undorec->xid;
 			tmfd->cmax = InvalidCommandId;
+
+			/* but am I holding a weaker lock already? */
+			if (!*this_xact_has_lock)
+				*this_xact_has_lock = am_i_holding_lock(rel, undorec->prevundorec, recent_oldest_undo);
 
 			return TM_BeingModified;
 		}
@@ -281,6 +337,10 @@ retry_fetch:
 			tmfd->ctid = ItemPointerFromZSTid(item_tid);
 			tmfd->xmax = undorec->xid;
 			tmfd->cmax = InvalidCommandId;
+
+			/* but am I holding a weaker lock already? */
+			if (!*this_xact_has_lock)
+				*this_xact_has_lock = am_i_holding_lock(rel, undorec->prevundorec, recent_oldest_undo);
 
 			return TM_BeingModified;
 		}

@@ -822,11 +822,11 @@ extern void zsbt_tid_multi_insert(Relation rel,
 extern TM_Result zsbt_tid_delete(Relation rel, zstid tid,
 								 TransactionId xid, CommandId cid,
 								 Snapshot snapshot, Snapshot crosscheck, bool wait,
-								 TM_FailureData *hufd, bool changingPart);
+								 TM_FailureData *hufd, bool changingPart, bool *this_xact_has_lock);
 extern TM_Result zsbt_tid_update(Relation rel, zstid otid,
 								 TransactionId xid,
 								 CommandId cid, bool key_update, Snapshot snapshot, Snapshot crosscheck,
-								 bool wait, TM_FailureData *hufd, zstid *newtid_p);
+								 bool wait, TM_FailureData *hufd, zstid *newtid_p, bool *this_xact_has_lock);
 extern void zsbt_tid_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete);
 extern void zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo);
 extern IntegerSet *zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid, uint64 *num_live_tuples);
