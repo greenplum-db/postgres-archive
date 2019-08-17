@@ -287,6 +287,12 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	bool	   *isnulls;
 	zstid	   *tids;
 
+	if (ntuples == 0)
+	{
+		/* COPY sometimes calls us with 0 tuples. */
+		return;
+	}
+
 	datums = palloc0(ntuples * sizeof(Datum));
 	isnulls = palloc(ntuples * sizeof(bool));
 	tids = palloc0(ntuples * sizeof(zstid));
