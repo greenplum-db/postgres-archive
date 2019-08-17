@@ -213,7 +213,7 @@ zsmeta_initmetapage(Relation rel)
 	/* Ok, write it out to disk */
 	buf = ReadBuffer(rel, P_NEW);
 	if (BufferGetBlockNumber(buf) != ZS_META_BLK)
-		elog(ERROR, "index is not empty");
+		elog(ERROR, "table is not empty");
 	page = zsmeta_initmetapage_internal(natts);
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
