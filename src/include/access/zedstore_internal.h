@@ -835,7 +835,8 @@ extern TM_Result zsbt_tid_lock(Relation rel, zstid tid,
 							   TransactionId xid, CommandId cid,
 							   LockTupleMode lockmode, bool follow_updates,
 							   Snapshot snapshot, TM_FailureData *hufd,
-							   zstid *next_tid, ZSUndoSlotVisibility *visi_info);
+							   zstid *next_tid, bool *this_xact_has_lock,
+							   ZSUndoSlotVisibility *visi_info);
 extern void zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr, ZSUndoRecPtr recent_oldest_undo);
 extern zstid zsbt_get_last_tid(Relation rel);
 extern void zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot);
@@ -957,7 +958,7 @@ extern TM_Result zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 									ZSUndoRecPtr recent_oldest_undo,
 									zstid item_tid, ZSUndoRecPtr item_undoptr,
 									LockTupleMode mode,
-									bool *undo_record_needed,
+									bool *undo_record_needed, bool *this_xact_has_lock,
 									TM_FailureData *tmfd, zstid *next_tid,
 									ZSUndoSlotVisibility *visi_info);
 extern bool zs_SatisfiesVisibility(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,

@@ -516,6 +516,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 	bool		item_isdead;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
+	bool		this_xact_has_lock = false;
 	zs_pending_undo_op *undo_op;
 	OffsetNumber off;
 	ZSTidArrayItem *origitem;
@@ -545,7 +546,8 @@ zsbt_tid_delete(Relation rel, zstid tid,
 	{
 		result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
 									tid, item_undoptr, LockTupleExclusive,
-									&keep_old_undo_ptr, hufd, &next_tid, NULL);
+									&keep_old_undo_ptr, &this_xact_has_lock,
+									hufd, &next_tid, NULL);
 		if (result != TM_Ok)
 		{
 			UnlockReleaseBuffer(buf);
@@ -696,6 +698,7 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 	int			idx;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
+	bool		this_xact_has_lock = false;
 	zstid		next_tid;
 
 	/*
@@ -719,7 +722,8 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
 								otid, olditem_undoptr,
 								key_update ? LockTupleExclusive : LockTupleNoKeyExclusive,
-								&keep_old_undo_ptr, hufd, &next_tid, NULL);
+								&keep_old_undo_ptr, &this_xact_has_lock,
+								hufd, &next_tid, NULL);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -784,6 +788,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	OffsetNumber off;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
+	bool		this_xact_has_lock = false;
 	TM_FailureData tmfd;
 	zs_pending_undo_op *undo_op;
 	List	   *newitems;
@@ -811,7 +816,8 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
 								otid, olditem_undoptr,
 								key_update ? LockTupleExclusive : LockTupleNoKeyExclusive,
-								&keep_old_undo_ptr, &tmfd, &next_tid, NULL);
+								&keep_old_undo_ptr, &this_xact_has_lock,
+								&tmfd, &next_tid, NULL);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -836,7 +842,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 TM_Result
 zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 			  LockTupleMode mode, bool follow_updates, Snapshot snapshot,
-			  TM_FailureData *hufd, zstid *next_tid,
+			  TM_FailureData *hufd, zstid *next_tid, bool *this_xact_has_lock,
 			  ZSUndoSlotVisibility *visi_info)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
@@ -865,7 +871,8 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 	}
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
 								tid, item_undoptr, mode,
-								&keep_old_undo_ptr, hufd, next_tid, visi_info);
+								&keep_old_undo_ptr, this_xact_has_lock,
+								hufd, next_tid, visi_info);
 
 	if (result != TM_Ok)
 	{

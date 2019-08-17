@@ -502,12 +502,13 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	TransactionId xid = GetCurrentTransactionId();
 	TM_Result result;
+	bool		this_xact_has_lock = false;
 	bool		have_tuple_lock = false;
 	zstid		next_tid = tid;
 	SnapshotData SnapshotDirty;
 	bool		locked_something = false;
 	ZSUndoSlotVisibility visi_info = InvalidUndoSlotVisibility;
-	bool follow_updates = false;
+	bool		follow_updates = false;
 
 	slot->tts_tableOid = RelationGetRelid(relation);
 	slot->tts_tid = *tid_p;
@@ -519,7 +520,7 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	 */
 retry:
 	result = zsbt_tid_lock(relation, tid, xid, cid, mode, follow_updates,
-						   snapshot, tmfd, &next_tid, &visi_info);
+						   snapshot, tmfd, &next_tid, &this_xact_has_lock, &visi_info);
 
 	((ZedstoreTupleTableSlot*)slot)->xmin = visi_info.xmin;
 	((ZedstoreTupleTableSlot*)slot)->cmin = visi_info.cmin;
@@ -617,13 +618,29 @@ retry:
 		/*
 		 * Acquire tuple lock to establish our priority for the tuple, or
 		 * die trying.  LockTuple will release us when we are next-in-line
-		 * for the tuple.  We must do this even if we are share-locking.
+		 * for the tuple.  We must do this even if we are share-locking,
+		 * but not if we already have a weaker lock on the tuple.
 		 *
 		 * If we are forced to "start over" below, we keep the tuple lock;
 		 * this arranges that we stay at the head of the line while
 		 * rechecking tuple state.
+		 *
+		 * Explanation for why we don't acquire heavy-weight lock when we
+		 * already hold a weaker lock:
+		 *
+		 * Disable acquisition of the heavyweight tuple lock.
+		 * Otherwise, when promoting a weaker lock, we might
+		 * deadlock with another locker that has acquired the
+		 * heavyweight tuple lock and is waiting for our
+		 * transaction to finish.
+		 *
+		 * Note that in this case we still need to wait for
+		 * the xid if required, to avoid acquiring
+		 * conflicting locks.
+		 *
 		 */
-		if (!zs_acquire_tuplock(relation, tid_p, mode, wait_policy,
+		if (!this_xact_has_lock &&
+			!zs_acquire_tuplock(relation, tid_p, mode, wait_policy,
 								  &have_tuple_lock))
 		{
 			/*
@@ -642,6 +659,7 @@ retry:
 			case LockWaitSkip:
 				if (!ConditionalXactLockTableWait(xwait))
 				{
+					/* FIXME: should we release the hwlock here? */
 					return TM_WouldBlock;
 				}
 				break;

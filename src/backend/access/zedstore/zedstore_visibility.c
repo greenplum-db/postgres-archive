@@ -64,13 +64,15 @@ zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 				   ZSUndoRecPtr recent_oldest_undo,
 				   zstid item_tid, ZSUndoRecPtr item_undoptr,
 				   LockTupleMode mode,
-				   bool *undo_record_needed, TM_FailureData *tmfd,
+				   bool *undo_record_needed, bool *this_xact_has_lock,
+				   TM_FailureData *tmfd,
 				   zstid *next_tid, ZSUndoSlotVisibility *visi_info)
 {
 	ZSUndoRecPtr undo_ptr;
 	ZSUndoRec  *undorec;
 	int			chain_depth = 0;
 
+	*this_xact_has_lock = false;
 	*undo_record_needed = true;
 
 	undo_ptr = item_undoptr;
@@ -122,6 +124,7 @@ retry_fetch:
 
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
+			*this_xact_has_lock = true;
 			if (undorec->cid >= snapshot->curcid)
 				return TM_Invisible;	/* inserted after scan started */
 		}
@@ -158,6 +161,7 @@ retry_fetch:
 		 */
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
+			*this_xact_has_lock = true;
 			if (lock_undorec->lockmode >= mode)
 			{
 				*undo_record_needed = true;
@@ -194,6 +198,7 @@ retry_fetch:
 
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
+			*this_xact_has_lock = true;
 			if (undorec->cid >= snapshot->curcid)
 			{
 				tmfd->ctid = ItemPointerFromZSTid(item_tid);
@@ -253,6 +258,7 @@ retry_fetch:
 
 		if (TransactionIdIsCurrentTransactionId(undorec->xid))
 		{
+			*this_xact_has_lock = true;
 			if (zs_tuplelock_compatible(old_lockmode, mode))
 				return TM_Ok;
 
