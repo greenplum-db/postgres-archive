@@ -51,8 +51,8 @@ static TM_Result zsbt_tid_update_lock_old(Relation rel, zstid otid,
 									  Snapshot crosscheck, bool wait, TM_FailureData *hufd, ZSUndoRecPtr *prevundoptr_p);
 static void zsbt_tid_update_insert_new(Relation rel, zstid *newtid,
 					   TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr);
-static void zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
-					  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot);
+static bool zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
+									  TransactionId xid, CommandId cid, bool key_update, ZSUndoRecPtr prevrecptr);
 static OffsetNumber zsbt_binsrch_tidpage(zstid key, Page page);
 
 /* ----------------------------------------------------------------
@@ -652,6 +652,7 @@ zsbt_tid_update(Relation rel, zstid otid,
 {
 	TM_Result	result;
 	ZSUndoRecPtr prevundoptr;
+	bool		success;
 
 	/*
 	 * This is currently only used on the meta-attribute. The other attributes
@@ -667,6 +668,7 @@ zsbt_tid_update(Relation rel, zstid otid,
 	 * TODO: If there's free TID space left on the same page, we should keep the
 	 * buffer locked, and use the same page for the new tuple.
 	 */
+retry:
 	result = zsbt_tid_update_lock_old(rel, otid,
 									  xid, cid, key_update, snapshot,
 									  crosscheck, wait, hufd, &prevundoptr);
@@ -678,7 +680,14 @@ zsbt_tid_update(Relation rel, zstid otid,
 	zsbt_tid_update_insert_new(rel, newtid_p, xid, cid, prevundoptr);
 
 	/* update the old item with the "t_ctid pointer" for the new item */
-	zsbt_tid_mark_old_updated(rel, otid, *newtid_p, xid, cid, key_update, snapshot);
+	success = zsbt_tid_mark_old_updated(rel, otid, *newtid_p, xid, cid, key_update, prevundoptr);
+	if (!success)
+	{
+		ZSUndoRecPtr oldest_undoptr = zsundo_get_oldest_undo_ptr(rel);
+
+		zsbt_tid_mark_dead(rel, *newtid_p, oldest_undoptr);
+		goto retry;
+	}
 
 	return TM_Ok;
 }
@@ -776,9 +785,9 @@ zsbt_tid_update_insert_new(Relation rel,
 /*
  * Subroutine of zsbt_update(): mark old item as updated.
  */
-static void
+static bool
 zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
-					  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot)
+						  TransactionId xid, CommandId cid, bool key_update, ZSUndoRecPtr prevrecptr)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
 	Buffer		buf;
@@ -786,14 +795,10 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	ZSUndoRecPtr olditem_undoptr;
 	bool		olditem_isdead;
 	OffsetNumber off;
-	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
-	bool		this_xact_has_lock = false;
-	TM_FailureData tmfd;
 	zs_pending_undo_op *undo_op;
 	List	   *newitems;
 	ZSTidArrayItem *origitem;
-	zstid		next_tid;
 
 	/*
 	 * Find the item to delete.  It could be part of a compressed item,
@@ -811,17 +816,12 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	}
 
 	/*
-	 * Is it visible to us?
+	 * Did it change while we were inserting new row version?
 	 */
-	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
-								otid, olditem_undoptr,
-								key_update ? LockTupleExclusive : LockTupleNoKeyExclusive,
-								&keep_old_undo_ptr, &this_xact_has_lock,
-								&tmfd, &next_tid, NULL);
-	if (result != TM_Ok)
+	if (!ZSUndoRecPtrEquals(olditem_undoptr, prevrecptr))
 	{
 		UnlockReleaseBuffer(buf);
-		elog(ERROR, "tuple concurrently updated - not implemented");
+		return false;
 	}
 
 	/* Prepare an UNDO record. */
@@ -837,6 +837,8 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	zsbt_tid_replace_item(rel, buf, off, newitems, undo_op);
 	list_free_deep(newitems);
 	ReleaseBuffer(buf); 	/* zsbt_tid_replace_item unlocked 'buf' */
+
+	return true;
 }
 
 TM_Result
