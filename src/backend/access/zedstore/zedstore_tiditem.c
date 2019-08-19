@@ -589,7 +589,7 @@ zsbt_tid_item_remove_tids(ZSTidArrayItem *orig, zstid *nexttid, IntegerSet *remo
 		for (int j = 0; j < ZSBT_SLOTNOS_PER_WORD && idx < orig->t_num_tids; j++)
 		{
 			slotnos[idx++] = slotword & ((UINT64CONST(1) << ZSBT_ITEM_UNDO_SLOT_BITS) - 1);
-			slotword >>= slotword;
+			slotword >>= ZSBT_ITEM_UNDO_SLOT_BITS;
 		}
 	}
 
