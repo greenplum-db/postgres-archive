@@ -15,8 +15,6 @@
 
 #include <math.h>
 
-#include "miscadmin.h"
-
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/multixact.h"
@@ -35,6 +33,7 @@
 #include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
+#include "miscadmin.h"
 #include "optimizer/plancat.h"
 #include "pgstat.h"
 #include "storage/lmgr.h"
@@ -42,15 +41,6 @@
 #include "storage/procarray.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
-
-
-typedef enum
-{
-	ZSSCAN_STATE_UNSTARTED,
-	ZSSCAN_STATE_SCANNING,
-	ZSSCAN_STATE_FINISHED_RANGE,
-	ZSSCAN_STATE_FINISHED
-} zs_scan_state;
 
 typedef struct ZedStoreProjectData
 {
@@ -155,7 +145,8 @@ static void
 zedstoream_get_latest_tid(TableScanDesc sscan,
 						  ItemPointer tid)
 {
-	zstid ztid = ZSTidFromItemPointer(*tid);
+	zstid		ztid = ZSTidFromItemPointer(*tid);
+
 	zsbt_find_latest_tid(sscan->rs_rd, &ztid, sscan->rs_snapshot);
 	*tid = ItemPointerFromZSTid(ztid);
 }
@@ -169,8 +160,6 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 	bool	   *isnulls;
 	zstid		tid;
 	TransactionId xid = GetCurrentTransactionId();
-	bool        isnull;
-	Datum       datum;
 	MemoryContext oldcontext;
 	MemoryContext insert_mcontext;
 
@@ -195,10 +184,7 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 	isnulls = slot->tts_isnull;
 
 	tid = InvalidZSTid;
-
-	isnull = true;
-	zsbt_tid_multi_insert(relation,
-						  &tid, 1,
+	zsbt_tid_multi_insert(relation, &tid, 1,
 						  xid, cid, speculative_token, InvalidUndoPtr);
 
 	/*
@@ -212,6 +198,9 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 	for (attno = 1; attno <= relation->rd_att->natts; attno++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, attno - 1);
+		Datum       datum;
+		bool        isnull;
+
 		datum = d[attno - 1];
 		isnull = isnulls[attno - 1];
 
@@ -321,9 +310,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			bool		isnull = slots[i]->tts_isnull[attno - 1];
 
 			if (slotgetandset)
-			{
 				slot_getallattrs(slots[i]);
-			}
 
 			/* If this datum is too large, toast it */
 			if (!isnull && attr->attlen < 0 &&
@@ -1017,7 +1004,7 @@ zs_initialize_proj_attributes(TupleDesc tupledesc, ZedStoreProjectData *proj_dat
 	 */
 	for (int idx = 0; idx < tupledesc->natts; idx++)
 	{
-		int att_no = idx + 1;
+		int			att_no = idx + 1;
 
 		/*
 		 * never project dropped columns, null will be returned for them
@@ -1570,11 +1557,12 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 
 	if (found)
 	{
+		uint8		slotno = ZSTidScanCurUndoSlotNo(&fetch_proj->tid_scan);
 		ZSUndoSlotVisibility *visi_info;
-		uint8 slotno = ZSTidScanCurUndoSlotNo(&fetch_proj->tid_scan);
-		visi_info = &fetch_proj->tid_scan.array_iter.undoslot_visibility[slotno];
-		((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
 
+		visi_info = &fetch_proj->tid_scan.array_iter.undoslot_visibility[slotno];
+
+		((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
 		slot->tts_tableOid = RelationGetRelid(rel);
 		slot->tts_tid = ItemPointerFromZSTid(tid);
 		slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
@@ -3151,7 +3139,7 @@ typedef struct ParallelZSScanDescData
 	ParallelTableScanDescData base;
 
 	zstid		pzs_endtid;		/* last tid + 1 in relation at start of scan */
-	pg_atomic_uint64 pzs_allocatedtid_blk;	/* TID space allocated to workers so far. (in  65536 increments) */
+	pg_atomic_uint64 pzs_allocatedtid_blk;	/* TID space allocated to workers so far. (in 65536 increments) */
 } ParallelZSScanDescData;
 typedef struct ParallelZSScanDescData *ParallelZSScanDesc;
 
