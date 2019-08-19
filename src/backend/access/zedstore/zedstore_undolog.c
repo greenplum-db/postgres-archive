@@ -525,6 +525,7 @@ zsundo_discard_redo(XLogReaderState *record)
 
 		PageSetLSN(discardedpage, lsn);
 		MarkBufferDirty(discardedbuf);
+		UnlockReleaseBuffer(discardedbuf);
 	}
 
 	if (BufferIsValid(metabuf))
