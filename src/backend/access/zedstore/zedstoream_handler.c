@@ -2847,105 +2847,58 @@ zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstat
 
 	Assert(BlockNumberIsValid(blockno));
 
-	return zs_blkscan_next_block(sscan, blockno, NULL, -1, false);
+	/*
+	 * Fetch all TIDs on the page.
+	 */
+	if (!zs_blkscan_next_block(sscan, blockno, NULL, -1, false))
+		return false;
+
+	/*
+	 * Filter the list of TIDs, keeping only the TIDs that the sampling methods
+	 * tells us to keep.
+	 */
+	if (scan->bmscan_ntuples > 0)
+	{
+		zstid		lasttid_for_block = scan->bmscan_tids[scan->bmscan_ntuples - 1];
+		OffsetNumber maxoffset = ZSTidGetOffsetNumber(lasttid_for_block);
+		OffsetNumber nextoffset;
+		int			outtuples;
+		int			idx;
+
+		/* ask the tablesample method which tuples to check on this page. */
+		nextoffset = tsm->NextSampleTuple(scanstate, blockno, maxoffset);
+
+		outtuples = 0;
+		idx = 0;
+		while (idx < scan->bmscan_ntuples && OffsetNumberIsValid(nextoffset))
+		{
+			zstid		thistid = scan->bmscan_tids[idx];
+			OffsetNumber thisoffset = ZSTidGetOffsetNumber(thistid);
+
+			if (thisoffset > nextoffset)
+				nextoffset = tsm->NextSampleTuple(scanstate, blockno, maxoffset);
+			else
+			{
+				if (thisoffset == nextoffset)
+					scan->bmscan_tids[outtuples++] = thistid;
+				idx++;
+			}
+		}
+		scan->bmscan_ntuples = outtuples;
+	}
+
+	return scan->bmscan_ntuples > 0;
 }
 
 static bool
 zedstoream_scan_sample_next_tuple(TableScanDesc sscan, SampleScanState *scanstate,
 								  TupleTableSlot *slot)
 {
-	ZedStoreDesc scan = (ZedStoreDesc) sscan;
-	TsmRoutine *tsm = scanstate->tsmroutine;
-	zstid		tid;
-	BlockNumber blockno;
-	OffsetNumber tupoffset;
-	bool		found;
-
-	/* all tuples on this block are invisible */
-	if (scan->bmscan_ntuples == 0)
-		return false;
-
-	blockno = ZSTidGetBlockNumber(scan->bmscan_tids[0]);
-
-	/* find which visible tuple in this block to sample */
-	for (;;)
-	{
-		zstid		lasttid_for_block = scan->bmscan_tids[scan->bmscan_ntuples - 1];
-		OffsetNumber maxoffset = ZSTidGetOffsetNumber(lasttid_for_block);
-
-		/* Ask the tablesample method which tuples to check on this page. */
-		tupoffset = tsm->NextSampleTuple(scanstate, blockno, maxoffset);
-
-		if (!OffsetNumberIsValid(tupoffset))
-			return false;
-
-		tid = ZSTidFromBlkOff(blockno, tupoffset);
-
-		found = false;
-		for (int n = 0; n < scan->bmscan_ntuples; n++)
-		{
-			if (scan->bmscan_tids[n] == tid)
-			{
-				/* visible tuple */
-				found = true;
-				break;
-			}
-		}
-
-		if (found)
-			break;
-		else
-			continue;
-	}
-
 	/*
-	 * projection attributes were created based on Relation tuple descriptor
-	 * it better match TupleTableSlot.
+	 * We already filtered the rows in the next_block() function, so all TIDs in
+	 * in scan->bmscan_tids belong to the sample.
 	 */
-	Assert((scan->proj_data.num_proj_atts - 1) <= slot->tts_tupleDescriptor->natts);
-	/* fetch values for tuple pointed by tid to sample */
-	for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
-	{
-		int			attno = scan->proj_data.proj_atts[i];
-		ZSAttrTreeScan attr_scan;
-		Form_pg_attribute attr;
-		Datum		datum;
-		bool        isnull;
-
-		zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
-							 slot->tts_tupleDescriptor,
-							 attno,
-							 &attr_scan);
-		attr = attr_scan.attdesc;
-
-		if (zsbt_attr_fetch(&attr_scan, &datum, &isnull, tid))
-		{
-			Assert(ZSTidGetBlockNumber(tid) == blockno);
-		}
-		else
-		{
-			zsbt_fill_missing_attribute_value(slot->tts_tupleDescriptor, attno,
-											  &datum, &isnull);
-		}
-
-		/*
-		 * have to make a copy because we close the scan immediately.
-		 * FIXME: I think this leaks into a too-long-lived context
-		 */
-		if (!isnull)
-			datum = zs_datumCopy(datum, attr->attbyval, attr->attlen);
-
-		slot->tts_values[attno - 1] = datum;
-		slot->tts_isnull[attno - 1] = isnull;
-
-		zsbt_attr_end_scan(&attr_scan);
-	}
-	slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
-	slot->tts_tid = ItemPointerFromZSTid(tid);
-	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
-	slot->tts_flags &= ~TTS_FLAG_EMPTY;
-
-	return true;
+	return zs_blkscan_next_tuple(sscan, slot);
 }
 
 static void
