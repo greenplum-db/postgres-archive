@@ -2,7 +2,25 @@
  * zedstore_undolog.c
  *		Temporary UNDO-logging for zedstore.
  *
- * XXX: This is hopefully replaced with an upstream UNDO facility later.
+ * XXX: This file is hopefully replaced with an upstream UNDO facility later.
+ *
+ * The UNDO log is a dumb a stream of bytes. It can be appended to at the
+ * head, and the tail can be discarded away. The upper layer, see
+ * zedstore_undorec.c, is responsible for dividing the log into records,
+ * and deciding when and what to discard
+ *
+ * The upper layer is also responsible for WAL-logging any insertions and
+ * modifications of UNDO records. This module WAL-logs creation of new UNDO
+ * pages and discarding old ones, but not the content.
+ *
+ * Insertion is a two-step process. First, you reserve the space for the
+ * UNDO record with zsundo_insert_reserve(). You get a pointer to an UNDO
+ * buffer, where you can write the record. Once you're finished, call
+ * zsundo_insert_finish().
+ *
+ * To fetch a record, use zsundo_fetch(). You may modify the record, but
+ * you must dirty the buffer and WAL-log the change yourself. You cannot
+ * change its size, however.
  *
  *
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
@@ -43,11 +61,9 @@
  * used in the undo page header.
  *
  * The caller is responsible for WAL-logging, and replaying the changes, in
- * case of a crash.
- *
- * (If there isn't enough space on the current latest UNDO page, a new page
- * is allocated and appended to the UNDO log. That allocation is WAL-logged
- * separately, the caller doesn't need to care about that.)
+ * case of a crash. (If there isn't enough space on the current latest UNDO
+ * page, a new page is allocated and appended to the UNDO log. That allocation
+ * is WAL-logged separately, the caller doesn't need to care about that.)
  */
 void
 zsundo_insert_reserve(Relation rel, size_t size, zs_undo_reservation *reservation_p)
@@ -62,7 +78,8 @@ zsundo_insert_reserve(Relation rel, size_t size, zs_undo_reservation *reservatio
 	uint64		next_counter;
 	int			offset;
 
-	Assert(size <= MaxUndoRecordSize);
+	if (size > MaxUndoRecordSize)
+		elog(ERROR, "UNDO record is too large (%zu bytes, max %zu bytes)", size, MaxUndoRecordSize);
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	metapage = BufferGetPage(metabuf);
@@ -179,6 +196,8 @@ retry_lock_tail:
 
 		END_CRIT_SECTION();
 
+		Assert(size <= PageGetExactFreeSpace(newpage));
+
 		tail_blk = newblk;
 		tail_buf = newbuf;
 		tail_pg = newpage;
@@ -249,7 +268,12 @@ zsundo_insert_finish(zs_undo_reservation *reservation)
 
 /*
  * Lock page containing the given UNDO record, and return pointer to it
- * within the buffer.
+ * within the buffer. Once you're done looking at the record, unlock and
+ * unpin the buffer.
+ *
+ * If lockmode is BUFFER_LOCK_EXCLUSIVE, you may modify the record. However,
+ * you cannot change its size, and you must mark the buffer dirty, and WAL-log any
+ * changes yourself.
  *
  * If missing_ok is true, it's OK if the UNDO record has been discarded away
  * already. Will return NULL in that case. If missing_ok is false, throws an

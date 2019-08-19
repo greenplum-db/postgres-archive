@@ -14,8 +14,11 @@
 #include "storage/off.h"
 #include "utils/relcache.h"
 
-// fixme: arbitrary
-#define MaxUndoRecordSize		(BLCKSZ / 2)
+/*
+ * We don't support splitting UNDO records across pages, so the max size of
+ * an undo record is limited by block size.
+ */
+#define MaxUndoRecordSize		(BLCKSZ - SizeOfPageHeaderData - sizeof(ZSUndoPageOpaque))
 
 /*
  * An UNDO-pointer.
