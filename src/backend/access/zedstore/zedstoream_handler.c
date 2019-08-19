@@ -114,9 +114,6 @@ static bool zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
 									  zstid *start, zstid *end);
 static void zsbt_fill_missing_attribute_value(TupleDesc tupleDesc, int attno, Datum *datum, bool *isnull);
 
-/* Typedef for callback function for getnextslot() */
-typedef void (*GetNextSlotCallback) (ZSTidTreeScan *scan, zstid tid, void *state);
-
 /* ----------------------------------------------------------------
  *				storage AM support routines for zedstoream
  * ----------------------------------------------------------------
@@ -234,6 +231,7 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 
 	slot->tts_tableOid = RelationGetRelid(relation);
 	slot->tts_tid = ItemPointerFromZSTid(tid);
+	/* XXX: should we set visi_info here? */
 
 	MemoryContextSwitchTo(oldcontext);
 	MemoryContextDelete(insert_mcontext);
@@ -527,7 +525,7 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	zstid		next_tid = tid;
 	SnapshotData SnapshotDirty;
 	bool		locked_something = false;
-	ZSUndoSlotVisibility visi_info = InvalidUndoSlotVisibility;
+	ZSUndoSlotVisibility *visi_info = &((ZedstoreTupleTableSlot *) slot)->visi_info_buf;
 	bool		follow_updates = false;
 
 	slot->tts_tableOid = RelationGetRelid(relation);
@@ -540,10 +538,8 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	 */
 retry:
 	result = zsbt_tid_lock(relation, tid, xid, cid, mode, follow_updates,
-						   snapshot, tmfd, &next_tid, &this_xact_has_lock, &visi_info);
-
-	((ZedstoreTupleTableSlot*)slot)->xmin = visi_info.xmin;
-	((ZedstoreTupleTableSlot*)slot)->cmin = visi_info.cmin;
+						   snapshot, tmfd, &next_tid, &this_xact_has_lock, visi_info);
+	((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
 
 	if (result == TM_Invisible)
 	{
@@ -571,13 +567,13 @@ retry:
 		  * have to check cmin against cid: cmin >= current CID means our
 		  * command cannot see the tuple, so we should ignore it.
 		  */
-		 Assert(visi_info.cmin != InvalidCommandId);
+		 Assert(visi_info->cmin != InvalidCommandId);
 		 if ((flags & TUPLE_LOCK_FLAG_FIND_LAST_VERSION) != 0 &&
-			 TransactionIdIsCurrentTransactionId(visi_info.xmin) &&
-			 visi_info.cmin >= cid)
+			 TransactionIdIsCurrentTransactionId(visi_info->xmin) &&
+			 visi_info->cmin >= cid)
 		 {
-			 tmfd->xmax = visi_info.xmin;
-			 tmfd->cmax = visi_info.cmin;
+			 tmfd->xmax = visi_info->xmin;
+			 tmfd->cmax = visi_info->cmin;
 			 return TM_SelfModified;
 		 }
 
@@ -1209,9 +1205,8 @@ zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
 }
 
 static bool
-zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
-								TupleTableSlot *slot, GetNextSlotCallback callback,
-								void *callback_state)
+zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction,
+					   TupleTableSlot *slot)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 	ZedStoreProjectData *scan_proj = &scan->proj_data;
@@ -1315,9 +1310,6 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 		break;
 	}
 
-	if (callback)
-		callback(&scan_proj->tid_scan, this_tid, callback_state);
-
 	/* Note: We don't need to predicate-lock tuples in Serializable mode,
 	 * because in a sequential scan, we predicate-locked the whole table.
 	 */
@@ -1359,8 +1351,7 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 	/* Fill in the rest of the fields in the slot, and return the tuple */
 	slotno = ZSTidScanCurUndoSlotNo(&scan_proj->tid_scan);
 	visi_info = &scan_proj->tid_scan.array_iter.undoslot_visibility[slotno];
-	((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->xmin;
-	((ZedstoreTupleTableSlot*)slot)->cmin = visi_info->cmin;
+	((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
 
 	slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
 	slot->tts_tid = ItemPointerFromZSTid(this_tid);
@@ -1369,12 +1360,6 @@ zedstoream_getnextslot_internal(TableScanDesc sscan, ScanDirection direction,
 
 	pgstat_count_heap_getnext(scan->rs_scan.rs_rd);
 	return true;
-}
-
-static bool
-zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
-{
-	return zedstoream_getnextslot_internal(sscan, direction, slot, NULL, NULL);
 }
 
 static bool
@@ -1431,7 +1416,6 @@ zedstoream_compute_xid_horizon_for_tuples(Relation rel,
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("function %s not implemented yet", __func__)));
-
 }
 
 static IndexFetchTableData *
@@ -1589,8 +1573,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 		ZSUndoSlotVisibility *visi_info;
 		uint8 slotno = ZSTidScanCurUndoSlotNo(&fetch_proj->tid_scan);
 		visi_info = &fetch_proj->tid_scan.array_iter.undoslot_visibility[slotno];
-		((ZedstoreTupleTableSlot*)slot)->xmin = visi_info->xmin;
-		((ZedstoreTupleTableSlot*)slot)->cmin = visi_info->cmin;
+		((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
 
 		slot->tts_tableOid = RelationGetRelid(rel);
 		slot->tts_tid = ItemPointerFromZSTid(tid);
@@ -1760,43 +1743,6 @@ zedstoream_index_validate_scan(Relation baseRelation,
 	/* These may have been pointing to the now-gone estate */
 	indexInfo->ii_ExpressionsState = NIL;
 	indexInfo->ii_PredicateState = NULL;
-}
-
-/*
- * This is called by getnextslot function after checking visibility of TID
- * item based on passed snapshot. We have info available to help us set
- * tupleIsAlive, which helps control if the tuple should be excluded from
- * unique-checking or not.
- */
-static void
-index_build_getnextslot_callback(ZSTidTreeScan *scan, zstid tid, void *state)
-{
-	bool *tupleIsAlive = (bool*)state;
-	uint8 slotno = ZSTidScanCurUndoSlotNo(scan);
-	ZSUndoSlotVisibility *visi_info = &scan->array_iter.undoslot_visibility[slotno];
-
-	Assert(tid != InvalidZSTid);
-
-	/*
-	 * This callback is called after checking visibility based on passed in
-	 * snapshot to scan.
-	 */
-	*tupleIsAlive = true;
-
-	/*
-	 * If NonVacuumableSnapshot snapshot used for scanning then we need to
-	 * check for recenetly dead tuples.
-	 *
-	 * TODO: Heap checks for DELETE_IN_PROGRESS do we need as well?
-	 */
-	if (visi_info->nonvacuumable_status == ZSNV_RECENTLY_DEAD)
-	{
-		Assert(scan->snapshot->snapshot_type == SNAPSHOT_NON_VACUUMABLE);
-		*tupleIsAlive = false;
-		return;
-	}
-
-	Assert(visi_info->nonvacuumable_status == ZSNV_NONE);
 }
 
 static double
@@ -1978,10 +1924,10 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	/*
 	 * Scan all tuples in the base relation.
 	 */
-	while (zedstoream_getnextslot_internal(scan, ForwardScanDirection, slot,
-										   &index_build_getnextslot_callback, &tupleIsAlive))
+	while (zedstoream_getnextslot(scan, ForwardScanDirection, slot))
 	{
 		HeapTuple	heapTuple;
+		ZSUndoSlotVisibility *visi_info;
 
 		if (numblocks != InvalidBlockNumber &&
 			ItemPointerGetBlockNumber(&slot->tts_tid) >= numblocks)
@@ -1989,7 +1935,17 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 
 		CHECK_FOR_INTERRUPTS();
 
-		/* table_scan_getnextslot did the visibility check */
+		/*
+		 * Is the tuple deleted, but still visible to old transactions?
+		 *
+		 * We need to include such tuples in the index, but exclude them
+		 * from unique-checking.
+		 *
+		 * TODO: Heap checks for DELETE_IN_PROGRESS do we need as well?
+		 */
+		visi_info = ((ZedstoreTupleTableSlot *) slot)->visi_info;
+		tupleIsAlive = (visi_info->nonvacuumable_status != ZSNV_RECENTLY_DEAD);
+
 		if (tupleIsAlive)
 			reltuples += 1;
 

@@ -25,8 +25,7 @@ static void
 tts_zedstore_init(TupleTableSlot *slot)
 {
 	ZedstoreTupleTableSlot *zslot = (ZedstoreTupleTableSlot *) slot;
-	zslot->xmin = InvalidTransactionId;
-	zslot->cmin = InvalidCommandId;
+	zslot->visi_info = NULL;
 }
 
 static void
@@ -50,8 +49,7 @@ tts_zedstore_clear(TupleTableSlot *slot)
 	slot->tts_flags |= TTS_FLAG_EMPTY;
 	ItemPointerSetInvalid(&slot->tts_tid);
 
-	zslot->xmin = InvalidTransactionId;
-	zslot->cmin = InvalidCommandId;
+	zslot->visi_info = NULL;
 }
 
 /*
@@ -78,11 +76,11 @@ tts_zedstore_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
 	{
 		*isnull = false;
 		if (attnum == MinTransactionIdAttributeNumber)
-			return TransactionIdGetDatum(zslot->xmin);
+			return zslot->visi_info ? TransactionIdGetDatum(zslot->visi_info->xmin) : InvalidTransactionId;
 		else
 		{
 			Assert(attnum == MinCommandIdAttributeNumber);
-			return CommandIdGetDatum(zslot->cmin);
+			return zslot->visi_info ? CommandIdGetDatum(zslot->visi_info->cmin) : InvalidCommandId;
 		}
 	}	
 	elog(ERROR, "zedstore tuple table slot does not have system attributes (except xmin and cmin)");
@@ -108,6 +106,13 @@ tts_zedstore_materialize(TupleTableSlot *slot)
 	/* already materialized */
 	if (TTS_SHOULDFREE(slot))
 		return;
+
+	/* copy visibility information to go with the slot */
+	if (vslot->visi_info)
+	{
+		vslot->visi_info_buf = *vslot->visi_info;
+		vslot->visi_info = &vslot->visi_info_buf;
+	}
 
 	/* compute size of memory required */
 	for (int natt = 0; natt < desc->natts; natt++)
@@ -193,7 +198,6 @@ tts_zedstore_materialize(TupleTableSlot *slot)
 static void
 tts_zedstore_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 {
-	ZedstoreTupleTableSlot *zsrcslot = (ZedstoreTupleTableSlot *) srcslot;
 	ZedstoreTupleTableSlot *zdstslot = (ZedstoreTupleTableSlot *) dstslot;
 
 	TupleDesc	srcdesc = dstslot->tts_tupleDescriptor;
@@ -210,8 +214,10 @@ tts_zedstore_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 		dstslot->tts_isnull[natt] = srcslot->tts_isnull[natt];
 	}
 
-	zdstslot->xmin = zsrcslot->xmin;
-	zdstslot->cmin = zsrcslot->cmin;
+	if (srcslot->tts_ops == &TTSOpsZedstore)
+		zdstslot->visi_info = ((ZedstoreTupleTableSlot *) srcslot)->visi_info;
+	else
+		zdstslot->visi_info = NULL;
 
 	dstslot->tts_nvalid = srcdesc->natts;
 	dstslot->tts_flags &= ~TTS_FLAG_EMPTY;

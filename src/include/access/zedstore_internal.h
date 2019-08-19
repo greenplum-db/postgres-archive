@@ -526,7 +526,7 @@ typedef struct ZSUndoSlotVisibility
 {
 	TransactionId xmin;
 	TransactionId xmax;
-	CommandId cmin;
+	CommandId	cmin;
 	uint32		speculativeToken;
 	ZSNV_Result nonvacuumable_status;
 } ZSUndoSlotVisibility;
@@ -978,10 +978,26 @@ extern void zspage_delete_page(Relation rel, Buffer buf);
 typedef struct ZedstoreTupleTableSlot
 {
 	TupleTableSlot base;
-	TransactionId xmin;
-	CommandId cmin;
 
 	char	   *data;		/* data for materialized slots */
+
+	/*
+	 * Extra visibility information. The tuple's xmin and cmin can be extracted
+	 * from here, used e.g. for triggers (XXX is that true?). There's also
+	 * a flag to indicate if a tuple is vacuumable or not, which can be useful
+	 * if you're scanning with SnapshotAny. That's currently used in index
+	 * build.
+	 */
+	ZSUndoSlotVisibility *visi_info;
+
+	/*
+	 * Normally, when a tuple is retrieved from a table, 'visi_info' points to
+	 * TID tree scan's data structures. But sometimes it's useful to keep the
+	 * information together with the slot, e.g. whe a slot is copied, so that
+	 * it doesn't depend on any data outside the slot. In that case, you can
+	 * fill in 'visi_info_buf', and set visi_info = &visi_info_buf.
+	 */
+	ZSUndoSlotVisibility visi_info_buf;
 } ZedstoreTupleTableSlot;
 
 #endif							/* ZEDSTORE_INTERNAL_H */
