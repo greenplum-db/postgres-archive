@@ -2885,6 +2885,17 @@ zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstat
 			}
 		}
 		scan->bmscan_ntuples = outtuples;
+
+		/*
+		 * Must fast forward the sampler through all offsets on this page,
+		 * until it returns InvalidOffsetNumber. Otherwise, the next
+		 * call will continue to return offsets for this block.
+		 *
+		 * FIXME: It seems bogus that the sampler isn't reset, when you call
+		 * NextSampleBlock(). Perhaps we should fix this in the TSM API?
+		 */
+		while (OffsetNumberIsValid(nextoffset))
+			nextoffset = tsm->NextSampleTuple(scanstate, blockno, maxoffset);
 	}
 
 	return scan->bmscan_ntuples > 0;
