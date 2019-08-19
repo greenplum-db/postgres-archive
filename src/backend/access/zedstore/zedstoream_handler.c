@@ -1494,14 +1494,30 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 
 	/* first time here, initialize */
 	if (fetch_proj->num_proj_atts == 0)
-		zs_initialize_proj_attributes(slot->tts_tupleDescriptor, fetch_proj);
-	else
 	{
-		/* If we had a previous fetches still open, close them first */
-		zsbt_tid_end_scan(&fetch_proj->tid_scan);
+		TupleDesc	reldesc = RelationGetDescr(rel);
+		MemoryContext oldcontext;
+
+		zs_initialize_proj_attributes(slot->tts_tupleDescriptor, fetch_proj);
+
+		oldcontext = MemoryContextSwitchTo(fetch_proj->context);
+		zsbt_tid_begin_scan(rel, tid, tid + 1,
+							snapshot,
+							&fetch_proj->tid_scan);
+		fetch_proj->tid_scan.serializable = true;
 		for (int i = 1; i < fetch_proj->num_proj_atts; i++)
-			zsbt_attr_end_scan(&fetch_proj->attr_scans[i - 1]);
+		{
+			int			attno = fetch_proj->proj_atts[i];
+
+			zsbt_attr_begin_scan(rel,  reldesc, attno,
+								 &fetch_proj->attr_scans[i - 1]);
+		}
+		MemoryContextSwitchTo(oldcontext);
+
+		zsbt_tid_begin_scan(rel, tid, tid + 1, snapshot, &fetch_proj->tid_scan);
 	}
+	else
+		zsbt_tid_reset_scan(&fetch_proj->tid_scan, tid, tid + 1, tid - 1);
 
 	/*
 	 * Initialize the slot.
@@ -1514,8 +1530,6 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 	for (int i = 0; i < slot->tts_tupleDescriptor->natts; i++)
 		slot->tts_isnull[i] = true;
 
-	zsbt_tid_begin_scan(rel, tid, tid + 1, snapshot, &fetch_proj->tid_scan);
-	fetch_proj->tid_scan.serializable = true;
 	found = zsbt_tid_scan_next(&fetch_proj->tid_scan, ForwardScanDirection) != InvalidZSTid;
 	if (found)
 	{
@@ -1527,7 +1541,6 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 			Datum		datum;
 			bool        isnull;
 
-			zsbt_attr_begin_scan(rel, slot->tts_tupleDescriptor, natt, btscan);
 			attr = btscan->attdesc;
 			if (zsbt_attr_fetch(btscan, &datum, &isnull, tid))
 			{
