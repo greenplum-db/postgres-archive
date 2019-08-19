@@ -66,8 +66,6 @@ typedef struct ZedStoreDescData
 #define	MAX_ITEMS_PER_LOGICAL_BLOCK		MaxHeapTuplesPerPage
 	int			bmscan_ntuples;
 	zstid	   *bmscan_tids;
-	Datum	  **bmscan_datums;
-	bool	  **bmscan_isnulls;
 	int			bmscan_nexttuple;
 
 	/* These fields are use for TABLESAMPLE scans */
@@ -96,6 +94,11 @@ static bool zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 								 TupleTableSlot *slot);
 static bool zs_acquire_tuplock(Relation relation, ItemPointer tid, LockTupleMode mode,
 							   LockWaitPolicy wait_policy, bool *have_tuple_lock);
+
+static bool zs_blkscan_next_block(TableScanDesc sscan,
+								  BlockNumber blkno, OffsetNumber *offsets, int noffsets,
+								  bool predicatelocks);
+static bool zs_blkscan_next_tuple(TableScanDesc sscan, TupleTableSlot *slot);
 
 static Size zs_parallelscan_estimate(Relation rel);
 static Size zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan);
@@ -1042,14 +1045,6 @@ zs_initialize_proj_attributes_extended(ZedStoreDesc scan, TupleDesc tupledesc)
 	{
 		scan->bmscan_ntuples = 0;
 		scan->bmscan_tids = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(zstid));
-
-		scan->bmscan_datums = palloc(proj_data->num_proj_atts * sizeof(Datum *));
-		scan->bmscan_isnulls = palloc(proj_data->num_proj_atts * sizeof(bool *));
-		for (int i = 0; i < proj_data->num_proj_atts; i++)
-		{
-			scan->bmscan_datums[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(Datum));
-			scan->bmscan_isnulls[i] = palloc(MAX_ITEMS_PER_LOGICAL_BLOCK * sizeof(bool));
-		}
 	}
 	MemoryContextSwitchTo(oldcontext);
 }
@@ -2452,81 +2447,7 @@ static bool
 zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
 								   BufferAccessStrategy bstrategy)
 {
-	ZedStoreDesc scan = (ZedStoreDesc) sscan;
-	Relation	rel = scan->rs_scan.rs_rd;
-	int			ntuples;
-	ZSTidTreeScan tid_scan;
-	zstid		tid;
-
-	/* TODO: for now, assume that we need all columns */
-	zs_initialize_proj_attributes_extended(scan, RelationGetDescr(rel));
-
-	ntuples = 0;
-	zsbt_tid_begin_scan(scan->rs_scan.rs_rd,
-						ZSTidFromBlkOff(blockno, 1),
-						ZSTidFromBlkOff(blockno + 1, 1),
-						scan->rs_scan.rs_snapshot,
-						&tid_scan);
-	/*
-	 * TODO: it would be good to pass the next expected TID down to zsbt_scan_next,
-	 * so that it could skip over to it more efficiently.
-	 */
-	ntuples = 0;
-	while ((tid = zsbt_tid_scan_next(&tid_scan, ForwardScanDirection)) != InvalidZSTid)
-	{
-		Assert(ZSTidGetBlockNumber(tid) == blockno);
-		scan->bmscan_tids[ntuples] = tid;
-		ntuples++;
-	}
-	zsbt_tid_end_scan(&tid_scan);
-
-	if (ntuples)
-	{
-		TupleDesc	reldesc = RelationGetDescr(scan->rs_scan.rs_rd);
-
-		for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
-		{
-			int			attno = scan->proj_data.proj_atts[i];
-			ZSAttrTreeScan attr_scan;
-			Datum		datum;
-			bool        isnull;
-			Datum	   *datums = scan->bmscan_datums[i];
-			bool	   *isnulls = scan->bmscan_isnulls[i];
-
-			zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
-								 reldesc,
-								 attno,
-								 &attr_scan);
-			for (int n = 0; n < ntuples; n++)
-			{
-				zstid       tid = scan->bmscan_tids[n];
-
-				if (zsbt_attr_fetch(&attr_scan, &datum, &isnull, tid))
-				{
-					Assert(ZSTidGetBlockNumber(tid) == blockno);
-				}
-				else
-					zsbt_fill_missing_attribute_value(reldesc, attno, &datum, &isnull);
-
-				/*
-				 * have to make a copy because we close the scan immediately.
-				 * FIXME: I think this leaks into a too-long-lived context
-				 */
-				if (!isnull)
-					datum = zs_datumCopy(datum,
-										 attr_scan.attdesc->attbyval,
-										 attr_scan.attdesc->attlen);
-				datums[n] = datum;
-				isnulls[n] = isnull;
-			}
-			zsbt_attr_end_scan(&attr_scan);
-		}
-	}
-
-	scan->bmscan_nexttuple = 0;
-	scan->bmscan_ntuples = ntuples;
-
-	return true;
+	return zs_blkscan_next_block(sscan, blockno, NULL, -1, false);
 }
 
 static bool
@@ -2534,50 +2455,14 @@ zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin
 								   double *liverows, double *deadrows,
 								   TupleTableSlot *slot)
 {
-	ZedStoreDesc scan = (ZedStoreDesc) sscan;
-	zstid		tid;
+	bool		result;
 
-	if (scan->bmscan_nexttuple >= scan->bmscan_ntuples)
-		return false;
-	/*
-	 * projection attributes were created based on Relation tuple descriptor
-	 * it better match TupleTableSlot.
-	 */
-	Assert((scan->proj_data.num_proj_atts - 1) <= slot->tts_tupleDescriptor->natts);
-	tid = scan->bmscan_tids[scan->bmscan_nexttuple];
-	for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
-	{
-		int			natt = scan->proj_data.proj_atts[i];
-		Form_pg_attribute att = TupleDescAttr(slot->tts_tupleDescriptor, natt - 1);
+	result = zs_blkscan_next_tuple(sscan, slot);
 
-		Datum		datum;
-		bool        isnull;
+	if (result)
+		(*liverows)++;
 
-		datum = (scan->bmscan_datums[i])[scan->bmscan_nexttuple];
-		isnull = (scan->bmscan_isnulls[i])[scan->bmscan_nexttuple];
-
-		/*
-		 * flatten any ZS-TOASTed values, because the rest of the system
-		 * doesn't know how to deal with them.
-		 */
-		if (!isnull && att->attlen == -1 &&
-			VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
-		{
-			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, tid, datum);
-		}
-
-		slot->tts_values[natt - 1] = datum;
-		slot->tts_isnull[natt - 1] = isnull;
-	}
-	slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
-	slot->tts_tid = ItemPointerFromZSTid(tid);
-	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
-	slot->tts_flags &= ~TTS_FLAG_EMPTY;
-
-	scan->bmscan_nexttuple++;
-	(*liverows)++;
-
-	return true;
+	return result;
 }
 
 /* ------------------------------------------------------------------------
@@ -2727,68 +2612,96 @@ zedstoream_relation_estimate_size(Relation rel, int32 *attr_widths,
  * ------------------------------------------------------------------------
  */
 
+/*
+ * zs_blkscan_next_block() and zs_blkscan_next_tuple() are used to implement
+ * bitmap scans, and sample scans. The tableam interface for those are similar
+ * enough that they can share most code.
+ */
 static bool
-zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
-								  TBMIterateResult *tbmres)
+zs_blkscan_next_block(TableScanDesc sscan,
+					  BlockNumber blkno, OffsetNumber *offsets, int noffsets,
+					  bool predicatelocks)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
-	BlockNumber tid_blkno = tbmres->blockno;
+	ZedStoreProjectData *scan_proj = &scan->proj_data;
 	int			ntuples;
-	ZSTidTreeScan tid_scan;
 	zstid		tid;
-	int			noff;
+	int			idx;
 
-	zs_initialize_proj_attributes_extended(scan, RelationGetDescr(scan->rs_scan.rs_rd));
+	if (!scan->started)
+	{
+		Relation	rel = scan->rs_scan.rs_rd;
+		TupleDesc	reldesc = RelationGetDescr(rel);
+		MemoryContext oldcontext;
+
+		zs_initialize_proj_attributes_extended(scan, reldesc);
+
+		oldcontext = MemoryContextSwitchTo(scan_proj->context);
+		zsbt_tid_begin_scan(rel,
+							ZSTidFromBlkOff(blkno, 1),
+							ZSTidFromBlkOff(blkno + 1, 1),
+							scan->rs_scan.rs_snapshot,
+							&scan_proj->tid_scan);
+		scan_proj->tid_scan.serializable = true;
+		for (int i = 1; i < scan_proj->num_proj_atts; i++)
+		{
+			int			attno = scan_proj->proj_atts[i];
+
+			zsbt_attr_begin_scan(rel,  reldesc, attno,
+								 &scan_proj->attr_scans[i - 1]);
+		}
+		MemoryContextSwitchTo(oldcontext);
+		scan->started = true;
+	}
+	else
+	{
+		zsbt_tid_reset_scan(&scan_proj->tid_scan,
+							ZSTidFromBlkOff(blkno, 1),
+							ZSTidFromBlkOff(blkno + 1, 1),
+							ZSTidFromBlkOff(blkno, 1) - 1);
+	}
 
 	/*
-	 * Our strategy for a bitmap scan is to scan the tree of each attribute,
-	 * starting at the given logical block number, and store all the datums
-	 * in the scan struct. zedstoream_scan_analyze_next_tuple() then just
-	 * needs to store the datums of the next TID in the slot.
+	 * Our strategy for a bitmap scan is to scan the TID tree in
+	 * next_block() function, starting at the given logical block number, and
+	 * store all the matching TIDs in in the scan struct. next_tuple() will
+	 * fetch the attribute data from the attribute trees.
 	 *
-	 * An alternative would be to keep the scans of each attribute open,
-	 * like in a sequential scan. I'm not sure which is better.
+	 * TODO: it might be good to pass the next expected TID down to
+	 * zsbt_tid_scan_next, so that it could skip over to the next match more
+	 * efficiently.
 	 */
 	ntuples = 0;
-	zsbt_tid_begin_scan(scan->rs_scan.rs_rd,
-						ZSTidFromBlkOff(tid_blkno, 1),
-						ZSTidFromBlkOff(tid_blkno + 1, 1),
-						scan->rs_scan.rs_snapshot,
-						&tid_scan);
-	tid_scan.serializable = true;
-	noff = 0;
-	while ((tid = zsbt_tid_scan_next(&tid_scan, ForwardScanDirection)) != InvalidZSTid)
+	idx = 0;
+	while ((tid = zsbt_tid_scan_next(&scan_proj->tid_scan, ForwardScanDirection)) != InvalidZSTid)
 	{
+		OffsetNumber off = ZSTidGetOffsetNumber(tid);
 		ItemPointerData itemptr;
 
-		Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
+		Assert(ZSTidGetBlockNumber(tid) == blkno);
 
-		ItemPointerSet(&itemptr, tid_blkno, ZSTidGetOffsetNumber(tid));
+		ItemPointerSet(&itemptr, blkno, off);
 
-		if (tbmres->ntuples != -1)
+		if (noffsets != -1)
 		{
-			while (ZSTidGetOffsetNumber(tid) > tbmres->offsets[noff] && noff < tbmres->ntuples)
+			while (off > offsets[idx] && idx < noffsets)
 			{
 				/*
 				 * Acquire predicate lock on all tuples that we scan, even those that are
 				 * not visible to the snapshot.
 				 */
-				PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot);
+				if (predicatelocks)
+					PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot);
 
-				noff++;
+				idx++;
 			}
 
-			if (noff == tbmres->ntuples)
+			if (idx == noffsets)
 				break;
 
-			if (ZSTidGetOffsetNumber(tid) < tbmres->offsets[noff])
+			if (off < offsets[idx])
 				continue;
 		}
-
-		Assert(ZSTidGetBlockNumber(tid) == tid_blkno);
-
-		scan->bmscan_tids[ntuples] = tid;
-		ntuples++;
 
 		/* FIXME: heapam acquires the predicate lock first, and then
 		 * calls CheckForSerializableConflictOut(). We do it in the
@@ -2796,43 +2709,13 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 		 * call as done in zsbt_get_last_tid() already. Does it matter?
 		 * I'm not sure.
 		 */
-		PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot);
+		if (predicatelocks)
+			PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot);
+
+		scan->bmscan_tids[ntuples] = tid;
+		ntuples++;
 	}
-	zsbt_tid_end_scan(&tid_scan);
 
-	if (ntuples)
-	{
-		TupleDesc	reldesc = RelationGetDescr(scan->rs_scan.rs_rd);
-
-		for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
-		{
-			int			attno = scan->proj_data.proj_atts[i];
-			ZSAttrTreeScan attr_scan;
-			Datum		datum;
-			bool        isnull;
-			Datum	   *datums = scan->bmscan_datums[i];
-			bool	   *isnulls = scan->bmscan_isnulls[i];
-
-			zsbt_attr_begin_scan(scan->rs_scan.rs_rd,
-								 reldesc,
-								 attno,
-								 &attr_scan);
-			for (int n = 0; n < ntuples; n++)
-			{
-				if (!zsbt_attr_fetch(&attr_scan, &datum, &isnull, scan->bmscan_tids[n]))
-					zsbt_fill_missing_attribute_value(reldesc, attno, &datum, &isnull);
-
-				/* have to make a copy because we close the scan immediately. */
-				if (!isnull)
-					datum = zs_datumCopy(datum,
-										 attr_scan.attdesc->attbyval,
-										 attr_scan.attdesc->attlen);
-				datums[n] = datum;
-				isnulls[n] = isnull;
-			}
-			zsbt_attr_end_scan(&attr_scan);
-		}
-	}
 	scan->bmscan_nexttuple = 0;
 	scan->bmscan_ntuples = ntuples;
 
@@ -2840,9 +2723,7 @@ zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
 }
 
 static bool
-zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
-								  TBMIterateResult *tbmres,
-								  TupleTableSlot *slot)
+zs_blkscan_next_tuple(TableScanDesc sscan, TupleTableSlot *slot)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
 	zstid		tid;
@@ -2857,13 +2738,14 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 	tid = scan->bmscan_tids[scan->bmscan_nexttuple];
 	for (int i = 1; i < scan->proj_data.num_proj_atts; i++)
 	{
-		int			natt = scan->proj_data.proj_atts[i];
-		Form_pg_attribute att = TupleDescAttr(slot->tts_tupleDescriptor, natt - 1);
+		ZSAttrTreeScan *attr_scan = &scan->proj_data.attr_scans[i - 1];
+		AttrNumber	attno = scan->proj_data.proj_atts[i];
+		Form_pg_attribute att = TupleDescAttr(slot->tts_tupleDescriptor, attno - 1);
 		Datum		datum;
 		bool        isnull;
 
-		datum = (scan->bmscan_datums[i])[scan->bmscan_nexttuple];
-		isnull = (scan->bmscan_isnulls[i])[scan->bmscan_nexttuple];
+		if (!zsbt_attr_fetch(attr_scan, &datum, &isnull, tid))
+			zsbt_fill_missing_attribute_value(slot->tts_tupleDescriptor, attno, &datum, &isnull);
 
 		/*
 		 * flatten any ZS-TOASTed values, because the rest of the system
@@ -2872,12 +2754,15 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 		if (!isnull && att->attlen == -1 &&
 			VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 		{
-			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, tid, datum);
+			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, attno, tid, datum);
 		}
 
-		slot->tts_values[natt - 1] = datum;
-		slot->tts_isnull[natt - 1] = isnull;
+		Assert(attno > 0);
+		slot->tts_values[attno - 1] = datum;
+		slot->tts_isnull[attno - 1] = isnull;
 	}
+
+	/* FIXME: Don't we need to set visi_info, like in a seqscan? */
 	slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
 	slot->tts_tid = ItemPointerFromZSTid(tid);
 	slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
@@ -2890,19 +2775,29 @@ zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
 	return true;
 }
 
+
+
+static bool
+zedstoream_scan_bitmap_next_block(TableScanDesc sscan,
+								  TBMIterateResult *tbmres)
+{
+	return zs_blkscan_next_block(sscan, tbmres->blockno, tbmres->offsets, tbmres->ntuples, true);
+}
+
+static bool
+zedstoream_scan_bitmap_next_tuple(TableScanDesc sscan,
+								  TBMIterateResult *tbmres,
+								  TupleTableSlot *slot)
+{
+	return zs_blkscan_next_tuple(sscan, slot);
+}
+
 static bool
 zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstate)
 {
 	ZedStoreDesc scan = (ZedStoreDesc) sscan;
-	Relation	rel = scan->rs_scan.rs_rd;
 	TsmRoutine *tsm = scanstate->tsmroutine;
-	int			ntuples;
-	ZSTidTreeScan tid_scan;
-	zstid		tid;
 	BlockNumber blockno;
-
-	/* TODO: for now, assume that we need all columns */
-	zs_initialize_proj_attributes_extended(scan, RelationGetDescr(rel));
 
 	if (scan->max_tid_to_scan == InvalidZSTid)
 	{
@@ -2910,7 +2805,7 @@ zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstat
 		 * get the max tid once and store it, used to calculate max blocks to
 		 * scan either for SYSTEM or BERNOULLI sampling.
 		 */
-		scan->max_tid_to_scan = zsbt_get_last_tid(rel);
+		scan->max_tid_to_scan = zsbt_get_last_tid(scan->rs_scan.rs_rd);
 		/*
 		 * TODO: should get lowest tid instead of starting from 0
 		 */
@@ -2939,24 +2834,7 @@ zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstat
 
 	Assert(BlockNumberIsValid(blockno));
 
-	ntuples = 0;
-	zsbt_tid_begin_scan(scan->rs_scan.rs_rd,
-						ZSTidFromBlkOff(blockno, 1),
-						ZSTidFromBlkOff(blockno + 1, 1),
-						scan->rs_scan.rs_snapshot,
-						&tid_scan);
-	while ((tid = zsbt_tid_scan_next(&tid_scan, ForwardScanDirection)) != InvalidZSTid)
-	{
-		Assert(ZSTidGetBlockNumber(tid) == blockno);
-		scan->bmscan_tids[ntuples] = tid;
-		ntuples++;
-	}
-	zsbt_tid_end_scan(&tid_scan);
-
-	scan->bmscan_nexttuple = 0;
-	scan->bmscan_ntuples = ntuples;
-
-	return true;
+	return zs_blkscan_next_block(sscan, blockno, NULL, -1, false);
 }
 
 static bool

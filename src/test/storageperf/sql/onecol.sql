@@ -53,7 +53,35 @@ SELECT SUM(i) FROM onecol;
 select extract(epoch from now()) as after
 \gset
 
-INSERT INTO results (testname, val) VALUES ('SELECT, time', :after - :before);
+INSERT INTO results (testname, val) VALUES ('SELECT, seqscan, time', :after - :before);
+
+
+--
+-- Bitmap scans
+--
+
+CREATE INDEX ON onecol (i);
+
+set enable_seqscan=off;
+set enable_indexscan=off;
+set enable_bitmapscan=on;
+
+select extract(epoch from now()) as before
+\gset
+
+SELECT SUM(i) FROM onecol where i < 400000;
+SELECT SUM(i) FROM onecol where i < 400000;
+SELECT SUM(i) FROM onecol where i < 400000;
+
+select extract(epoch from now()) as after
+\gset
+
+INSERT INTO results (testname, val) VALUES ('SELECT, bitmap scan, time', :after - :before);
+
+reset enable_seqscan;
+reset enable_indexscan;
+reset enable_bitmapscan;
+
 
 --
 -- Delete half of the rows
