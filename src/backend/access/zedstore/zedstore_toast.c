@@ -176,6 +176,39 @@ zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted)
 	return PointerGetDatum(result);
 }
 
+void
+zedstore_toast_delete(Relation rel, Form_pg_attribute attr, zstid tid, BlockNumber blkno)
+{
+	BlockNumber	nextblk;
+
+	nextblk = blkno;
+
+	while (nextblk != InvalidBlockNumber)
+	{
+		Buffer		buf;
+		Page		page;
+		ZSToastPageOpaque *opaque;
+
+		buf = ReadBuffer(rel, nextblk);
+		page = BufferGetPage(buf);
+		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+		opaque = (ZSToastPageOpaque *) PageGetSpecialPointer(page);
+
+		if (opaque->zs_tid != tid)
+		{
+			UnlockReleaseBuffer(buf);
+			break;
+		}
+
+		Assert(opaque->zs_attno == attr->attnum);
+
+		nextblk = opaque->zs_next;
+		zspage_delete_page(rel, buf);
+		UnlockReleaseBuffer(buf);
+	}
+}
+
 static void
 zstoast_wal_log_newpage(Buffer prevbuf, Buffer buf, zstid tid, AttrNumber attno,
 						int offset, int32 total_size)

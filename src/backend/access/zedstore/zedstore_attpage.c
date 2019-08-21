@@ -329,7 +329,7 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 					nexttid = MaxPlusOneZSTid;
 			}
 			tids_arr[num_to_remove++] = MaxPlusOneZSTid;
-			newitem = zsbt_attr_remove_from_item(attr, item, tids_arr);
+			newitem = zsbt_attr_remove_from_item(rel, attr, item, tids_arr);
 			pfree(tids_arr);
 			if (newitem)
 				newitems = lappend(newitems, newitem);

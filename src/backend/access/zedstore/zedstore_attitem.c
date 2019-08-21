@@ -426,7 +426,7 @@ zsbt_attr_datasize(int attlen, char *src)
  * Returns NULL, if all elements were removed.
  */
 ZSExplodedItem *
-zsbt_attr_remove_from_item(Form_pg_attribute attr,
+zsbt_attr_remove_from_item(Relation rel, Form_pg_attribute attr,
 						   ZSAttributeArrayItem *olditem,
 						   zstid *removetids)
 {
@@ -464,6 +464,15 @@ zsbt_attr_remove_from_item(Form_pg_attribute attr,
 
 		if (origitem->tids[i] == *removetids)
 		{
+			unsigned char *p = (unsigned char *) src;
+			BlockNumber toast_blkno;
+
+			/* remove toast pages if any */
+			if (p[0] == 0xFF && p[1] == 0xFF) {
+				memcpy(&toast_blkno, p + 2, sizeof(this_datasz) - 2);
+				zedstore_toast_delete(rel, attr, origitem->tids[i], toast_blkno);
+			}
+
 			/* leave this one out */
 			removetids++;
 		}
