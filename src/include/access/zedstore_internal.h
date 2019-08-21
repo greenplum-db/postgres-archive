@@ -865,7 +865,7 @@ extern List *zsbt_attr_create_items(Form_pg_attribute att,
 									Datum *datums, bool *isnulls, zstid *tids, int nelements);
 extern void zsbt_split_item(Form_pg_attribute attr, ZSExplodedItem *origitem, zstid first_right_tid,
 					 ZSExplodedItem **leftitem_p, ZSExplodedItem **rightitem_p);
-extern ZSExplodedItem *zsbt_attr_remove_from_item(Form_pg_attribute attr,
+extern ZSExplodedItem *zsbt_attr_remove_from_item(Relation rel, Form_pg_attribute attr,
 												  ZSAttributeArrayItem *olditem,
 												  zstid *removetids);
 extern List *zsbt_attr_recompress_items(Form_pg_attribute attr, List *olditems);
@@ -968,6 +968,7 @@ extern bool zs_SatisfiesVisibility(ZSTidTreeScan *scan, ZSUndoRecPtr item_undopt
 /* prototypes for functions in zedstore_toast.c */
 extern Datum zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid);
 extern Datum zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted);
+extern void zedstore_toast_delete(Relation rel, Form_pg_attribute attr, zstid tid, BlockNumber blkno);
 
 /* prototypes for functions in zedstore_freepagemap.c */
 extern Buffer zspage_getnewbuf(Relation rel, Buffer metabuf);

@@ -68,6 +68,11 @@ insert into t_zedtoast select i, repeat('x', 10000) from generate_series(1, 10) 
 
 select c1, length(t) from t_zedtoast;
 
+delete from t_zedtoast;
+select count(*) > 0 as has_toast_pages from pg_zs_toast_pages('t_zedtoast');
+vacuum t_zedtoast;
+select count(*) > 0 as has_toast_pages from pg_zs_toast_pages('t_zedtoast');
+
 --
 -- Test NULL values
 --
