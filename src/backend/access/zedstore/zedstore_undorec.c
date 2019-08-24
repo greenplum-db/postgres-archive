@@ -598,15 +598,15 @@ zsundo_clear_speculative_token(Relation rel, ZSUndoRecPtr undoptr)
 void
 XLogRegisterUndoOp(uint8 block_id, zs_pending_undo_op *undo_op)
 {
-	zs_wal_undo_op xlrec;
+	zs_wal_undo_op *xlrec = &undo_op->waldata;
 
-	xlrec.undoptr = undo_op->reservation.undorecptr;
-	xlrec.length = undo_op->reservation.length;
-	xlrec.is_update = undo_op->is_update;
+	xlrec->undoptr = undo_op->reservation.undorecptr;
+	xlrec->length = undo_op->reservation.length;
+	xlrec->is_update = undo_op->is_update;
 
 	XLogRegisterBuffer(block_id, undo_op->reservation.undobuf,
 					   REGBUF_STANDARD);
-	XLogRegisterBufData(block_id, (char *) &xlrec, SizeOfZSWalUndoOp);
+	XLogRegisterBufData(block_id, (char *) xlrec, SizeOfZSWalUndoOp);
 	XLogRegisterBufData(block_id, (char *) undo_op->payload, undo_op->reservation.length);
 }
 
@@ -634,6 +634,7 @@ XLogRedoUndoOp(XLogReaderState *record, uint8 block_id)
 		op.reservation.undorecptr = xlrec.undoptr;
 		op.reservation.length = xlrec.length;
 		op.reservation.ptr = ((char *) BufferGetPage(buffer)) + xlrec.undoptr.offset;
+		op.is_update = xlrec.is_update;
 
 		START_CRIT_SECTION();
 		zsundo_finish_pending_op(&op, p);

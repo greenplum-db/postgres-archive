@@ -430,7 +430,7 @@ zsundo_discard(Relation rel, ZSUndoRecPtr oldest_undorecptr)
 			else
 				metaopaque->zs_undo_head = nextblk;
 
-			/* Add the page to the free page list */
+			/* Add the discarded page to the free page list */
 			nextfreeblkno = metaopaque->zs_fpm_head;
 			zspage_mark_page_deleted(page, nextfreeblkno);
 			metaopaque->zs_fpm_head = blk;
@@ -446,6 +446,7 @@ zsundo_discard(Relation rel, ZSUndoRecPtr oldest_undorecptr)
 			XLogRecPtr recptr;
 
 			xlrec.oldest_undorecptr = oldest_undorecptr;
+			xlrec.oldest_undopage = nextblk;
 
 			XLogBeginInsert();
 			XLogRegisterData((char *) &xlrec, SizeOfZSWalUndoDiscard);
@@ -479,8 +480,21 @@ zsundo_discard_redo(XLogReaderState *record)
 	BlockNumber nextblk = xlrec->oldest_undopage;
 	Buffer		metabuf;
 	bool		discard_this_page;
+	BlockNumber discardedblkno = InvalidBlockNumber;
+	BlockNumber	nextfreeblkno = InvalidBlockNumber;
 
 	discard_this_page = XLogRecHasBlockRef(record, 1);
+	if (discard_this_page)
+	{
+		Size		datalen;
+		char	   *data;
+
+		XLogRecGetBlockTag(record, 1, NULL, NULL, &discardedblkno);
+		data = XLogRecGetBlockData(record, 1, &datalen);
+		Assert(datalen == sizeof(BlockNumber));
+
+		memcpy(&nextfreeblkno, data, sizeof(BlockNumber));
+	}
 
 	if (XLogReadBufferForRedo(record, 0, &metabuf) == BLK_NEEDS_REDO)
 	{
@@ -500,6 +514,9 @@ zsundo_discard_redo(XLogReaderState *record)
 			}
 			else
 				metaopaque->zs_undo_head = nextblk;
+
+			/* Add the discarded page to the free page list */
+			metaopaque->zs_fpm_head = discardedblkno;
 		}
 
 		PageSetLSN(metapage, lsn);
@@ -508,16 +525,8 @@ zsundo_discard_redo(XLogReaderState *record)
 
 	if (discard_this_page)
 	{
-		Size		datalen;
-		char	   *data;
-		BlockNumber	nextfreeblkno;
 		Buffer		discardedbuf;
 		Page		discardedpage;
-
-		data = XLogRecGetBlockData(record, 1, &datalen);
-		Assert(datalen == sizeof(BlockNumber));
-
-		memcpy(&nextfreeblkno, data, sizeof(BlockNumber));
 
 		discardedbuf = XLogInitBufferForRedo(record, 1);
 		discardedpage = BufferGetPage(discardedbuf);

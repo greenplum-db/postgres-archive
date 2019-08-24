@@ -82,7 +82,7 @@ typedef struct wal_zedstore_undo_discard
 	BlockNumber	oldest_undopage;
 } wal_zedstore_undo_discard;
 
-#define SizeOfZSWalUndoDiscard (offsetof(wal_zedstore_undo_discard, oldest_undorecptr) + sizeof(ZSUndoRecPtr))
+#define SizeOfZSWalUndoDiscard (offsetof(wal_zedstore_undo_discard, oldest_undopage) + sizeof(BlockNumber))
 
 /*
  * WAL record for creating a new, empty, root page for an attribute.

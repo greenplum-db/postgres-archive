@@ -126,25 +126,6 @@ typedef struct
 } ZSUndoRec_TupleLock;
 
 /*
- * zs_pending_undo_op encapsulates the insertion or modification of an UNDO
- * record. The zsundo_create_* functions don't insert UNDO records directly,
- * because the callers are not in a critical section yet, and may still need
- * to abort. For example, to inserting a new TID to the TID tree, we first
- * construct the UNDO record for the insertion, and then lock the correct
- * TID tree page to insert to. But if e.g. we need to split the TID page,
- * we might still have to error out.
- */
-struct zs_pending_undo_op
-{
-	zs_undo_reservation	reservation;
-
-	bool		is_update;
-	/* more data follows (defined as uint64, to force alignment) */
-	uint64		payload[FLEXIBLE_ARRAY_MEMBER];
-};
-typedef struct zs_pending_undo_op  zs_pending_undo_op;
-
-/*
  * These are used in WAL records, to represent insertion or modification
  * of an UNDO record.
  *
@@ -158,11 +139,34 @@ typedef struct
 	ZSUndoRecPtr undoptr;
 	uint16		length;
 	bool		is_update;
-
-	char		payload[FLEXIBLE_ARRAY_MEMBER];
 } zs_wal_undo_op;
 
-#define SizeOfZSWalUndoOp	offsetof(zs_wal_undo_op, payload)
+#define SizeOfZSWalUndoOp	(offsetof(zs_wal_undo_op, is_update) + sizeof(bool))
+
+/*
+ * zs_pending_undo_op encapsulates the insertion or modification of an UNDO
+ * record. The zsundo_create_* functions don't insert UNDO records directly,
+ * because the callers are not in a critical section yet, and may still need
+ * to abort. For example, to inserting a new TID to the TID tree, we first
+ * construct the UNDO record for the insertion, and then lock the correct
+ * TID tree page to insert to. But if e.g. we need to split the TID page,
+ * we might still have to error out.
+ */
+struct zs_pending_undo_op
+{
+	zs_undo_reservation	reservation;
+	bool		is_update;
+
+	/*
+	 * Payload to include in the WAL record. All the data here is redundant with
+	 * the other fields in this struct, but we keep this copy here, so
+	 * that we can register it as data in the WAL record.
+	 */
+	zs_wal_undo_op waldata;
+
+	char		payload[FLEXIBLE_ARRAY_MEMBER];
+};
+typedef struct zs_pending_undo_op  zs_pending_undo_op;
 
 /* prototypes for functions in zedstore_undorec.c */
 extern struct ZSUndoRec *zsundo_fetch_record(Relation rel, ZSUndoRecPtr undorecptr);
