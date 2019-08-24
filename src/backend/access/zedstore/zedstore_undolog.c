@@ -117,7 +117,7 @@ retry_lock_tail:
 		LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
 
 		/* new page */
-		newbuf = zspage_getnewbuf(rel, metabuf);
+		newbuf = zspage_getnewbuf(rel);
 
 		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 		if (metaopaque->zs_undo_tail != tail_blk)
@@ -133,7 +133,7 @@ retry_lock_tail:
 			 * we don't need the new page, after all. (Or maybe we do, if the new
 			 * tail block is already full, but we're not smart about it.)
 			 */
-			zspage_delete_page(rel, newbuf);
+			zspage_delete_page(rel, newbuf, metabuf);
 			goto retry_lock_tail;
 		}
 

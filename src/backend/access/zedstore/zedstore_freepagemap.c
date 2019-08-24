@@ -45,18 +45,28 @@
 
 #include <math.h>
 
+#include "access/xlogutils.h"
 #include "access/zedstore_internal.h"
+#include "access/zedstore_wal.h"
 #include "miscadmin.h"
 #include "storage/bufpage.h"
 #include "storage/lmgr.h"
 #include "utils/rel.h"
 
+/*
+ * Deleted pages are initialized as having this structure, in the
+ * "special area".
+ *
+ * zs_next points to the next free block in the FPM chain.
+ */
 typedef struct ZSFreePageOpaque
 {
 	BlockNumber	zs_next;
 	uint16		padding;
 	uint16		zs_page_id;		/* ZS_FREE_PAGE_ID */
 } ZSFreePageOpaque;
+
+static Buffer zspage_extendrel_newbuf(Relation rel);
 
 /*
  * zspage_is_recyclable()
@@ -98,24 +108,31 @@ zspage_is_unused(Buffer buf)
  * Allocate a new page.
  *
  * The page is exclusive-locked, but not initialized.
+ *
+ * The head of the FPM chain is kept in the metapage, and thus this
+ * function will acquire the lock on the metapage. The caller must
+ * not be holding it, or we will self-deadlock!
+ *
+ * Unlinking the page from the FPM is WAL-logged. Once this function
+ * returns, the caller must use the page, and WAL-log its initialization,
+ * or give it back by calling zspage_delete_page().
+ *
+ * NOTE: There is a gap between this function unlinking the page from the
+ * FPM, and the caller initializing the page and linking it to somewhere
+ * else. If we crash in between, the page will be permanently leaked.
+ * That's unfortunate, but hopefully won't happen too often.
  */
 Buffer
-zspage_getnewbuf(Relation rel, Buffer metabuf)
+zspage_getnewbuf(Relation rel)
 {
-	bool		release_metabuf;
 	Buffer		buf;
 	BlockNumber blk;
+	Buffer		metabuf;
 	Page		metapage;
 	ZSMetaPageOpaque *metaopaque;
 
-	if (metabuf == InvalidBuffer)
-	{
-		metabuf = ReadBuffer(rel, ZS_META_BLK);
-		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
-		release_metabuf = true;
-	}
-	else
-		release_metabuf = false;
+	metabuf = ReadBuffer(rel, ZS_META_BLK);
+	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
 	metapage = BufferGetPage(metabuf);
 	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
@@ -137,6 +154,7 @@ zspage_getnewbuf(Relation rel, Buffer metabuf)
 	{
 		ZSFreePageOpaque *opaque;
 		Page		page;
+		BlockNumber next_free_blkno;
 
 		buf = ReadBuffer(rel, blk);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
@@ -149,12 +167,59 @@ zspage_getnewbuf(Relation rel, Buffer metabuf)
 		}
 		page = BufferGetPage(buf);
 		opaque = (ZSFreePageOpaque *) PageGetSpecialPointer(page);
-		metaopaque->zs_fpm_head = opaque->zs_next;
+		next_free_blkno = opaque->zs_next;
+
+		metaopaque->zs_fpm_head = next_free_blkno;
+
+		if (RelationNeedsWAL(rel))
+		{
+			wal_zedstore_fpm_reuse_page xlrec;
+			XLogRecPtr recptr;
+
+			xlrec.next_free_blkno = next_free_blkno;
+
+			XLogBeginInsert();
+			XLogRegisterData((char *) &xlrec, SizeOfZSWalFpmReusePage);
+			XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+
+			/*
+			 * NOTE: We don't WAL-log the reused page here. It's up to the
+			 * caller to WAL-log its initialization. If we crash between here
+			 * and the initialization, the page is leaked. That's unfortunate,
+			 * but it should be rare enough that we can live with it.
+			 */
+
+			recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_FPM_REUSE_PAGE);
+
+			PageSetLSN(BufferGetPage(metabuf), recptr);
+		}
 	}
 
-	if (release_metabuf)
-		UnlockReleaseBuffer(metabuf);
+	UnlockReleaseBuffer(metabuf);
 	return buf;
+}
+
+void
+zspage_reuse_page_redo(XLogReaderState *record)
+{
+	XLogRecPtr	lsn = record->EndRecPtr;
+	wal_zedstore_fpm_reuse_page *xlrec = (wal_zedstore_fpm_reuse_page *) XLogRecGetData(record);
+	Buffer		metabuf;
+
+	if (XLogReadBufferForRedo(record, 0, &metabuf) == BLK_NEEDS_REDO)
+	{
+		Page		metapage = BufferGetPage(metabuf);
+		ZSMetaPageOpaque *metaopaque;
+
+		metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
+		metaopaque->zs_fpm_head = xlrec->next_free_blkno;
+
+		PageSetLSN(metapage, lsn);
+		MarkBufferDirty(metabuf);
+	}
+
+	if (BufferIsValid(metabuf))
+		UnlockReleaseBuffer(metabuf);
 }
 
 /*
@@ -162,7 +227,7 @@ zspage_getnewbuf(Relation rel, Buffer metabuf)
  *
  * Returns the new page, exclusive-locked.
  */
-Buffer
+static Buffer
 zspage_extendrel_newbuf(Relation rel)
 {
 	Buffer		buf;
@@ -198,6 +263,80 @@ zspage_extendrel_newbuf(Relation rel)
 	return buf;
 }
 
+/*
+ * Explictly mark a page as deleted and recyclable, and add it to the FPM.
+ *
+ * The caller must hold an exclusive-lock on the page.
+ *
+ * This function needs to modify the metapage, to link the page to the
+ * FPM chain. If the caller is already holding a lock on the metapage,
+ * pass it in the 'metabuf' argument.
+ *
+ * NOTE: The deletion of the page is WAL-logged. There is a gap between
+ * the caller making the page obsolete, and calling this function, and
+ * if we crash in between, the page will be leaked. That's unfortunate,
+ * but like in zspage_getnewbuf(), we mostly just live with it. However,
+ * you can use zspage_mark_page_deleted() to avoid it.
+ */
+void
+zspage_delete_page(Relation rel, Buffer buf, Buffer metabuf)
+{
+	bool		release_metabuf;
+	BlockNumber blk = BufferGetBlockNumber(buf);
+	Page		metapage;
+	ZSMetaPageOpaque *metaopaque;
+	Page		page;
+	BlockNumber next_free_blkno;
+
+	if (metabuf == InvalidBuffer)
+	{
+		metabuf = ReadBuffer(rel, ZS_META_BLK);
+		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+		release_metabuf = true;
+	}
+	else
+		release_metabuf = false;
+
+	metapage = BufferGetPage(metabuf);
+	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
+
+	page = BufferGetPage(buf);
+	next_free_blkno = metaopaque->zs_fpm_head;
+	zspage_mark_page_deleted(page, next_free_blkno);
+	metaopaque->zs_fpm_head = blk;
+
+	MarkBufferDirty(metabuf);
+	MarkBufferDirty(buf);
+
+	if (RelationNeedsWAL(rel))
+	{
+		wal_zedstore_fpm_delete_page xlrec;
+		XLogRecPtr recptr;
+
+		xlrec.next_free_blkno = next_free_blkno;
+
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, SizeOfZSWalFpmDeletePage);
+		XLogRegisterBuffer(0, metabuf, REGBUF_STANDARD);
+		XLogRegisterBuffer(1, buf, REGBUF_WILL_INIT | REGBUF_STANDARD);
+
+		recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_FPM_DELETE_PAGE);
+
+		PageSetLSN(metapage, recptr);
+		PageSetLSN(page, recptr);
+	}
+
+	if (release_metabuf)
+		UnlockReleaseBuffer(metabuf);
+}
+
+/*
+ * Initialize a page as deleted.
+ *
+ * This is a low-level function, used by zspage_delete_page(), but it can
+ * also be used by callers that are willing to deal with managing the FPM
+ * chain and WAL-logging by themselves.
+ */
 void
 zspage_mark_page_deleted(Page page, BlockNumber next_free_blk)
 {
@@ -207,36 +346,40 @@ zspage_mark_page_deleted(Page page, BlockNumber next_free_blk)
 	opaque = (ZSFreePageOpaque *) PageGetSpecialPointer(page);
 	opaque->zs_page_id = ZS_FREE_PAGE_ID;
 	opaque->zs_next = next_free_blk;
-
 }
 
-/*
- * Explictly mark a page as deleted and recyclable, and add it to the FPM.
- *
- * The caller must hold an exclusive-lock on the page.
- */
 void
-zspage_delete_page(Relation rel, Buffer buf)
+zspage_delete_page_redo(XLogReaderState *record)
 {
-	BlockNumber blk = BufferGetBlockNumber(buf);
+	XLogRecPtr	lsn = record->EndRecPtr;
+	wal_zedstore_fpm_delete_page *xlrec = (wal_zedstore_fpm_delete_page *) XLogRecGetData(record);
 	Buffer		metabuf;
-	Page		metapage;
-	ZSMetaPageOpaque *metaopaque;
-	Page		page;
+	Buffer		deletedbuf;
+	Page		deletedpg;
+	BlockNumber deletedblkno;
 
-	metabuf = ReadBuffer(rel, ZS_META_BLK);
-	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
-	metapage = BufferGetPage(metabuf);
-	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
+	deletedbuf = XLogInitBufferForRedo(record, 1);
+	deletedpg = BufferGetPage(deletedbuf);
+	deletedblkno = BufferGetBlockNumber(deletedbuf);
 
-	page = BufferGetPage(buf);
-	zspage_mark_page_deleted(page, metaopaque->zs_fpm_head);
-	metaopaque->zs_fpm_head = blk;
+	zspage_mark_page_deleted(deletedpg, xlrec->next_free_blkno);
 
-	MarkBufferDirty(metabuf);
-	MarkBufferDirty(buf);
+	if (XLogReadBufferForRedo(record, 0, &metabuf) == BLK_NEEDS_REDO)
+	{
+		Page		metapage = BufferGetPage(metabuf);
+		ZSMetaPageOpaque *metaopaque;
 
-	/* FIXME: WAL-logging */
-	
-	UnlockReleaseBuffer(metabuf);
+		metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
+		metaopaque->zs_fpm_head = deletedblkno;
+
+		PageSetLSN(metapage, lsn);
+		MarkBufferDirty(metabuf);
+	}
+
+	PageSetLSN(deletedpg, lsn);
+	MarkBufferDirty(deletedbuf);
+
+	if (BufferIsValid(metabuf))
+		UnlockReleaseBuffer(metabuf);
+	UnlockReleaseBuffer(deletedbuf);
 }

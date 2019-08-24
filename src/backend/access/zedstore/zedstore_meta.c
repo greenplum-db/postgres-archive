@@ -424,34 +424,57 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 			Page		rootpage;
 			ZSBtreePageOpaque *opaque;
 
+			/*
+			 * Release the lock on the metapage while we find a new block, because
+			 * that could take a while. (And accessing the Free Page Map might lock
+			 * the metapage, too, causing self-deadlock.)
+			 */
+			LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
+
 			/* TODO: release lock on metapage while we do I/O */
-			rootbuf = zspage_getnewbuf(rel, metabuf);
-			rootblk = BufferGetBlockNumber(rootbuf);
+			rootbuf = zspage_getnewbuf(rel);
 
-			START_CRIT_SECTION();
+			LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+			metapg = (ZSMetaPage *) PageGetContents(page);
+			rootblk = metapg->tree_root_dir[attno].root;
+			if (rootblk != InvalidBlockNumber)
+			{
+				/*
+				 * Another backend created the root page, while we were busy
+				 * finding a free page. We won't need the page we allocated,
+				 * after all.
+				 */
+				zspage_delete_page(rel, rootbuf, metabuf);
+				rootbuf = InvalidBuffer;
+			}
+			else
+			{
+				rootblk = BufferGetBlockNumber(rootbuf);
 
-			metapg->tree_root_dir[attno].root = rootblk;
+				START_CRIT_SECTION();
 
-			/* initialize the page to look like a root leaf */
-			rootpage = BufferGetPage(rootbuf);
-			PageInit(rootpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
-			opaque = ZSBtreePageGetOpaque(rootpage);
-			opaque->zs_attno = attno;
-			opaque->zs_next = InvalidBlockNumber;
-			opaque->zs_lokey = MinZSTid;
-			opaque->zs_hikey = MaxPlusOneZSTid;
-			opaque->zs_level = 0;
-			opaque->zs_flags = ZSBT_ROOT;
-			opaque->zs_page_id = ZS_BTREE_PAGE_ID;
+				metapg->tree_root_dir[attno].root = rootblk;
 
-			MarkBufferDirty(rootbuf);
-			MarkBufferDirty(metabuf);
+				/* initialize the page to look like a root leaf */
+				rootpage = BufferGetPage(rootbuf);
+				PageInit(rootpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
+				opaque = ZSBtreePageGetOpaque(rootpage);
+				opaque->zs_attno = attno;
+				opaque->zs_next = InvalidBlockNumber;
+				opaque->zs_lokey = MinZSTid;
+				opaque->zs_hikey = MaxPlusOneZSTid;
+				opaque->zs_level = 0;
+				opaque->zs_flags = ZSBT_ROOT;
+				opaque->zs_page_id = ZS_BTREE_PAGE_ID;
 
-			if (RelationNeedsWAL(rel))
-				zsmeta_wal_log_new_att_root(metabuf, rootbuf, attno);
+				MarkBufferDirty(rootbuf);
+				MarkBufferDirty(metabuf);
 
-			END_CRIT_SECTION();
+				if (RelationNeedsWAL(rel))
+					zsmeta_wal_log_new_att_root(metabuf, rootbuf, attno);
 
+				END_CRIT_SECTION();
+			}
 			UnlockReleaseBuffer(rootbuf);
 		}
 		UnlockReleaseBuffer(metabuf);

@@ -49,6 +49,12 @@ zedstore_redo(XLogReaderState *record)
 		case WAL_ZEDSTORE_TOAST_NEWPAGE:
 			zstoast_newpage_redo(record);
 			break;
+		case WAL_ZEDSTORE_FPM_DELETE_PAGE:
+			zspage_delete_page_redo(record);
+			break;
+		case WAL_ZEDSTORE_FPM_REUSE_PAGE:
+			zspage_reuse_page_redo(record);
+			break;
 		default:
 			elog(PANIC, "zedstore_redo: unknown op code %u", info);
 	}

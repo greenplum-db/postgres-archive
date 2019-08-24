@@ -1776,7 +1776,7 @@ zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items, zs_pending
 
 		Assert(stack->next->buf == InvalidBuffer);
 
-		nextbuf = zspage_getnewbuf(rel, InvalidBuffer);
+		nextbuf = zspage_getnewbuf(rel);
 		stack->next->buf = nextbuf;
 
 		thisopaque->zs_next = BufferGetBlockNumber(nextbuf);

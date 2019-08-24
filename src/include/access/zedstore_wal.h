@@ -25,6 +25,8 @@
 #define WAL_ZEDSTORE_BTREE_REPLACE_LEAF_ITEM	0x50
 #define WAL_ZEDSTORE_BTREE_REWRITE_PAGES	0x60
 #define WAL_ZEDSTORE_TOAST_NEWPAGE			0x70
+#define WAL_ZEDSTORE_FPM_DELETE_PAGE		0x80
+#define WAL_ZEDSTORE_FPM_REUSE_PAGE			0x90
 
 /* in zedstore_wal.c */
 extern void zedstore_redo(XLogReaderState *record);
@@ -142,9 +144,25 @@ typedef struct wal_zedstore_toast_newpage
 
 #define SizeOfZSWalToastNewPage (offsetof(wal_zedstore_toast_newpage, offset) + sizeof(int32))
 
+typedef struct wal_zedstore_fpm_delete_page
+{
+	BlockNumber	next_free_blkno;
+} wal_zedstore_fpm_delete_page;
+
+#define SizeOfZSWalFpmDeletePage (offsetof(wal_zedstore_fpm_delete_page, next_free_blkno) + sizeof(BlockNumber))
+
+typedef struct wal_zedstore_fpm_reuse_page
+{
+	BlockNumber	next_free_blkno;
+} wal_zedstore_fpm_reuse_page;
+
+#define SizeOfZSWalFpmReusePage (offsetof(wal_zedstore_fpm_reuse_page, next_free_blkno) + sizeof(BlockNumber))
+
 extern void zsbt_leaf_items_redo(XLogReaderState *record, bool replace);
 extern void zsmeta_new_btree_root_redo(XLogReaderState *record);
 extern void zsbt_rewrite_pages_redo(XLogReaderState *record);
 extern void zstoast_newpage_redo(XLogReaderState *record);
+extern void zspage_delete_page_redo(XLogReaderState *record);
+extern void zspage_reuse_page_redo(XLogReaderState *record);
 
 #endif							/* ZEDSTORE_WAL_H */

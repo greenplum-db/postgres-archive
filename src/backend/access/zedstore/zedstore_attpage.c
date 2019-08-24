@@ -790,7 +790,7 @@ zsbt_attr_repack_replace(Relation rel, AttrNumber attno, Buffer oldbuf, List *it
 
 		Assert(stack->next->buf == InvalidBuffer);
 
-		nextbuf = zspage_getnewbuf(rel, InvalidBuffer);
+		nextbuf = zspage_getnewbuf(rel);
 		stack->next->buf = nextbuf;
 		Assert (BufferGetBlockNumber(nextbuf) != orignextblk);
 

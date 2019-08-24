@@ -315,11 +315,12 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level, List *downlinks)
 	ListCell   *lc;
 	int			i;
 
+	newrootbuf = zspage_getnewbuf(rel);
+
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
 	/* allocate a new root page */
-	newrootbuf = zspage_getnewbuf(rel, metabuf);
 	newrootpage = palloc(BLCKSZ);
 	PageInit(newrootpage, BLCKSZ, sizeof(ZSBtreePageOpaque));
 	newrootopaque = ZSBtreePageGetOpaque(newrootpage);
@@ -530,7 +531,7 @@ zsbt_split_internal_page(Relation rel, AttrNumber attno, Buffer origbuf,
 			BlockNumber blkno;
 			ZSBtreeInternalPageItem *downlink;
 
-			buf = zspage_getnewbuf(rel, InvalidBuffer);
+			buf = zspage_getnewbuf(rel);
 			blkno = BufferGetBlockNumber(buf);
 			page = palloc(BLCKSZ);
 			PageInit(page, BLCKSZ, sizeof(ZSBtreePageOpaque));
@@ -833,6 +834,12 @@ zs_apply_split_changes(Relation rel, zs_split_stack *stack, zs_pending_undo_op *
 
 	END_CRIT_SECTION();
 
+	if (undo_op)
+	{
+		UnlockReleaseBuffer(undo_op->reservation.undobuf);
+		pfree(undo_op);
+	}
+
 	stack = head;
 	while (stack)
 	{
@@ -840,19 +847,13 @@ zs_apply_split_changes(Relation rel, zs_split_stack *stack, zs_pending_undo_op *
 
 		/* add this page to the Free Page Map for recycling */
 		if (stack->recycle)
-			zspage_delete_page(rel, stack->buf);
+			zspage_delete_page(rel, stack->buf, InvalidBuffer);
 
 		UnlockReleaseBuffer(stack->buf);
 
 		next = stack->next;
 		pfree(stack);
 		stack = next;
-	}
-
-	if (undo_op)
-	{
-		UnlockReleaseBuffer(undo_op->reservation.undobuf);
-		pfree(undo_op);
 	}
 }
 
