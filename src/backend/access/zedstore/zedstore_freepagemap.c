@@ -139,18 +139,12 @@ zspage_getnewbuf(Relation rel)
 
 	/* Get a block from the FPM. */
 	blk = metaopaque->zs_fpm_head;
-	if (blk == 0)
+	if (blk == ZS_META_BLK)
 	{
 		/* metapage, not expected */
 		elog(ERROR, "could not find valid page in FPM");
 	}
-	if (blk == InvalidBlockNumber)
-	{
-		/* No free pages. Have to extend the relation. */
-		buf = zspage_extendrel_newbuf(rel);
-		blk = BufferGetBlockNumber(buf);
-	}
-	else
+	if (blk != InvalidBlockNumber)
 	{
 		ZSFreePageOpaque *opaque;
 		Page		page;
@@ -193,9 +187,16 @@ zspage_getnewbuf(Relation rel)
 
 			PageSetLSN(BufferGetPage(metabuf), recptr);
 		}
+		UnlockReleaseBuffer(metabuf);
+	}
+	else
+	{
+		/* No free pages. Have to extend the relation. */
+		UnlockReleaseBuffer(metabuf);
+		buf = zspage_extendrel_newbuf(rel);
+		blk = BufferGetBlockNumber(buf);
 	}
 
-	UnlockReleaseBuffer(metabuf);
 	return buf;
 }
 
