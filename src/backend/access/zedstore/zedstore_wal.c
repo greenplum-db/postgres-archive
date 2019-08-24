@@ -14,6 +14,8 @@
 #include "access/bufmask.h"
 #include "access/xlogreader.h"
 #include "access/zedstore_internal.h"
+#include "access/zedstore_undolog.h"
+#include "access/zedstore_undorec.h"
 #include "access/zedstore_wal.h"
 
 void
@@ -56,8 +58,41 @@ void
 zedstore_mask(char *pagedata, BlockNumber blkno)
 {
 	Page		page = (Page) pagedata;
+	uint16		page_id;
 
 	mask_page_lsn_and_checksum(page);
+
+	page_id = *(uint16 *) (pagedata + BLCKSZ - sizeof(uint16));
+
+	if (blkno == ZS_META_BLK)
+	{
+	}
+	else if (page_id == ZS_UNDO_PAGE_ID && PageGetSpecialSize(page) == sizeof(ZSUndoPageOpaque))
+	{
+		/*
+		 * On INSERT undo records, mask out speculative insertion tokens.
+		 */
+		char	   *endptr = pagedata + ((PageHeader) pagedata)->pd_lower;
+		char	   *ptr;
+
+		ptr = pagedata + SizeOfPageHeaderData;
+
+		while (ptr < endptr)
+		{
+			ZSUndoRec *undorec = (ZSUndoRec *) ptr;
+
+			/* minimal validation */
+			if (undorec->size < sizeof(ZSUndoRec) || ptr + undorec->size > endptr)
+				break;
+
+			if (undorec->type == ZSUNDO_TYPE_INSERT)
+			{
+				((ZSUndoRec_Insert *) undorec)->speculative_token = MASK_MARKER;
+			}
+
+			ptr += undorec->size;
+		}
+	}
 
 	return;
 }
