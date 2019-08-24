@@ -4,7 +4,7 @@ CREATE /* UNLOGGED */ TABLE onecol (i int4);
 
 -- Populate the table with a bunch of INSERT ... SELECT statements.
 -- Measure how long it takes, and the resulting table size.
-select extract(epoch from now()) as before
+select pg_current_wal_insert_lsn() as wal_before, extract(epoch from now()) as time_before
 \gset
 
 INSERT INTO onecol SELECT generate_series(1, 100000);
@@ -13,11 +13,14 @@ INSERT INTO onecol SELECT generate_series(1, 100000);
 INSERT INTO onecol SELECT generate_series(1, 100000);
 INSERT INTO onecol SELECT generate_series(1, 100000);
 
-select extract(epoch from now()) as after
+select pg_current_wal_insert_lsn() as wal_after, extract(epoch from now()) as time_after
 \gset
 
-INSERT INTO results (testname, val) VALUES ('onecol, insert-select, size', pg_total_relation_size('onecol'));
-INSERT INTO results (testname, val) VALUES ('onecol, insert-select, time', :after - :before);
+INSERT INTO results (testname, size, walsize, time)
+  VALUES ('onecol, insert-select',
+          pg_total_relation_size('onecol'),
+	  :'wal_after'::pg_lsn - :'wal_before',
+	  :time_after - :time_before);
 
 COPY onecol TO '/tmp/onecol.data'; -- dump the data, for COPY test below.
 
@@ -26,16 +29,19 @@ COPY onecol TO '/tmp/onecol.data'; -- dump the data, for COPY test below.
 --
 TRUNCATE onecol;
 
-select extract(epoch from now()) as before
+select pg_current_wal_insert_lsn() as wal_before, extract(epoch from now()) as time_before
 \gset
 
 COPY onecol FROM '/tmp/onecol.data';
 
-select extract(epoch from now()) as after
+select pg_current_wal_insert_lsn() as wal_after, extract(epoch from now()) as time_after
 \gset
 
-INSERT INTO results (testname, val) VALUES ('onecol, COPY, size', pg_total_relation_size('onecol'));
-INSERT INTO results (testname, val) VALUES ('onecol, COPY, time', :after - :before);
+INSERT INTO results (testname, size, walsize, time)
+  VALUES ('onecol, COPY',
+          pg_total_relation_size('onecol'),
+	  :'wal_after'::pg_lsn - :'wal_before',
+	  :time_after - :time_before);
 
 --
 -- SELECT
@@ -43,18 +49,21 @@ INSERT INTO results (testname, val) VALUES ('onecol, COPY, time', :after - :befo
 
 VACUUM FREEZE onecol;
 
-select extract(epoch from now()) as before
+select pg_current_wal_insert_lsn() as wal_before, extract(epoch from now()) as time_before
 \gset
 
 SELECT SUM(i) FROM onecol;
 SELECT SUM(i) FROM onecol;
 SELECT SUM(i) FROM onecol;
 
-select extract(epoch from now()) as after
+select pg_current_wal_insert_lsn() as wal_after, extract(epoch from now()) as time_after
 \gset
 
-INSERT INTO results (testname, val) VALUES ('SELECT, seqscan, time', :after - :before);
-
+INSERT INTO results (testname, size, walsize, time)
+  VALUES ('SELECT, seqscan',
+          pg_total_relation_size('onecol'),
+	  :'wal_after'::pg_lsn - :'wal_before',
+	  :time_after - :time_before);
 
 --
 -- Bitmap scans
@@ -66,17 +75,21 @@ set enable_seqscan=off;
 set enable_indexscan=off;
 set enable_bitmapscan=on;
 
-select extract(epoch from now()) as before
+select pg_current_wal_insert_lsn() as wal_before, extract(epoch from now()) as time_before
 \gset
 
 SELECT SUM(i) FROM onecol where i < 400000;
 SELECT SUM(i) FROM onecol where i < 400000;
 SELECT SUM(i) FROM onecol where i < 400000;
 
-select extract(epoch from now()) as after
+select pg_current_wal_insert_lsn() as wal_after, extract(epoch from now()) as time_after
 \gset
 
-INSERT INTO results (testname, val) VALUES ('SELECT, bitmap scan, time', :after - :before);
+INSERT INTO results (testname, size, walsize, time)
+  VALUES ('SELECT, bitmap scan',
+          pg_total_relation_size('onecol'),
+	  :'wal_after'::pg_lsn - :'wal_before',
+	  :time_after - :time_before);
 
 reset enable_seqscan;
 reset enable_indexscan;
@@ -87,27 +100,34 @@ reset enable_bitmapscan;
 -- Delete half of the rows
 --
 
-select extract(epoch from now()) as before
+select pg_current_wal_insert_lsn() as wal_before, extract(epoch from now()) as time_before
 \gset
 
 DELETE FROM onecol WHERE i%2 = 0;
 
-select extract(epoch from now()) as after
+select pg_current_wal_insert_lsn() as wal_after, extract(epoch from now()) as time_after
 \gset
 
-INSERT INTO results (testname, val) VALUES ('onecol, deleted half, size', pg_total_relation_size('onecol'));
-INSERT INTO results (testname, val) VALUES ('onecol, deleted half, time', :after - :before);
+INSERT INTO results (testname, size, walsize, time)
+  VALUES ('onecol, deleted half',
+          pg_total_relation_size('onecol'),
+	  :'wal_after'::pg_lsn - :'wal_before',
+	  :time_after - :time_before);
 
 --
 -- And vacuum the deleted rows away
 --
-select extract(epoch from now()) as before
+select pg_current_wal_insert_lsn() as wal_before, extract(epoch from now()) as time_before
 \gset
 
 VACUUM onecol;
 
-select extract(epoch from now()) as after
+select pg_current_wal_insert_lsn() as wal_after, extract(epoch from now()) as time_after
 \gset
 
-INSERT INTO results (testname, val) VALUES ('onecol, vacuumed, size', pg_total_relation_size('onecol'));
-INSERT INTO results (testname, val) VALUES ('onecol, vacuumed, time', :after - :before);
+
+INSERT INTO results (testname, size, walsize, time)
+  VALUES ('onecol, vacuumed',
+          pg_total_relation_size('onecol'),
+	  :'wal_after'::pg_lsn - :'wal_before',
+	  :time_after - :time_before);
