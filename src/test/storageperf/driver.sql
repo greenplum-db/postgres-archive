@@ -11,6 +11,7 @@ SET search_path='storagetest_heap';
 CREATE TABLE results (testname text, size numeric, walsize numeric, time numeric) USING heap;
 
 SET default_table_access_method=heap;
+checkpoint;
 \i tests.sql
 
 
@@ -23,6 +24,7 @@ SET search_path='storagetest_zedstore';
 CREATE TABLE results (testname text, size numeric, walsize numeric, time numeric) USING heap;
 
 SET default_table_access_method=zedstore;
+checkpoint;
 \i tests.sql
 
 
