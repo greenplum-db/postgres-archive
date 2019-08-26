@@ -445,7 +445,6 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 				 * after all.
 				 */
 				zspage_delete_page(rel, rootbuf, metabuf);
-				rootbuf = InvalidBuffer;
 			}
 			else
 			{
@@ -475,6 +474,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 
 				END_CRIT_SECTION();
 			}
+
 			UnlockReleaseBuffer(rootbuf);
 		}
 		UnlockReleaseBuffer(metabuf);
