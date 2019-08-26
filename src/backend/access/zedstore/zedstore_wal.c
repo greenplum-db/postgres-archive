@@ -37,14 +37,17 @@ zedstore_redo(XLogReaderState *record)
 		case WAL_ZEDSTORE_BTREE_NEW_ROOT:
 			zsmeta_new_btree_root_redo(record);
 			break;
-		case WAL_ZEDSTORE_BTREE_ADD_LEAF_ITEMS:
-			zsbt_leaf_items_redo(record, false);
-			break;
-		case WAL_ZEDSTORE_BTREE_REPLACE_LEAF_ITEM:
-			zsbt_leaf_items_redo(record, true);
-			break;
 		case WAL_ZEDSTORE_BTREE_REWRITE_PAGES:
 			zsbt_rewrite_pages_redo(record);
+			break;
+		case WAL_ZEDSTORE_TIDLEAF_ADD_ITEMS:
+			zsbt_tidleaf_items_redo(record, false);
+			break;
+		case WAL_ZEDSTORE_TIDLEAF_REPLACE_ITEM:
+			zsbt_tidleaf_items_redo(record, true);
+			break;
+		case WAL_ZEDSTORE_ATTSTREAM_CHANGE:
+			zsbt_attstream_change_redo(record);
 			break;
 		case WAL_ZEDSTORE_TOAST_NEWPAGE:
 			zstoast_newpage_redo(record);

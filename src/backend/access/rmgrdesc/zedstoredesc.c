@@ -46,17 +46,27 @@ zedstore_desc(StringInfo buf, XLogReaderState *record)
 
 		appendStringInfo(buf, "attno %d", walrec->attno);
 	}
-	else if (info == WAL_ZEDSTORE_BTREE_ADD_LEAF_ITEMS)
+	else if (info == WAL_ZEDSTORE_TIDLEAF_ADD_ITEMS)
 	{
-		wal_zedstore_btree_leaf_items *walrec = (wal_zedstore_btree_leaf_items *) rec;
+		wal_zedstore_tidleaf_items *walrec = (wal_zedstore_tidleaf_items *) rec;
 
-		appendStringInfo(buf, "attno %d, %d items, off %d", walrec->attno, walrec->nitems, walrec->off);
+		appendStringInfo(buf, "%d items, off %d", walrec->nitems, walrec->off);
 	}
-	else if (info == WAL_ZEDSTORE_BTREE_REPLACE_LEAF_ITEM)
+	else if (info == WAL_ZEDSTORE_TIDLEAF_REPLACE_ITEM)
 	{
-		wal_zedstore_btree_leaf_items *walrec = (wal_zedstore_btree_leaf_items *) rec;
+		wal_zedstore_tidleaf_items *walrec = (wal_zedstore_tidleaf_items *) rec;
 
-		appendStringInfo(buf, "attno %d, %d items, off %d", walrec->attno, walrec->nitems, walrec->off);
+		appendStringInfo(buf, "%d items, off %d", walrec->nitems, walrec->off);
+	}
+	else if (info == WAL_ZEDSTORE_ATTSTREAM_CHANGE)
+	{
+		wal_zedstore_attstream_change *walrec = (wal_zedstore_attstream_change *) rec;
+
+		if (walrec->is_upper)
+			appendStringInfo(buf, "upper stream change");
+		else
+			appendStringInfo(buf, "lower stream change");
+		appendStringInfo(buf, ", new size %d", walrec->new_attstream_size);
 	}
 	else if (info == WAL_ZEDSTORE_TOAST_NEWPAGE)
 	{
@@ -99,14 +109,17 @@ zedstore_identify(uint8 info)
 		case WAL_ZEDSTORE_BTREE_NEW_ROOT:
 			id = "BTREE_NEW_ROOT";
 			break;
-		case WAL_ZEDSTORE_BTREE_ADD_LEAF_ITEMS:
-			id = "BTREE_ADD_LEAF_ITEMS";
+		case WAL_ZEDSTORE_TIDLEAF_ADD_ITEMS:
+			id = "BTREE_TIDLEAF_ADD_ITEMS";
 			break;
-		case WAL_ZEDSTORE_BTREE_REPLACE_LEAF_ITEM:
-			id = "BTREE_REPLACE_LEAF_ITEM";
+		case WAL_ZEDSTORE_TIDLEAF_REPLACE_ITEM:
+			id = "BTREE_TIDLEAF_REPLACE_ITEM";
 			break;
 		case WAL_ZEDSTORE_BTREE_REWRITE_PAGES:
 			id = "BTREE_REWRITE_PAGES";
+			break;
+		case WAL_ZEDSTORE_ATTSTREAM_CHANGE:
+			id = "ATTSTREAM_CHANGE";
 			break;
 		case WAL_ZEDSTORE_TOAST_NEWPAGE:
 			id = "ZSTOAST_NEWPAGE";

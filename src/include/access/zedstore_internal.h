@@ -47,12 +47,15 @@ struct zs_pending_undo_op;
 typedef struct ZSBtreePageOpaque
 {
 	AttrNumber	zs_attno;
+	uint16		zs_level;			/* 0 = leaf */
 	BlockNumber zs_next;
 	zstid		zs_lokey;		/* inclusive */
 	zstid		zs_hikey;		/* exclusive */
-	uint16		zs_level;			/* 0 = leaf */
 	uint16		zs_flags;
-	uint16		padding;			/* padding, to put zs_page_id last */
+
+	uint16		padding1;
+	uint16		padding2;
+
 	uint16		zs_page_id;			/* always ZS_BTREE_PAGE_ID */
 } ZSBtreePageOpaque;
 
@@ -102,123 +105,103 @@ ZSBtreeInternalPageIsFull(Page page)
 /*
  * Attribute B-tree leaf page layout
  *
- * Leaf pages in the attribute trees are packed with "array items", which
- * contain the actual user data for the column, in a compact format. Each
- * array item contains the datums for a range of TIDs. The ranges of two
- * items never overlap, but there can be gaps, if a row has been deleted
- * or updated.
+ * Leaf pages in the attribute trees don't follow the normal page layout
+ * with line pointers and items. They use the standard page page header,
+ * with pd_lower and pd_upper, but the data stored in the lower and upper
+ * parts are different from the normal usage.
  *
- * Each array item consists of a fixed header, a list of TIDs of the rows
- * contained in it, a NULL bitmap (if there are any NULLs), and the actual
- * Datum data. The TIDs are encoded using Simple-8b encoding, like in the
- * TID tree.
+ * The upper and lower parts of the page contain one "attribute stream"
+ * each. An attibute stream contains attribute data for a range of rows.
+ * Logically, it contains a list of TIDs, and their Datums and isnull
+ * flags. The ranges of TIDs stored in the streams never overlap, but
+ * there can be gaps, if rows have been deleted or updated.
  *
- * The data (including the TID codewords) can be compressed. In that case,
- * ZSAttributeCompressedItem is used. The fields are mostly the same as in
- * ZSAttributeArrayItem, and we cast between the two liberally.
+ * Physically, the stream consists of "chunks", where one chunk contains
+ * the TIDs of 1-60 datums, packed in a compact form, and their datums.
+ * Finally, the whole stream can be compressed. See comments in
+ * zedstore_attstream.c for a more detailed description of the chunk
+ * format.
  *
- * The datums are packed in a custom format. Fixed-width datatypes are
- * stored as is, but without any alignment padding. Variable-length
- * datatypes are *not* stored in the usual Postgres varlen format; the
- * following encoding is used instead:
+ * By convention, the attribute stream stored in the upper part of the
+ * page, between pd_lower and pd_special, is compressed, and the lower
+ * stream, stored between the page header and pd_lower, is uncompressed:
  *
- * Each varlen datum begins with a one or two byte header, to store the
- * size. If the size of the datum, excluding the varlen header, is <=
- * 128, then a one byte header is used. Otherwise, the high bit of the
- * first byte is set, and two bytes are used to represent the size.
- * Two bytes is always enough, because if a datum is larger than a page,
- * it must be toasted.
+ * +--------------------+
+ * | PageHeaderData     |
+ * +--------------------+
+ * | lower attstream    |
+ * | (uncompressed) ... |
+ * | .................. |
+ * | .................. |
+ * +--------------------+ <-pd_lower
+ * |                    |
+ * |    (free space)    |
+ * |                    |
+ * +--------------------+ <-pd_upper
+ * | upper attstream    |
+ * | (compressed) ....  |
+ * | .................. |
+ * | .................. |
+ * | .................. |
+ * +--------------------+ <-pd_special
+ * | ZSBtreePageOpaque  |
+ * +--------------------+
  *
- * Traditional Postgres toasted datums should not be seen on-disk in
- * zedstore. However, "zedstore-toasted" datums, i.e. datums that have been
- * stored on separate toast blocks within zedstore, are possible. They
- * are stored with magic 0xFF 0xFF as the two header bytes, followed by
- * the block number of the first toast block.
+ * The point of having two streams is to allow fast appending of
+ * data to a page, without having to decompress and recompress
+ * the whole page. When new data is inserted, it is added to
+ * the uncompressed stream, if it fits. When a page comes full,
+ * the uncompressed stream is merged with the compressed stream,
+ * replacing both with one larger compressed stream.
  *
- * 0xxxxxxx [up to 128 bytes of data follows]
- * 1xxxxxxx xxxxxxxx [data]
- * 11111111 11111111 toast pointer.
- *
- * XXX Heikki: I'm not sure if this special encoding makes sense. Perhaps
- * just storing normal Postgres varlenas would be better. Having a custom
- * encoding felt like a good idea, but I'm not sure we're actually gaining
- * anything. If we also did alignment padding, like the rest of Postgres
- * does, then we could avoid some memory copies when decoding the array.
- *
- * TODO: squeeze harder: eliminate padding, use high bits of t_tid for flags or size
+ * The names "lower" and "upper" refer to the physical location of
+ * the stream on the page. The data in the in the lower attstream
+ * have higher-numbered TIDs than the data in the upper attstream.
+ * No overlap is allowed. This works well with the usual usage
+ * pattern that new data is added to the end (i.e. with increasing
+ * sequence of TIDs), and old data is archived in compressed form
+ * when a page fills up.
  */
-typedef struct ZSAttributeArrayItem
-{
-	uint16		t_size;
-	uint16		t_flags;
-
-	uint16		t_num_elements;
-	uint16		t_num_codewords;
-
-	zstid		t_firsttid;
-	zstid		t_endtid;
-
-	uint64		t_tid_codewords[FLEXIBLE_ARRAY_MEMBER];
-
-	/* NULL bitmap follows, if ZSBT_HAS_NULLS is set */
-
-	/* The Datum data follows */
-} ZSAttributeArrayItem;
-
-typedef struct ZSAttributeCompressedItem
-{
-	uint16		t_size;
-	uint16		t_flags;
-
-	uint16		t_num_elements;
-	uint16		t_num_codewords;
-
-	zstid		t_firsttid;
-	zstid		t_endtid;
-
-	uint16		t_uncompressed_size;
-
-	/* compressed data follows */
-	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
-
-} ZSAttributeCompressedItem;
 
 /*
- * The two structs above are stored on disk. ZSExplodedItem is a third
- * representation of an array item that is only used in memory, when
- * repacking items on a page. It is distinguished by t_size == 0.
+ * ZSAttStream represents one attribute stream, stored in the lower
+ * or upper part of an attribute leaf page. It is also used to
+ * pass around data in memory, in which case a stream can be
+ * arbitrarily long.
+ *
+ *
+ * Attstreams are compressed by feeding the stream to the compressor, until
+ * all the space available on the page. However, the compressor doesn't know
+ * about chunk boundaries within the stream, so it may stop the compression
+ * in the middle of a chunk. As an artifact of that, a compressed stream
+ * often contains an incomplete chunk at the end. That space goes wasted, and
+ * is ignored. 't_decompressed_size' is the total size of all complete chunks
+ * in a compressed stream, while 't_decompressed_bufsize' includes the wasted
+ * bytes at the end.
+ *
+ * XXX: We could avoid the waste by using a compressor that knows about the
+ * chunk boundaries. Or we could compress twice, first to get the size that
+ * fits, and second time to compress just what fits. But that would be twice
+ * as slow. In practice, the wasted space doesn't matter much. We try to
+ * keep each chunk relatively small, to minimize the waste. And because we
+ * now the next chunk wouldn't fit on the page anyway, there isn't much else
+ * we could do with the wasted space, anyway.
  */
-typedef struct ZSExplodedItem
+typedef struct
 {
-	uint16		t_size; /* dummy 0 */
-	uint16		t_flags;
+	uint32		t_size;			/* physical size of the stream. */
+	uint32		t_flags;
+	uint32		t_decompressed_size;	/* payload size, excludes waste */
+	uint32		t_decompressed_bufsize;	/* payload size, includes waste */
+	zstid		t_lasttid;		/* last TID stored in this stream */
 
-	uint16		t_num_elements;
+	char		t_payload[FLEXIBLE_ARRAY_MEMBER];
+} ZSAttStream;
 
-	zstid	   *tids;
+#define SizeOfZSAttStreamHeader	offsetof(ZSAttStream, t_payload)
 
-	bits8	   *nullbitmap;
+#define ATTSTREAM_COMPRESSED	1
 
-	char	   *datumdata;
-	int			datumdatasz;
-} ZSExplodedItem;
-
-#define ZSBT_ATTR_COMPRESSED		0x0001
-#define ZSBT_HAS_NULLS				0x0002
-
-#define ZSBT_ATTR_BITMAPLEN(nelems)		(((int) (nelems) + 7) / 8)
-
-static inline void
-zsbt_attr_item_setnull(bits8 *nullbitmap, int n)
-{
-	nullbitmap[n / 8] |= (1 << (n % 8));
-}
-
-static inline bool
-zsbt_attr_item_isnull(bits8 *nullbitmap, int n)
-{
-	return (nullbitmap[n / 8] & (1 << (n % 8))) != 0;
-}
 
 /*
  * TID B-tree leaf page layout
@@ -638,12 +621,11 @@ typedef struct ZSAttrTreeScan
 	bool	   *array_isnulls;
 	zstid	   *array_tids;
 	int			array_num_elements;
+	MemoryContext array_cxt;
 
 	int			array_curr_idx;
 
-	/* working areas for zsbt_attr_item_extract() */
-	char	   *decompress_buf;
-	int			decompress_buf_size;
+	/* working area for zsbt_attr_item_extract() */
 	char	   *attr_buf;
 	int			attr_buf_size;
 
@@ -859,19 +841,30 @@ extern bool zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid tid);
 
 extern void zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 							  Datum *datums, bool *isnulls, zstid *tids, int ndatums);
+extern void zsbt_attstream_change_redo(XLogReaderState *record);
 
-/* prototypes for functions in zedstore_attitem.c */
-extern List *zsbt_attr_create_items(Form_pg_attribute att,
-									Datum *datums, bool *isnulls, zstid *tids, int nelements);
-extern void zsbt_split_item(Form_pg_attribute attr, ZSExplodedItem *origitem, zstid first_right_tid,
-					 ZSExplodedItem **leftitem_p, ZSExplodedItem **rightitem_p);
-extern ZSExplodedItem *zsbt_attr_remove_from_item(Relation rel, Form_pg_attribute attr,
-												  ZSAttributeArrayItem *olditem,
-												  zstid *removetids);
-extern List *zsbt_attr_recompress_items(Form_pg_attribute attr, List *olditems);
+/* prototypes for functions in zedstore_attstream.c */
+extern ZSAttStream *create_attstream(Form_pg_attribute att, int nelems, zstid *tids,
+									 Datum *datums, bool *isnulls);
+extern ZSAttStream *merge_attstreams(Relation rel, Form_pg_attribute attr,
+									 ZSAttStream *chunks1, ZSAttStream *chunks2,
+									 zstid *tids_to_remove, int num_tids_to_remove);
+extern bool append_attstreams_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int freespace, ZSAttStream *newchunks);
+extern void decode_attstream(ZSAttrTreeScan *scan, ZSAttStream *chunks);
+extern int truncate_attstream(Form_pg_attribute att, char *chunks, int len, zstid *lasttid);
+extern zstid get_attstream_first_tid(int attlen, ZSAttStream *chunk);
 
-extern void zsbt_attr_item_extract(ZSAttrTreeScan *scan, ZSAttributeArrayItem *item);
+typedef struct
+{
+	char	   *data;
+	int			len;
+	int			cursor;		/* beginning of remaining chunks */
 
+	zstid		lasttid;
+} chopper_state;
+
+extern zstid chop_attstream(Form_pg_attribute att, chopper_state *chunks, int pos, zstid lasttid);
+extern void print_attstream(Form_pg_attribute att, char *chunk, int len);
 
 /* prototypes for functions in zedstore_btree.c */
 extern zs_split_stack *zsbt_newroot(Relation rel, AttrNumber attno, int level, List *downlinks);

@@ -25,16 +25,9 @@
 #ifdef USE_LZ4
 
 int
-zs_try_compress(const char *src, char *dst, int srcSize, int dstCapacity)
+zs_compress_destSize(const char *src, char *dst, int *srcSizePtr, int targetDstSize)
 {
-	int			compressed_size;
-
-	compressed_size = LZ4_compress_default(src, dst, srcSize, dstCapacity);
-
-	if (compressed_size > srcSize)
-		return 0;
-	else
-		return compressed_size;
+	return LZ4_compress_destSize(src, dst, srcSizePtr, targetDstSize);
 }
 
 void
@@ -53,14 +46,32 @@ zs_decompress(const char *src, char *dst, int compressedSize, int uncompressedSi
 /* PGLZ implementation */
 
 int
-zs_try_compress(const char *src, char *dst, int srcSize, int dstCapacity)
+zs_compress_destSize(const char *src, char *dst, int *srcSizePtr, int targetDstSize)
 {
+	int			maxInputSize;
 	int			compressed_size;
 
-	if (dstCapacity < PGLZ_MAX_OUTPUT(srcSize))
-		return -1;
+	/*
+	 * FIXME: pglz doesn't have an interface like LZ4 does, to compress up to a certain
+	 * target compressed output size. We take a conservative approach and compress
+	 * 'targetDstSize' bytes, and return that. Alternatively, we could guess the
+	 * compression ratio, and try compressing a larget chunk hoping that it will fit
+	 * in the target size, and try again if it didn't fit. Or we could enhance pglz
+	 * code to do this cleverly. But it doesn't seem worth the effort, LZ4 (or something
+	 * else, but not pglz) is the future.
+	 */
 
-	compressed_size = pglz_compress(src, srcSize, dst, PGLZ_strategy_always);
+	/* reverse the computation of PGLZ_MAX_OUTPUT */
+	if (targetDstSize < 4)
+		return 0;
+
+	maxInputSize = targetDstSize - 4;
+	Assert(PGLZ_MAX_OUTPUT(maxInputSize) <= targetDstSize);
+	if (maxInputSize > *srcSizePtr)
+		maxInputSize = *srcSizePtr;
+
+	compressed_size = pglz_compress(src, maxInputSize, dst, PGLZ_strategy_always);
+	*srcSizePtr = maxInputSize;
 
 	return compressed_size;
 }

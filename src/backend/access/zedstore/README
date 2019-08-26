@@ -109,21 +109,22 @@ and avoid touching the attribute btrees.
 Attribute trees
 ---------------
 
-The leaf pages on the attribute tree also consist of items, which pack
-data from multiple tuples in one item. In the attribute tree, the items
-can furthermore be compressed using LZ4, if the server has been
-configured with "configure --with-lz4". (If you don't use --with-lz4,
-PostgreSQL's built-in pglz algorithm is used, but it is *much* slower).
-Each item (ZSAttributeArrayItem) contains data for tuples with a range
-of consecutive TIDs. Multiple ZSAttributeArrayItems can be compressed
-together, into a single ZSAttributeCompressedItem item.
+The leaf pages on the attribute tree contain two "streams" of attribute
+data, one compressed, and one uncompressed. The compressed stream is
+compressed using LZ4. (Assuming the server has been built with "configure
+--with-lz4". Otherwise, PostgreSQL's built-in pglz algorithm is used, but
+it is *much* slower). When new rows are added, the new attribute data is
+appended to the uncompressed stream, until the page gets full, at which
+point all the uncompressed data is repacked and moved to the compressed
+stream. An attribute stream consists of smaller "chunks", and each chunk
+contains the TIDs and data for 1-60 rows.
 
-In uncompressed form, an attribute tree page can be arbitrarily large.
-But after compression, it must fit into a physical 8k block. If on insert
-or update of a tuple, the page cannot be compressed below 8k anymore, the
-page is split. Note that because TIDs are logical rather than physical
-identifiers, we can freely move tuples from one physical page to
-another during page split. A tuple's TID never changes.
+In uncompressed form, an attribute stream on a page can be arbitrarily
+large, but after compression, it must fit into a physical 8k block. If
+on insert or update of a tuple, the page cannot be compressed below 8k
+anymore, the page is split. Note that because TIDs are logical rather
+than physical identifiers, we can freely move tuples from one physical
+page to another during page split. A tuple's TID never changes.
 
 The buffer cache caches compressed blocks. Likewise, WAL-logging,
 full-page images etc. work on compressed blocks. Uncompression is done

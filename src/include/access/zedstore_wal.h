@@ -21,12 +21,13 @@
 #define WAL_ZEDSTORE_UNDO_NEWPAGE			0x10
 #define WAL_ZEDSTORE_UNDO_DISCARD			0x20
 #define WAL_ZEDSTORE_BTREE_NEW_ROOT			0x30
-#define WAL_ZEDSTORE_BTREE_ADD_LEAF_ITEMS	0x40
-#define WAL_ZEDSTORE_BTREE_REPLACE_LEAF_ITEM	0x50
-#define WAL_ZEDSTORE_BTREE_REWRITE_PAGES	0x60
-#define WAL_ZEDSTORE_TOAST_NEWPAGE			0x70
-#define WAL_ZEDSTORE_FPM_DELETE_PAGE		0x80
-#define WAL_ZEDSTORE_FPM_REUSE_PAGE			0x90
+#define WAL_ZEDSTORE_BTREE_REWRITE_PAGES	0x40
+#define WAL_ZEDSTORE_TIDLEAF_ADD_ITEMS		0x50
+#define WAL_ZEDSTORE_TIDLEAF_REPLACE_ITEM	0x60
+#define WAL_ZEDSTORE_ATTSTREAM_CHANGE		0x70
+#define WAL_ZEDSTORE_TOAST_NEWPAGE			0x80
+#define WAL_ZEDSTORE_FPM_DELETE_PAGE		0x90
+#define WAL_ZEDSTORE_FPM_REUSE_PAGE			0xA0
 
 /* in zedstore_wal.c */
 extern void zedstore_redo(XLogReaderState *record);
@@ -97,18 +98,17 @@ typedef struct wal_zedstore_btree_new_root
 #define SizeOfZSWalBtreeNewRoot	(offsetof(wal_zedstore_btree_new_root, attno) + sizeof(AttrNumber))
 
 /*
- * WAL record for replacing/adding items to the TID tree, or to an attribute tree.
+ * WAL record for replacing/adding items to the TID tree.
  */
-typedef struct wal_zedstore_btree_leaf_items
+typedef struct wal_zedstore_tidleaf_items
 {
-	AttrNumber	attno;		/* 0 means TID tree */
 	int16		nitems;
 	OffsetNumber off;
 
 	/* the items follow */
-} wal_zedstore_btree_leaf_items;
+} wal_zedstore_tidleaf_items;
 
-#define SizeOfZSWalBtreeLeafItems (offsetof(wal_zedstore_btree_leaf_items, off) + sizeof(OffsetNumber))
+#define SizeOfZSWalTidLeafItems (offsetof(wal_zedstore_tidleaf_items, off) + sizeof(OffsetNumber))
 
 /*
  * WAL record for page splits, and other more complicated operations where
@@ -124,6 +124,52 @@ typedef struct wal_zedstore_btree_rewrite_pages
 } wal_zedstore_btree_rewrite_pages;
 
 #define SizeOfZSWalBtreeRewritePages (offsetof(wal_zedstore_btree_rewrite_pages, attno) + sizeof(AttrNumber))
+
+/*
+ * WAL record for a change to attribute leaf page.
+ *
+ * Modifies an attribute stream stored on an attribute leaf page.
+ * If 'is_upper' is set, the change applies to the upper stream,
+ * between pd_upper and pd_special, otherwise it applies to the
+ * lower stream between page header and pd_lower.
+ *
+ * new_attstream_size is the new size of the attstream. At replay,
+ * pd_lower or pd_upper is adjusted to match the new size. If
+ * size of the upper stream changes, any existing data in the upper
+ * area on the page conceptually moved to the beginning of the upper
+ * area, before the replacement data in the record is applied.
+ *
+ * The block data 0 contains new data, which overwrites the data
+ * between begin_offset and end_offset. Not all data in the stream
+ * needs to be overwritten, that is, begin_offset and end_offset
+ * don't need to cover the whole stream. That allows efficiently
+ * appending data to an uncompressed stream. (It's also pretty
+ * effective for the compressed stream: if a stream is
+ * decompressed, some changes are made, and the stream is
+ * recompressed, the part before the change will usually re-compress
+ * to the same bytes.)
+ */
+typedef struct wal_zedstore_attstream_change
+{
+	bool		is_upper;
+
+	/*
+	 * These field correspond to the fields in ZSAttStream. But
+	 * we use smaller fields to save on WAL volume. (ZSAttStream
+	 * uses larger fields for the size, so that the same struct
+	 * can be used for longer streams than fit on disk, when passed
+	 * around in memory.)
+	 */
+	uint16		new_attstream_size;
+	uint16		new_decompressed_size;
+	uint16		new_decompressed_bufsize;
+	zstid		new_lasttid;
+
+	uint16		begin_offset;
+	uint16		end_offset;
+} wal_zedstore_attstream_change;
+
+#define SizeOfZSWalAttstreamChange (offsetof(wal_zedstore_attstream_change, end_offset) + sizeof(uint16))
 
 /*
  * WAL record for zedstore toasting. When a large datum spans multiple pages,
@@ -158,7 +204,7 @@ typedef struct wal_zedstore_fpm_reuse_page
 
 #define SizeOfZSWalFpmReusePage (offsetof(wal_zedstore_fpm_reuse_page, next_free_blkno) + sizeof(BlockNumber))
 
-extern void zsbt_leaf_items_redo(XLogReaderState *record, bool replace);
+extern void zsbt_tidleaf_items_redo(XLogReaderState *record, bool replace);
 extern void zsmeta_new_btree_root_redo(XLogReaderState *record);
 extern void zsbt_rewrite_pages_redo(XLogReaderState *record);
 extern void zstoast_newpage_redo(XLogReaderState *record);

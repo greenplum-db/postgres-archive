@@ -481,8 +481,6 @@ pg_zs_btree_pages(PG_FUNCTION_ARGS)
 	{
 		Datum		values[11];
 		bool		nulls[11];
-		OffsetNumber off;
-		OffsetNumber maxoff;
 		Buffer		buf;
 		Page		page;
 		ZSBtreePageOpaque *opaque;
@@ -525,36 +523,34 @@ pg_zs_btree_pages(PG_FUNCTION_ARGS)
 		if (opaque->zs_level == 0)
 		{
 			/* leaf page */
-			maxoff = PageGetMaxOffsetNumber(page);
-			for (off = FirstOffsetNumber; off <= maxoff; off++)
+			PageHeader	phdr = (PageHeader) page;
+			ZSAttStream *streams[2];
+			int			nstreams = 0;
+
+			if (phdr->pd_lower - SizeOfPageHeaderData > SizeOfZSAttStreamHeader)
 			{
-				ItemId		iid = PageGetItemId(page, off);
+				streams[nstreams++] =  (ZSAttStream *) (((char *) page) + SizeOfPageHeaderData);
+			}
 
-				if (opaque->zs_attno == ZS_META_ATTRIBUTE_NUM)
+			if (phdr->pd_special - phdr->pd_upper > SizeOfZSAttStreamHeader)
+			{
+				streams[nstreams++] =  (ZSAttStream *) (((char *) page) + phdr->pd_upper);
+			}
+
+			for (int i = 0; i < nstreams; i++)
+			{
+				ZSAttStream *stream = streams[i];
+
+				totalsz += stream->t_size;
+				nitems++;
+				if ((stream->t_flags & ATTSTREAM_COMPRESSED) != 0)
 				{
-					ZSTidArrayItem *item = (ZSTidArrayItem *) PageGetItem(page, iid);
-
-					nitems++;
-					totalsz += item->t_size;
-
-					uncompressedsz += item->t_size;
+					ncompressed++;
+					uncompressedsz += stream->t_decompressed_size;
 				}
 				else
 				{
-					ZSAttributeArrayItem *item = (ZSAttributeArrayItem *) PageGetItem(page, iid);
-
-					nitems++;
-					totalsz += item->t_size;
-					if ((item->t_flags & ZSBT_ATTR_COMPRESSED) != 0)
-					{
-						ZSAttributeCompressedItem *citem = (ZSAttributeCompressedItem *) PageGetItem(page, iid);
-
-						ncompressed++;
-						uncompressedsz += offsetof(ZSAttributeCompressedItem, t_payload)
-							+ citem->t_uncompressed_size;
-					}
-					else
-						uncompressedsz += item->t_size;
+					uncompressedsz += stream->t_size;
 				}
 			}
 		}
