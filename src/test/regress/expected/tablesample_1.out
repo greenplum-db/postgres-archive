@@ -203,7 +203,7 @@ select * from
  pct | count 
 -----+-------
    0 |     0
- 100 |     0
+ 100 | 10000
 (2 rows)
 
 select * from
@@ -236,7 +236,8 @@ select pct, count(unique1) from
   group by pct;
  pct | count 
 -----+-------
-(0 rows)
+ 100 | 10000
+(1 row)
 
 select pct, count(unique1) from
   (values (0),(100)) v(pct),

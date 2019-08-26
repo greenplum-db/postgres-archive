@@ -1183,6 +1183,9 @@ zedstoream_rescan(TableScanDesc sscan, struct ScanKeyData *key,
 	{
 		zsbt_tid_reset_scan(&scan->proj_data.tid_scan,
 							scan->cur_range_start, scan->cur_range_end, scan->cur_range_start - 1);
+
+		if ((scan->rs_scan.rs_flags & SO_TYPE_SAMPLESCAN) != 0)
+			scan->next_tid_to_scan = ZSTidFromBlkOff(0, 1);
 	}
 }
 
