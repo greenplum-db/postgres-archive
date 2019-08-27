@@ -390,6 +390,12 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 	UnlockReleaseBuffer(metabuf);
 
 	/*
+	 * Don't trim undo pages in recovery mode to avoid writing new WALs.
+	 */
+	if(RecoveryInProgress())
+		return oldest_undorecptr;
+
+	/*
 	 * Loop through UNDO records, starting from the oldest page, until we
 	 * hit a record that we cannot remove.
 	 */
