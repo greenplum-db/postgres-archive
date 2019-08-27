@@ -38,8 +38,8 @@
 /* prototypes for local functions */
 static ZSAttStream *get_page_lowerstream(Page page);
 static ZSAttStream *get_page_upperstream(Page page);
-static void zsbt_attr_modify_page(Relation rel, AttrNumber attno, Buffer buf,
-								  ZSAttStream *newstream, zstid *tids_to_remove, int num_tids_to_remove);
+static void zsbt_attr_add_to_page(Relation rel, AttrNumber attno, Buffer buf,
+								  ZSAttStream *newstream);
 static void wal_log_attstream_change(Relation rel, Buffer buf, ZSAttStream *attstream, bool is_upper,
 									 uint16 begin_offset, uint16 end_offset);
 
@@ -234,7 +234,7 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 	 */
 
 	/* recompress and possibly split the page */
-	zsbt_attr_modify_page(rel, attno, buf, attstream, NULL, 0);
+	zsbt_attr_add_to_page(rel, attno, buf, attstream);
 
 	/* zsbt_attr_modify_page unlocked 'buf' */
 	ReleaseBuffer(buf);
@@ -246,6 +246,7 @@ zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 void
 zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 {
+	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
 	Buffer		buf;
 	Page		page;
 	ZSBtreePageOpaque *opaque;
@@ -270,6 +271,10 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 
 	while (nexttid < MaxPlusOneZSTid)
 	{
+		ZSAttStream *lowerstream;
+		ZSAttStream *upperstream;
+		ZSAttStream *newstream;
+
 		buf = zsbt_descend(rel, attno, nexttid, 0, false);
 		page = BufferGetPage(buf);
 		opaque = ZSBtreePageGetOpaque(page);
@@ -291,9 +296,26 @@ zsbt_attr_remove(Relation rel, AttrNumber attno, IntegerSet *tids)
 				nexttid = MaxPlusOneZSTid;
 		}
 
-		zsbt_attr_modify_page(rel, attno, buf, NULL, tids_to_remove, num_to_remove);
 
-		ReleaseBuffer(buf); 	/* zsbt_attr_modify_page 'buf' */
+		/* Remove the data for those TIDs, and rewrite the page */
+		lowerstream = get_page_lowerstream(page);
+		upperstream = get_page_upperstream(page);
+
+		if (lowerstream || upperstream)
+		{
+			newstream = merge_attstreams(rel, attr, lowerstream, upperstream,
+										 tids_to_remove, num_to_remove);
+
+			/*
+			 * Now we have a list of non-overlapping items, containing all the old and
+			 * new data. zsbt_attr_repack_replace() takes care of storing them on the
+			 * page, splitting the page if needed.
+			 */
+			zsbt_attr_repack(rel, attno, buf, newstream, false, InvalidZSTid);
+			/* zsbt_attr_repack() unlocked and released the buffer */
+		}
+		else
+			UnlockReleaseBuffer(buf);
 
 		/*
 		 * We can now free the decompression contexts. The pointers in the 'items' list
@@ -354,10 +376,9 @@ get_page_upperstream(Page page)
 }
 
 /*
- * Modify an attribute leaf page, adding new data, and/or removing old data.
+ * Modify an attribute leaf page, adding new data.
  *
  * 'newstream' contains new attribute data that is to be added to the page.
- * 'tids_to_remove' contains TIDs that are to be removed from the page.
  *
  * This function handles decompressing and recompressing items, and splitting
  * the page, as needed.
@@ -366,101 +387,92 @@ get_page_upperstream(Page page)
  * the lock, but will keep the page pinned.
  */
 static void
-zsbt_attr_modify_page(Relation rel, AttrNumber attno, Buffer buf, ZSAttStream *newstream,
-					  zstid *tids_to_remove, int num_tids_to_remove)
+zsbt_attr_add_to_page(Relation rel, AttrNumber attno, Buffer buf, ZSAttStream *newstream)
 {
-	Form_pg_attribute attr;
+	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
 	Page		page = BufferGetPage(buf);
 	ZSAttStream *merged_stream;
 	ZSAttStream *lowerstream = NULL;
 	ZSAttStream *upperstream = NULL;
+	uint16		old_pd_lower;
+	uint16		new_pd_lower;
+	zstid		firstnewtid;
 
-	if (newstream == NULL && num_tids_to_remove == 0)
-	{
-		/* nothing to do; probably shouldn't happen */
-		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-		return;
-	}
-
-	attr = &rel->rd_att->attrs[attno - 1];
+	Assert(newstream);
 
 	lowerstream = get_page_lowerstream(page);
 	upperstream = get_page_upperstream(page);
 
 	/* Is there space to add the new attstream as it is? */
-	if (newstream && num_tids_to_remove == 0)
+	old_pd_lower = ((PageHeader) page)->pd_lower;
+
+	if (lowerstream == NULL)
 	{
-		uint16		old_pd_lower = ((PageHeader) page)->pd_lower;
-		uint16		new_pd_lower;
+		/*
+		 * No existing uncompressed data on page, see if the new data fits as is.
+		 */
+		Assert(old_pd_lower == SizeOfPageHeaderData);
 
-		if (lowerstream == NULL)
+		if (newstream->t_size <= PageGetExactFreeSpace(page))
 		{
-			/*
-			 * No existing uncompressed data on page, see if the new data fits as is.
-			 */
-			Assert(old_pd_lower == SizeOfPageHeaderData);
-
-			if (newstream->t_size <= PageGetExactFreeSpace(page))
-			{
-				new_pd_lower = SizeOfPageHeaderData + newstream->t_size;
-
-				START_CRIT_SECTION();
-
-				memcpy(page + SizeOfPageHeaderData, newstream, newstream->t_size);
-				((PageHeader) page)->pd_lower = new_pd_lower;
-
-				MarkBufferDirty(buf);
-
-				if (RelationNeedsWAL(rel))
-					wal_log_attstream_change(rel, buf, newstream, false,
-											 old_pd_lower, new_pd_lower);
-
-				END_CRIT_SECTION();
-
-				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-				return;
-			}
-		}
-		else
-		{
-			/*
-			 * Try to append the new data to the old data
-			 */
-			Assert(lowerstream->t_size == old_pd_lower - SizeOfPageHeaderData);
+			new_pd_lower = SizeOfPageHeaderData + newstream->t_size;
 
 			START_CRIT_SECTION();
 
-			if (append_attstreams_inplace(attr, lowerstream,
-										  PageGetExactFreeSpace(page),
-										  newstream))
-			{
-				new_pd_lower = SizeOfPageHeaderData + lowerstream->t_size;
+			memcpy(page + SizeOfPageHeaderData, newstream, newstream->t_size);
+			((PageHeader) page)->pd_lower = new_pd_lower;
 
-				/* fast path succeeded */
-				MarkBufferDirty(buf);
+			MarkBufferDirty(buf);
 
-				/*
-				 * NOTE: in theory, if append_attstream_inplace() was smarter, it might
-				 * modify the existing data. The new combined stream might even be smaller
-				 * than the old stream, if the last codewords are packed more tighthly.
-				 * But at the moment, append_attstreams_inplace() doesn't do anything
-				 * that smart. So we asume that the existing data didn't change, and we
-				 * only need to WAL log the new data at the end of the stream.
-				 */
-				((PageHeader) page)->pd_lower = new_pd_lower;
-
-				if (RelationNeedsWAL(rel))
-					wal_log_attstream_change(rel, buf, lowerstream, false,
-											 old_pd_lower, new_pd_lower);
-
-				END_CRIT_SECTION();
-
-				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-				return;
-			}
+			if (RelationNeedsWAL(rel))
+				wal_log_attstream_change(rel, buf, newstream, false,
+										 old_pd_lower, new_pd_lower);
 
 			END_CRIT_SECTION();
+
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+			return;
 		}
+	}
+	else
+	{
+		/*
+		 * Try to append the new data to the old data
+		 */
+		Assert(lowerstream->t_size == old_pd_lower - SizeOfPageHeaderData);
+
+		START_CRIT_SECTION();
+
+		if (append_attstreams_inplace(attr, lowerstream,
+									  PageGetExactFreeSpace(page),
+									  newstream))
+		{
+			new_pd_lower = SizeOfPageHeaderData + lowerstream->t_size;
+
+			/* fast path succeeded */
+			MarkBufferDirty(buf);
+
+			/*
+			 * NOTE: in theory, if append_attstream_inplace() was smarter, it might
+			 * modify the existing data. The new combined stream might even be smaller
+			 * than the old stream, if the last codewords are packed more tighthly.
+			 * But at the moment, append_attstreams_inplace() doesn't do anything
+			 * that smart. So we asume that the existing data didn't change, and we
+			 * only need to WAL log the new data at the end of the stream.
+			 */
+			((PageHeader) page)->pd_lower = new_pd_lower;
+
+			if (RelationNeedsWAL(rel))
+				wal_log_attstream_change(rel, buf, lowerstream, false,
+										 old_pd_lower, new_pd_lower);
+
+			END_CRIT_SECTION();
+
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+			return;
+		}
+
+		END_CRIT_SECTION();
 	}
 
 	/*
@@ -469,31 +481,25 @@ zsbt_attr_modify_page(Relation rel, AttrNumber attno, Buffer buf, ZSAttStream *n
 	 * recompressing pages when inserting rows one by one. Somewhat arbitrarily,
 	 * we put the threshold at 2.5%.
 	 */
-	if (newstream && num_tids_to_remove == 0)
+	firstnewtid = get_attstream_first_tid(attr->attlen, newstream);
+	if (PageGetExactFreeSpace(page) + (lowerstream ? lowerstream->t_size : 0) < (int) (BLCKSZ * 0.025) &&
+		(lowerstream == NULL || firstnewtid > lowerstream->t_lasttid) &&
+		upperstream &&  firstnewtid > upperstream->t_lasttid)
 	{
-		zstid		firstnewtid;
+		/*
+		 * repack the new data, to make sure it's dense. XXX: Do we really need
+		 * to do this?
+		 */
+		int			origsize = newstream->t_size;
 
-		firstnewtid = get_attstream_first_tid(attr->attlen, newstream);
-		if (PageGetExactFreeSpace(page) + (lowerstream ? lowerstream->t_size : 0) < (int) (BLCKSZ * 0.025) &&
-			(lowerstream == NULL || firstnewtid > lowerstream->t_lasttid) &&
-			upperstream &&  firstnewtid > upperstream->t_lasttid)
-		{
-			/*
-			 * repack the new data, to make sure it's dense. XXX: Do we really need
-			 * to do this?
-			 */
-			int			origsize = newstream->t_size;
+		newstream = merge_attstreams(rel, attr, newstream, NULL, NULL, 0);
 
-			newstream = merge_attstreams(rel, attr, newstream, NULL,
-										 tids_to_remove, num_tids_to_remove);
+		elog(DEBUG2, "appending new page, %d -> %d", origsize, newstream->t_size);
 
-			elog(DEBUG2, "appending new page, %d -> %d", origsize, newstream->t_size);
-
-			/* Now pass the list to the repacker, to distribute the items to pages. */
-			IncrBufferRefCount(buf);
-			zsbt_attr_repack(rel, attno, buf, newstream, true, firstnewtid);
-			return;
-		}
+		/* Now pass the list to the repacker, to distribute the items to pages. */
+		IncrBufferRefCount(buf);
+		zsbt_attr_repack(rel, attno, buf, newstream, true, firstnewtid);
+		return;
 	}
 
 	/*
@@ -506,33 +512,30 @@ zsbt_attr_modify_page(Relation rel, AttrNumber attno, Buffer buf, ZSAttStream *n
 		/* Merge old compressed data, old uncompressed data, and new data */
 		ZSAttStream *tmp;
 
-		tmp = merge_attstreams(rel, attr, upperstream, lowerstream,
-							   tids_to_remove, num_tids_to_remove);
+		tmp = merge_attstreams(rel, attr, upperstream, lowerstream, NULL, 0);
 
 		/* append new data */
-		merged_stream = merge_attstreams(rel, attr, tmp, newstream,
-										 tids_to_remove, num_tids_to_remove);
+		merged_stream = merge_attstreams(rel, attr, tmp, newstream, NULL, 0);
 
 		elog(DEBUG2, "merged upper %d, lower %d, new %d -> %d",
 			 upperstream->t_size, lowerstream->t_size,
-			 newstream ? newstream->t_size : 0,
-			 merged_stream ? merged_stream->t_size : 0);
+			 newstream->t_size,
+			 merged_stream->t_size);
 	}
 	else if (upperstream)
 	{
-		merged_stream = merge_attstreams(rel, attr, upperstream, newstream,
-										 tids_to_remove, num_tids_to_remove);
+		merged_stream = merge_attstreams(rel, attr, upperstream, newstream, NULL, 0);
+
 		elog(DEBUG2, "merged upper %d, new %d -> %d",
-			 upperstream->t_size, newstream ? newstream->t_size : 0,
-			 merged_stream ? merged_stream->t_size : 0);
+			 upperstream->t_size, newstream->t_size,
+			 merged_stream->t_size);
 	}
 	else if (lowerstream)
 	{
-		merged_stream = merge_attstreams(rel, attr, lowerstream, newstream,
-										 tids_to_remove, num_tids_to_remove);
+		merged_stream = merge_attstreams(rel, attr, lowerstream, newstream, NULL, 0);
 		elog(DEBUG2, "merged lower %d, new %d -> %d",
-			 lowerstream->t_size, newstream ? newstream->t_size : 0,
-			 merged_stream ? merged_stream->t_size : 0);
+			 lowerstream->t_size, newstream->t_size,
+			 merged_stream->t_size);
 	}
 	else
 	{
@@ -540,20 +543,18 @@ zsbt_attr_modify_page(Relation rel, AttrNumber attno, Buffer buf, ZSAttStream *n
 		 * nothing old on page. But force the new stream to be re-encoded. Hopefully
 		 * that makes it more compact.
 		 */
-		merged_stream = merge_attstreams(rel, attr, newstream, NULL,
-										 tids_to_remove, num_tids_to_remove);
-		elog(DEBUG2, "repacked new %d -> %d", newstream ? newstream->t_size : 0,
-		merged_stream ? merged_stream->t_size : 0);
-	}
+		merged_stream = merge_attstreams(rel, attr, newstream, NULL, NULL, 0);
 
-	/* Now pass the list to the repacker, to distribute the items to pages. */
-	IncrBufferRefCount(buf);
+		elog(DEBUG2, "repacked new %d -> %d", newstream->t_size,
+			 merged_stream->t_size);
+	}
 
 	/*
 	 * Now we have a list of non-overlapping items, containing all the old and
-	 * new data. zsbt_attr_repack_replace() takes care of storing them on the
+	 * new data. zsbt_attr_repack() takes care of storing them on the
 	 * page, splitting the page if needed.
 	 */
+	IncrBufferRefCount(buf);
 	zsbt_attr_repack(rel, attno, buf, merged_stream, false, InvalidZSTid);
 }
 
@@ -575,8 +576,8 @@ zsbt_attr_modify_page(Relation rel, AttrNumber attno, Buffer buf, ZSAttStream *n
  * because otherwise you might hit limits on the number of buffer pins (with
  * tiny shared_buffers).
  *
- * On entry, 'oldbuf' must be pinned and exclusive-locked. On exit, the lock
- * is released, but it's still pinned.
+ * On entry, 'oldbuf' must be pinned and exclusive-locked. It is released and
+ * unpinned on exit.
  */
 struct zsbt_attr_repack_context
 {
