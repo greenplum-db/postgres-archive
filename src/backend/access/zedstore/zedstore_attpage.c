@@ -46,6 +46,9 @@ static void wal_log_attstream_change(Relation rel, Buffer buf, ZSAttStream *atts
 struct zsbt_attr_repack_context;
 static void zsbt_attr_repack(Relation rel, AttrNumber attno, Buffer oldbuf,
 							 ZSAttStream *attstream, bool append, zstid firstnewkey);
+static void zsbt_attr_repack_write_pages(struct zsbt_attr_repack_context *cxt,
+										 Relation rel, AttrNumber attno,
+										 Buffer oldbuf, BlockNumber orignextblk);
 static void zsbt_attr_repack_newpage(struct zsbt_attr_repack_context *cxt, zstid nexttid, int flags);
 static void zsbt_attr_pack_attstream(Form_pg_attribute attr, chopper_state *chopper, Page page, zstid *remaintid);
 
@@ -600,8 +603,6 @@ zsbt_attr_repack(Relation rel, AttrNumber attno, Buffer oldbuf, ZSAttStream *att
 	Page		oldpage = BufferGetPage(oldbuf);
 	ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(oldpage);
 	BlockNumber orignextblk;
-	zs_split_stack *stack;
-	List	   *downlinks = NIL;
 	zstid		lokey;
 
 	orignextblk = oldopaque->zs_next;
@@ -690,6 +691,22 @@ zsbt_attr_repack(Relation rel, AttrNumber attno, Buffer oldbuf, ZSAttStream *att
 			zsbt_attr_pack_attstream(attr, &chopper, cxt.currpage, &lokey);
 		}
 	}
+	zsbt_attr_repack_write_pages(&cxt, rel, attno, oldbuf, orignextblk);
+}
+
+/*
+ * internal routines of zsbt_attr_repack.
+ */
+
+static void
+zsbt_attr_repack_write_pages(struct zsbt_attr_repack_context *cxt,
+							 Relation rel, AttrNumber attno,
+							 Buffer oldbuf, BlockNumber orignextblk)
+{
+	Page		oldpage = BufferGetPage(oldbuf);
+	ZSBtreePageOpaque *oldopaque = ZSBtreePageGetOpaque(oldpage);
+	zs_split_stack *stack;
+	List	   *downlinks = NIL;
 
 	/*
 	 * Ok, we now have a list of pages, to replace the original page, as private
@@ -698,7 +715,7 @@ zsbt_attr_repack(Relation rel, AttrNumber attno, Buffer oldbuf, ZSAttStream *att
 	 * allocate all the pages before entering critical section, so that
 	 * out-of-disk-space doesn't lead to PANIC
 	 */
-	stack = cxt.stack_head;
+	stack = cxt->stack_head;
 	Assert(stack->buf == InvalidBuffer);
 	stack->buf = oldbuf;
 	while (stack->next)
@@ -727,9 +744,9 @@ zsbt_attr_repack(Relation rel, AttrNumber attno, Buffer oldbuf, ZSAttStream *att
 	ZSBtreePageGetOpaque(stack->page)->zs_next = orignextblk;
 
 	/* If we had to split, insert downlinks for the new pages. */
-	if (cxt.stack_head->next)
+	if (cxt->stack_head->next)
 	{
-		oldopaque = ZSBtreePageGetOpaque(cxt.stack_head->page);
+		oldopaque = ZSBtreePageGetOpaque(cxt->stack_head->page);
 
 		if ((oldopaque->zs_flags & ZSBT_ROOT) != 0)
 		{
@@ -737,30 +754,29 @@ zsbt_attr_repack(Relation rel, AttrNumber attno, Buffer oldbuf, ZSAttStream *att
 
 			downlink = palloc(sizeof(ZSBtreeInternalPageItem));
 			downlink->tid = MinZSTid;
-			downlink->childblk = BufferGetBlockNumber(cxt.stack_head->buf);
+			downlink->childblk = BufferGetBlockNumber(cxt->stack_head->buf);
 			downlinks = lcons(downlink, downlinks);
 
-			cxt.stack_tail->next = zsbt_newroot(rel, attno, oldopaque->zs_level + 1, downlinks);
+			cxt->stack_tail->next = zsbt_newroot(rel, attno, oldopaque->zs_level + 1, downlinks);
 
 			/* clear the ZSBT_ROOT flag on the old root page */
 			oldopaque->zs_flags &= ~ZSBT_ROOT;
 		}
 		else
 		{
-			cxt.stack_tail->next = zsbt_insert_downlinks(rel, attno,
-														 oldopaque->zs_lokey, BufferGetBlockNumber(oldbuf), oldopaque->zs_level + 1,
-														 downlinks);
+			cxt->stack_tail->next = zsbt_insert_downlinks(rel, attno,
+														  oldopaque->zs_lokey,
+														  BufferGetBlockNumber(oldbuf),
+														  oldopaque->zs_level + 1,
+														  downlinks);
 		}
 		/* note: stack_tail is not the real tail anymore */
 	}
 
 	/* Finally, overwrite all the pages we had to modify */
-	zs_apply_split_changes(rel, cxt.stack_head, NULL);
+	zs_apply_split_changes(rel, cxt->stack_head, NULL);
 }
 
-/*
- * internal routines of zsbt_attr_repack.
- */
 
 static void
 zsbt_attr_repack_newpage(struct zsbt_attr_repack_context *cxt, zstid nexttid, int flags)
