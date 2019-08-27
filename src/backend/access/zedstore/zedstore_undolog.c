@@ -256,8 +256,6 @@ zsundo_insert_finish(zs_undo_reservation *reservation)
 
 	Assert(((PageHeader) undopg)->pd_lower == reservation->undorecptr.offset);
 
-	undopg = BufferGetPage(undobuf);
-
 	opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(undopg);
 	opaque->last_undorecptr = reservation->undorecptr;
 
