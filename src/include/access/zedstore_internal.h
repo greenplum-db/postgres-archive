@@ -123,7 +123,7 @@ ZSBtreeInternalPageIsFull(Page page)
  * format.
  *
  * By convention, the attribute stream stored in the upper part of the
- * page, between pd_lower and pd_special, is compressed, and the lower
+ * page, between pd_upper and pd_special, is compressed, and the lower
  * stream, stored between the page header and pd_lower, is uncompressed:
  *
  * +--------------------+
@@ -614,7 +614,7 @@ typedef struct ZSAttrTreeScan
 
 	/*
 	 * These fields are used, when the scan is processing an array tuple.
-	 * They are filled in by zsbt_attr_item_extract().
+	 * They are filled in by zsbt_attr_scan_fetch_array().
 	 */
 	int			array_datums_allocated_size;
 	Datum	   *array_datums;
@@ -625,7 +625,7 @@ typedef struct ZSAttrTreeScan
 
 	int			array_curr_idx;
 
-	/* working area for zsbt_attr_item_extract() */
+	/* working area for zsbt_attr_scan_fetch_array() */
 	char	   *attr_buf;
 	int			attr_buf_size;
 
