@@ -780,10 +780,15 @@ zs_new_split_stack_entry(Buffer buf, Page page)
 	stack->next = NULL;
 	stack->buf = buf;
 	stack->page = page;
-	stack->recycle = false;		/* caller can change this */
+
+	/* caller can change these */
+	stack->recycle = false;
+	stack->special_only = false;
 
 	return stack;
 }
+
+#define MAX_BLOCKS_IN_REWRITE		100
 
 /*
  * Apply all the changes represented by a list of zs_split_stack
@@ -794,42 +799,98 @@ zs_apply_split_changes(Relation rel, zs_split_stack *stack, zs_pending_undo_op *
 {
 	zs_split_stack *head = stack;
 	bool		wal_needed = RelationNeedsWAL(rel);
-	List	   *buffers = NIL;
+	wal_zedstore_btree_rewrite_pages *xlrec = NULL;
+	int			xlrecsz = 0;
+	int			block_id = 0;
+	XLogRecPtr	recptr;
 
 	if (wal_needed)
 	{
-		stack = head;
-		while (stack)
-		{
-			buffers = lappend_int(buffers, stack->buf);
-			stack = stack->next;
-		}
+		int			num_pages = 0;
+		int			i;
 
-		XLogEnsureRecordSpace(list_length(buffers), 0);
+		for (stack = head; stack != NULL; stack = stack->next)
+			num_pages++;
+
+		if (num_pages > MAX_BLOCKS_IN_REWRITE)
+			elog(ERROR, "cannot rewrite more than %d pages in one WAL record",
+				 MAX_BLOCKS_IN_REWRITE);
+		/*
+		 * +1 buffers, for UNDO.
+		 * +1 rdata for UNDO, and +1 for the wal_zedstore_btree_rewrite_pages struct
+		 */
+		XLogEnsureRecordSpace(1 + num_pages,
+							  1 + 1 + num_pages);
+
+		xlrecsz = SizeOfZSWalBtreeRewritePages(num_pages);
+		xlrec = palloc(xlrecsz);
+
+		xlrec->numpages = num_pages;
+		i = 0;
+		for (stack = head; stack != NULL; stack = stack->next)
+		{
+			xlrec->pageinfo[i].recycle = stack->recycle;
+			xlrec->pageinfo[i].special_only = stack->special_only;
+			i++;
+		}
+		Assert(i == num_pages);
+
+		XLogBeginInsert();
+		XLogRegisterData((char *) &xlrec, xlrecsz);
+
+		if (undo_op)
+			XLogRegisterUndoOp(0, undo_op);
 	}
 
 	START_CRIT_SECTION();
 
-	stack = head;
-	while (stack)
+	block_id = 1;		/* 0 is undo page */
+	for (stack = head; stack != NULL; stack = stack->next)
 	{
-		PageRestoreTempPage(stack->page, BufferGetPage(stack->buf));
+		Page		origpage = BufferGetPage(stack->buf);
+
+		if (stack->special_only)
+		{
+			char	   *orig_special_area = PageGetSpecialPointer(origpage);
+			char	   *new_special_area = PageGetSpecialPointer(stack->page);
+			uint16		special_size = PageGetSpecialSize(stack->page);
+
+			Assert(PageGetSpecialSize(origpage) == special_size);
+			Assert(memcmp(origpage, stack->page, BLCKSZ - special_size) == 0);
+			memcpy(orig_special_area, new_special_area, special_size);
+			pfree(stack->page);
+
+			if (wal_needed)
+			{
+				XLogRegisterBuffer(block_id, stack->buf, REGBUF_STANDARD);
+				XLogRegisterBufData(block_id, orig_special_area, special_size);
+			}
+		}
+		else
+		{
+			PageRestoreTempPage(stack->page, BufferGetPage(stack->buf));
+
+			if (wal_needed)
+				XLogRegisterBuffer(block_id, stack->buf,
+								   REGBUF_STANDARD | REGBUF_FORCE_IMAGE);
+		}
 		MarkBufferDirty(stack->buf);
-		stack = stack->next;
+
+		block_id++;
 	}
 
 	if (undo_op)
 		zsundo_finish_pending_op(undo_op, (char *) undo_op->payload);
 
-	if (RelationNeedsWAL(rel))
+	if (wal_needed)
 	{
-		/*
-		 * FIXME: it would be good to add the 'recycle' flags to the WAL record,
-		 * so that we wouldn't leak the unused pages on crash.
-		 */
-		zsbt_wal_log_rewrite_pages(rel, 0 /* FIXME: attno. but not used for anything ATM */,
-								   buffers, undo_op);
-		list_free(buffers);
+		recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_BTREE_REWRITE_PAGES);
+
+		if (undo_op)
+			PageSetLSN(BufferGetPage(undo_op->reservation.undobuf), recptr);
+
+		for (stack = head; stack != NULL; stack = stack->next)
+			PageSetLSN(BufferGetPage(stack->buf), recptr);
 	}
 
 	END_CRIT_SECTION();
@@ -855,6 +916,8 @@ zs_apply_split_changes(Relation rel, zs_split_stack *stack, zs_pending_undo_op *
 		pfree(stack);
 		stack = next;
 	}
+	if (wal_needed)
+		pfree(xlrec);
 }
 
 static int
@@ -878,62 +941,22 @@ zsbt_binsrch_internal(zstid key, ZSBtreeInternalPageItem *arr, int arr_elems)
 	return low - 1;
 }
 
-
-#define MAX_BLOCKS_IN_REWRITE		100
-
-void
-zsbt_wal_log_rewrite_pages(Relation rel, AttrNumber attno, List *buffers, zs_pending_undo_op *undo_op)
-{
-	ListCell   *lc;
-	XLogRecPtr	recptr;
-	wal_zedstore_btree_rewrite_pages xlrec;
-	uint8		block_id;
-
-	if (1 /* for undo */ + list_length(buffers) > MAX_BLOCKS_IN_REWRITE)
-		elog(ERROR, "too many blocks for zedstore rewrite_pages record: %d", list_length(buffers));
-
-	xlrec.attno = attno;
-
-	XLogBeginInsert();
-	XLogRegisterData((char *) &xlrec, SizeOfZSWalBtreeRewritePages);
-
-	if (undo_op)
-		XLogRegisterUndoOp(0, undo_op);
-
-	block_id = 1;
-	foreach(lc, buffers)
-	{
-		Buffer buf = (Buffer) lfirst_int(lc);
-
-		XLogRegisterBuffer(block_id, buf,
-						   REGBUF_STANDARD | REGBUF_FORCE_IMAGE | REGBUF_KEEP_DATA);
-		block_id++;
-	}
-
-	recptr = XLogInsert(RM_ZEDSTORE_ID, WAL_ZEDSTORE_BTREE_REWRITE_PAGES);
-
-	if (undo_op)
-		PageSetLSN(BufferGetPage(undo_op->reservation.undobuf), recptr);
-	foreach(lc, buffers)
-	{
-		Buffer buf = (Buffer) lfirst_int(lc);
-
-		PageSetLSN(BufferGetPage(buf), recptr);
-	}
-}
-
 void
 zsbt_rewrite_pages_redo(XLogReaderState *record)
 {
-#ifdef UNUSED
 	XLogRecPtr	lsn = record->EndRecPtr;
-	wal_zedstore_btree_rewrite_pages *xlrec = (wal_zedstore_btree_rewrite_pages *) XLogRecGetData(record);
-#endif
+	wal_zedstore_btree_rewrite_pages *xlrec =
+		(wal_zedstore_btree_rewrite_pages *) XLogRecGetData(record);
 	Buffer		buffers[MAX_BLOCKS_IN_REWRITE];
 	uint8		block_id;
 
+	/* sanity checks */
 	if (record->max_block_id >= MAX_BLOCKS_IN_REWRITE)
 		elog(ERROR, "too many blocks in zedstore rewrite_pages record: %d", record->max_block_id + 1);
+	if (XLogRecGetDataLen(record) != SizeOfZSWalBtreeRewritePages(xlrec->numpages))
+		elog(ERROR, "incorrect record struct size");
+	if (xlrec->numpages != record->max_block_id)
+		elog(ERROR, "number of blocks in WAL record does not match record struct");
 
 	if (XLogRecHasBlockRef(record, 0))
 		buffers[0] = XLogRedoUndoOp(record, 0);
@@ -943,8 +966,23 @@ zsbt_rewrite_pages_redo(XLogReaderState *record)
 	/* Iterate over blocks */
 	for (block_id = 1; block_id <= record->max_block_id; block_id++)
 	{
-		if (XLogReadBufferForRedo(record, block_id, &buffers[block_id]) != BLK_RESTORED)
-			elog(ERROR, "zedstore rewrite_pages WAL record did not contain a full-page image");
+		if (XLogReadBufferForRedo(record, block_id, &buffers[block_id]) == BLK_NEEDS_REDO)
+		{
+			Page		page = BufferGetPage(buffers[block_id]);
+			char	   *special_area = PageGetSpecialPointer(page);
+			uint16		special_size = PageGetSpecialSize(page);
+			Size		new_special_size;
+			char	   *new_special_area = XLogRecGetBlockData(record, block_id, &new_special_size);
+
+			if (!xlrec->pageinfo[block_id - 1].special_only)
+				elog(ERROR, "zedstore rewrite_pages WAL record did not contain a full-page image");
+
+			if (new_special_size != special_size)
+				elog(ERROR, "size of page's special area in WAL record does not match old page");
+
+			memcpy(special_area, new_special_area, special_size);
+			PageSetLSN(page, lsn);
+		}
 	}
 
 	/* Changes are done: unlock and release all buffers */
@@ -953,4 +991,11 @@ zsbt_rewrite_pages_redo(XLogReaderState *record)
 		if (BufferIsValid(buffers[block_id]))
 			UnlockReleaseBuffer(buffers[block_id]);
 	}
+
+	/*
+	 * XXX: The WAL record includes the 'recycle' flags, but we don't use them
+	 * for anything. Deleting a page is WAL-logged separately. We could use the
+	 * recycle flag here to catch leaked pages on crash, but it's probably not
+	 * a big deal in practice.
+	 */
 }

@@ -641,6 +641,12 @@ zsbt_attr_repack(Relation rel, AttrNumber attno, Buffer oldbuf, ZSAttStream *att
 		}
 		else
 		{
+			/*
+			 * we are not changing the data on the old buffer, only the
+			 * hikey
+			 */
+			cxt.stack_head->special_only = true;
+
 			if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
 			{
 				/*
@@ -651,7 +657,7 @@ zsbt_attr_repack(Relation rel, AttrNumber attno, Buffer oldbuf, ZSAttStream *att
 				elog(ERROR, "cannot append already-compressed attstream");
 			}
 
-			/* lo key for the next page */
+			/* high key for the original page and lo key for the next page */
 			lokey = get_attstream_first_tid(attr->attlen, attstream);
 
 			/*

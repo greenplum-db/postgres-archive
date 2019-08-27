@@ -702,6 +702,8 @@ struct zs_split_stack
 	Buffer		buf;
 	Page		page;		/* temp in-memory copy of page */
 	bool		recycle;	/* should the page be added to the FPM? */
+	bool		special_only; /* if set, only the "special" area was changed, (the
+							   * rest of the page won't need to be WAL-logged */
 };
 
 /* prototypes for functions in zedstore_tidpage.c */

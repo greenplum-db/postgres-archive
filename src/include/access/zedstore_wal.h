@@ -119,11 +119,17 @@ typedef struct wal_zedstore_tidleaf_items
  */
 typedef struct wal_zedstore_btree_rewrite_pages
 {
-	AttrNumber	attno;		/* 0 means TID tree */
 	int			numpages;
+
+	/* one of these per page. */
+	struct
+	{
+		bool		recycle;
+		bool		special_only;
+	} pageinfo[FLEXIBLE_ARRAY_MEMBER];
 } wal_zedstore_btree_rewrite_pages;
 
-#define SizeOfZSWalBtreeRewritePages (offsetof(wal_zedstore_btree_rewrite_pages, attno) + sizeof(AttrNumber))
+#define SizeOfZSWalBtreeRewritePages(numpages) (offsetof(wal_zedstore_btree_rewrite_pages, pageinfo[numpages]))
 
 /*
  * WAL record for a change to attribute leaf page.
