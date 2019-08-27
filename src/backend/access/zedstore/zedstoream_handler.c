@@ -1516,8 +1516,6 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 								 &fetch_proj->attr_scans[i - 1]);
 		}
 		MemoryContextSwitchTo(oldcontext);
-
-		zsbt_tid_begin_scan(rel, tid, tid + 1, snapshot, &fetch_proj->tid_scan);
 	}
 	else
 		zsbt_tid_reset_scan(&fetch_proj->tid_scan, tid, tid + 1, tid - 1);
