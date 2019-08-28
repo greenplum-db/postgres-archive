@@ -236,8 +236,22 @@ brin_inclusion_add_value(PG_FUNCTION_ARGS)
 	result = FunctionCall2Coll(finfo, colloid,
 							   column->bv_values[INCLUSION_UNION], newval);
 	if (!attr->attbyval)
-		pfree(DatumGetPointer(column->bv_values[INCLUSION_UNION]));
-	column->bv_values[INCLUSION_UNION] = result;
+	{
+		if (result == column->bv_values[INCLUSION_UNION])
+		{
+			/* nothing to do. */
+		}
+		else
+		{
+			pfree(DatumGetPointer(column->bv_values[INCLUSION_UNION]));
+
+			if (result == newval)
+				result = datumCopy(result, attr->attbyval, attr->attlen);
+			column->bv_values[INCLUSION_UNION] = result;
+		}
+	}
+	else
+		column->bv_values[INCLUSION_UNION] = result;
 
 	PG_RETURN_BOOL(true);
 }
