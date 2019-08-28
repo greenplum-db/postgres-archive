@@ -563,19 +563,21 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 	{
 		/*
 		 * Rewrite existing data on the page, and add as much of the
-		 * new data as fits.
+		 * new data as fits. But make sure that we write at least one
+		 * chunk of new data, otherwise we might get stuck in a loop
+		 * without making any progress.
 		 */
-		zstid		lastoldtid = InvalidZSTid;
+		zstid		mintid = attbuf->firsttid;
 
 		/* merge the old items to the working buffer */
 		if (upperstream)
 		{
-			lastoldtid = Max(lastoldtid, upperstream->t_lasttid);
+			mintid = Max(mintid, upperstream->t_lasttid);
 			merge_attstream(attr, attbuf, upperstream);
 		}
 		if (lowerstream)
 		{
-			lastoldtid = Max(lastoldtid, lowerstream->t_lasttid);
+			mintid = Max(mintid, lowerstream->t_lasttid);
 			merge_attstream(attr, attbuf, lowerstream);
 		}
 
@@ -587,7 +589,7 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 		zsbt_attr_repack_init(&cxt, attno, origbuf, false);
 		zsbt_attr_pack_attstream(attr, attbuf, cxt.currpage);
 
-		while (attbuf->cursor < attbuf->len && attbuf->firsttid < lastoldtid)
+		while (attbuf->cursor < attbuf->len && attbuf->firsttid <= mintid)
 		{
 			zsbt_attr_repack_newpage(&cxt, attbuf->firsttid);
 			zsbt_attr_pack_attstream(attr, attbuf, cxt.currpage);
