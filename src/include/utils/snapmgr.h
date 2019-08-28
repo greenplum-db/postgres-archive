@@ -14,7 +14,6 @@
 #define SNAPMGR_H
 
 #include "access/transam.h"
-#include "fmgr.h"
 #include "utils/relcache.h"
 #include "utils/resowner.h"
 #include "utils/snapshot.h"
@@ -41,7 +40,6 @@
 	 RelationNeedsWAL(rel) \
   && !IsCatalogRelation(rel) \
   && !RelationIsAccessibleInLogicalDecoding(rel) \
-  && !RelationHasUnloggedIndex(rel) \
 )
 
 #define EarlyPruningEnabled(rel) (old_snapshot_threshold >= 0 && RelationAllowsEarlyPruning(rel))
