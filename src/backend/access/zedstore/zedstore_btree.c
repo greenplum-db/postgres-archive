@@ -836,7 +836,7 @@ zs_apply_split_changes(Relation rel, zs_split_stack *stack, zs_pending_undo_op *
 		Assert(i == num_pages);
 
 		XLogBeginInsert();
-		XLogRegisterData((char *) &xlrec, xlrecsz);
+		XLogRegisterData((char *) xlrec, xlrecsz);
 
 		if (undo_op)
 			XLogRegisterUndoOp(0, undo_op);
@@ -953,10 +953,11 @@ zsbt_rewrite_pages_redo(XLogReaderState *record)
 	/* sanity checks */
 	if (record->max_block_id >= MAX_BLOCKS_IN_REWRITE)
 		elog(ERROR, "too many blocks in zedstore rewrite_pages record: %d", record->max_block_id + 1);
-	if (XLogRecGetDataLen(record) != SizeOfZSWalBtreeRewritePages(xlrec->numpages))
-		elog(ERROR, "incorrect record struct size");
 	if (xlrec->numpages != record->max_block_id)
-		elog(ERROR, "number of blocks in WAL record does not match record struct");
+		elog(ERROR, "number of blocks in WAL record %d does not match record struct %d",
+			 record->max_block_id, xlrec->numpages);
+	if (XLogRecGetDataLen(record) != SizeOfZSWalBtreeRewritePages(xlrec->numpages))
+		elog(ERROR, "incorrect record struct size %d %ld", XLogRecGetDataLen(record), SizeOfZSWalBtreeRewritePages(xlrec->numpages));
 
 	if (XLogRecHasBlockRef(record, 0))
 		buffers[0] = XLogRedoUndoOp(record, 0);
