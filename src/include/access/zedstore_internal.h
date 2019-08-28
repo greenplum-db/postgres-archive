@@ -840,32 +840,49 @@ extern void zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno
 								 ZSAttrTreeScan *scan);
 extern void zsbt_attr_end_scan(ZSAttrTreeScan *scan);
 extern bool zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid tid);
-
 extern void zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
-							  Datum *datums, bool *isnulls, zstid *tids, int ndatums);
+								   Datum *datums, bool *isnulls, zstid *tids, int ndatums);
 extern void zsbt_attstream_change_redo(XLogReaderState *record);
 
 /* prototypes for functions in zedstore_attstream.c */
-extern ZSAttStream *create_attstream(Form_pg_attribute att, int nelems, zstid *tids,
-									 Datum *datums, bool *isnulls);
-extern ZSAttStream *merge_attstreams(Relation rel, Form_pg_attribute attr,
-									 ZSAttStream *chunks1, ZSAttStream *chunks2,
-									 zstid *tids_to_remove, int num_tids_to_remove);
-extern bool append_attstreams_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int freespace, ZSAttStream *newchunks);
+
+struct attstream_buffer
+{
+	char	   *data;		/* contains raw chunks */
+	int			len;
+	int			maxlen;
+	int			cursor;		/* beginning of remaining chunks */
+
+	zstid		firsttid;
+	zstid		lasttid;
+
+	int16		attlen;
+	bool		attbyval;
+};
+typedef struct attstream_buffer attstream_buffer;
+
+extern void create_attstream(attstream_buffer *buffer, bool attbyval, int16 attlen,
+							 int nelems, zstid *tids, Datum *datums, bool *isnulls);
+extern int append_attstream(attstream_buffer *buffer, bool all, int nelems,
+							zstid *tids, Datum *datums, bool *isnulls);
+
+extern void init_attstream_buffer(attstream_buffer *buffer, bool attbyval, int16 attlen,
+								   ZSAttStream *attstream);
+
+extern void vacuum_attstream(Relation rel, AttrNumber attno, attstream_buffer *buffer,
+							 ZSAttStream *attstream,
+							 zstid *tids_to_remove, int num_tids_to_remove);
+
+extern void merge_attstream(Form_pg_attribute attr, attstream_buffer *buffer, ZSAttStream *attstream2);
+extern void merge_attstream_buffer(Form_pg_attribute attr, attstream_buffer *buffer, attstream_buffer *buffer2);
+
+extern bool append_attstream_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int freespace, attstream_buffer *newstream);
+
 extern void decode_attstream(ZSAttrTreeScan *scan, ZSAttStream *chunks);
 extern int truncate_attstream(Form_pg_attribute att, char *chunks, int len, zstid *lasttid);
 extern zstid get_attstream_first_tid(int attlen, ZSAttStream *chunk);
 
-typedef struct
-{
-	char	   *data;
-	int			len;
-	int			cursor;		/* beginning of remaining chunks */
-
-	zstid		lasttid;
-} chopper_state;
-
-extern zstid chop_attstream(Form_pg_attribute att, chopper_state *chunks, int pos, zstid lasttid);
+extern void chop_attstream(attstream_buffer *buffer, int pos, zstid lasttid);
 extern void print_attstream(Form_pg_attribute att, char *chunk, int len);
 
 /* prototypes for functions in zedstore_btree.c */

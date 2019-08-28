@@ -55,7 +55,6 @@
 #include "postgres.h"
 
 #include "access/zedstore_internal.h"
-#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
@@ -71,63 +70,147 @@ static int get_chunk_length(int attlen, char *chunk);
 static zstid get_chunk_first_tid(int attlen, char *chunk);
 static int decode_chunk(bool attbyval, int attlen, zstid *lasttid, char *chunk,
 						int *num_elems, zstid *tids, Datum *datums, bool *isnulls);
-static int encode_chunk(bool attbyval, int attlen, zstid prevtid, int ntids,
-						zstid *tids, Datum *datums, bool *isnulls,
-						StringInfo dst);
+static int encode_chunk(attstream_buffer *dst, zstid prevtid, int ntids,
+						zstid *tids, Datum *datums, bool *isnulls);
 #ifdef USE_ASSERT_CHECKING
-static void verify_attstream(Form_pg_attribute att, ZSAttStream *attstream);
+static void verify_attstream(attstream_buffer *buffer);
 #endif
 
 /* Other internal functions. */
+static void decode_chunks(ZSAttrTreeScan *scan, char *chunks, int chunkslen);
+static void merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buffer, char *chunks2, int chunks2len);
+
 static ZSAttStream *decompress_attstream(ZSAttStream *attstream);
-static ZSAttStream *append_attstreams(Form_pg_attribute attr,
-									  ZSAttStream *attstream1, ZSAttStream *attstream2);
+
+static void
+enlarge_attstream_buffer_slow(attstream_buffer *buf, int needed)
+{
+	/* copied from StringInfo */
+	int			newlen;
+
+	if (((Size) needed) >= (MaxAllocSize - (Size) buf->len))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("out of memory"),
+				 errdetail("Cannot enlarge attstream buffer containing %d bytes by %d more bytes.",
+						   buf->len, needed)));
+
+	needed += buf->len;		/* total space required now */
+
+	/* Because of the above test, we now have needed <= MaxAllocSize */
+
+	if (needed <= buf->maxlen)
+		return;					/* got enough space already */
+
+	/*
+	 * We don't want to allocate just a little more space with each append;
+	 * for efficiency, double the buffer size each time it overflows.
+	 * Actually, we might need to more than double it if 'needed' is big...
+	 */
+	newlen = 2 * buf->maxlen;
+	while (needed > newlen)
+		newlen = 2 * newlen;
+
+	/*
+	 * Clamp to MaxAllocSize in case we went past it.  Note we are assuming
+	 * here that MaxAllocSize <= INT_MAX/2, else the above loop could
+	 * overflow.  We will still have newlen >= needed.
+	 */
+	if (newlen > (int) MaxAllocSize)
+		newlen = (int) MaxAllocSize;
+
+	buf->data = (char *) repalloc(buf->data, newlen);
+
+	buf->maxlen = newlen;
+}
+
+static inline void
+enlarge_attstream_buffer(attstream_buffer *buf, int needed)
+{
+	if (needed > buf->maxlen - buf->len)
+		enlarge_attstream_buffer_slow(buf, needed);
+}
 
 /*
  * Pack given datums into an attstream.
  */
-ZSAttStream *
-create_attstream(Form_pg_attribute att, int nelems, zstid *tids,
-				   Datum *datums, bool *isnulls)
+void
+create_attstream(attstream_buffer *dst, bool attbyval, int16 attlen,
+				 int nelems, zstid *tids, Datum *datums, bool *isnulls)
 {
-	StringInfoData result;
 	int			num_encoded;
+	int			elems_remain;
 	zstid		prevtid;
-	char		zeros[offsetof(ZSAttStream, t_payload)];
-	ZSAttStream *hdr;
 
-	initStringInfo(&result);
+	Assert(nelems > 0);
 
-	appendBinaryStringInfo(&result, zeros, offsetof(ZSAttStream, t_payload));
+#define INIT_ATTREAM_BUF_SIZE 1024
+	dst->data = palloc(INIT_ATTREAM_BUF_SIZE);
+	dst->len = 0;
+	dst->maxlen = INIT_ATTREAM_BUF_SIZE;
+	dst->cursor = 0;
+	dst->attlen = attlen;
+	dst->attbyval = attbyval;
+
+	dst->firsttid = tids[0];
+	dst->lasttid = tids[nelems - 1];
 
 	prevtid = 0;
-	while (nelems > 0)
+	elems_remain = nelems;
+	while (elems_remain > 0)
 	{
-		num_encoded = encode_chunk(att->attbyval, att->attlen,
-								   prevtid, nelems, tids, datums, isnulls, &result);
+		num_encoded = encode_chunk(dst, prevtid, elems_remain, tids, datums, isnulls);
 		Assert(num_encoded > 0);
 		prevtid = tids[num_encoded - 1];
 		datums += num_encoded;
 		isnulls += num_encoded;
 		tids += num_encoded;
-		nelems -= num_encoded;
+		elems_remain -= num_encoded;
 	}
-
-	/* Fill in the header */
-	hdr = (ZSAttStream *) result.data;
-	hdr->t_size = result.len;
-	hdr->t_flags = 0;
-	hdr->t_decompressed_size = 0;
-	hdr->t_decompressed_bufsize = 0;
-	hdr->t_lasttid = tids[nelems - 1];
-
-#ifdef USE_ASSERT_CHECKING
-	verify_attstream(att, hdr);
-#endif
-
-	return hdr;
 }
 
+int
+append_attstream(attstream_buffer *buf, bool all, int nelems,
+				 zstid *tids, Datum *datums, bool *isnulls)
+{
+	int			num_encoded;
+	int			elems_remain;
+	zstid		prevtid;
+
+	/* Can we avoid enlarging the buffer by moving the existing data? */
+	if (buf->cursor > 128 * 1024 && buf->cursor > buf->len / 2)
+	{
+		memcpy(buf->data, buf->data + buf->cursor, buf->len - buf->cursor);
+		buf->len -= buf->cursor;
+		buf->cursor = 0;
+	}
+
+	Assert(nelems > 0);
+	Assert(tids[0] > buf->lasttid);
+
+	if (buf->len - buf->cursor == 0)
+	{
+		buf->firsttid = tids[0];
+		prevtid = 0;
+	}
+	else
+		prevtid = buf->lasttid;
+	elems_remain = nelems;
+	while (elems_remain > (all ? 0 : 59))
+	{
+		num_encoded = encode_chunk(buf, prevtid, elems_remain, tids, datums, isnulls);
+		Assert(num_encoded > 0);
+		prevtid = tids[num_encoded - 1];
+		datums += num_encoded;
+		isnulls += num_encoded;
+		tids += num_encoded;
+		elems_remain -= num_encoded;
+	}
+
+	buf->lasttid = prevtid;
+
+	return nelems - elems_remain;
+}
 
 /*
  * Extract TID and Datum/isnull arrays an attstream.
@@ -137,16 +220,9 @@ create_attstream(Form_pg_attribute att, int nelems, zstid *tids,
  * TODO: avoid extracting elements we're not interested in, by passing
  * starttid/endtid.
  */
-void
-decode_attstream(ZSAttrTreeScan *scan, ZSAttStream *chunks)
+static void
+init_scan_decode(ZSAttrTreeScan *scan)
 {
-	Form_pg_attribute attr = scan->attdesc;
-	zstid		lasttid;
-	int			total_decoded;
-	char	   *p;
-	char	   *pend;
-	MemoryContext oldcxt;
-
 	if (scan->array_datums_allocated_size < 200)
 	{
 		/* initial size */
@@ -175,15 +251,40 @@ decode_attstream(ZSAttrTreeScan *scan, ZSAttStream *chunks)
 												"ZedstoreAMScanContext",
 												ALLOCSET_DEFAULT_SIZES);
 	}
-	else
-		MemoryContextReset(scan->array_cxt);
+}
+
+void
+decode_attstream(ZSAttrTreeScan *scan, ZSAttStream *attstream)
+{
+	MemoryContext oldcxt;
+
+	init_scan_decode(scan);
+
+	MemoryContextReset(scan->array_cxt);
+
 	oldcxt = MemoryContextSwitchTo(scan->array_cxt);
 
-	if ((chunks->t_flags & ATTSTREAM_COMPRESSED) != 0)
-		chunks = decompress_attstream(chunks);
+	if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
+		attstream = decompress_attstream(attstream);
 
-	p = chunks->t_payload;
-	pend = ((char *) chunks) + chunks->t_size;
+	decode_chunks(scan, attstream->t_payload, attstream->t_size - SizeOfZSAttStreamHeader);
+
+	MemoryContextSwitchTo(oldcxt);
+}
+
+static void
+decode_chunks(ZSAttrTreeScan *scan, char *chunks, int chunkslen)
+{
+	Form_pg_attribute attr = scan->attdesc;
+	zstid		lasttid;
+	int			total_decoded;
+	char	   *p;
+	char	   *pend;
+
+	init_scan_decode(scan);
+
+	p = chunks;
+	pend = chunks + chunkslen;
 
 	total_decoded = 0;
 	lasttid = 0;
@@ -211,8 +312,6 @@ decode_attstream(ZSAttrTreeScan *scan, ZSAttStream *chunks)
 	}
 	Assert(p == pend);
 	scan->array_num_elements = total_decoded;
-
-	MemoryContextSwitchTo(oldcxt);
 }
 
 /*
@@ -232,13 +331,9 @@ get_attstream_first_tid(int attlen, ZSAttStream *attstream)
  *
  * The current chunk begins at chunks->cursor. The 'cursor' will
  * be moved to the new starting position.
- *
- * NOTE: this modifies the chunk in place.
- *
- * Returns the firsttid after the splitpoint.
  */
-zstid
-chop_attstream(Form_pg_attribute att, chopper_state *chunks, int pos, zstid lasttid)
+void
+chop_attstream(attstream_buffer *buf, int pos, zstid lasttid)
 {
 	char	   *first_chunk;
 	int			first_chunk_len;
@@ -247,17 +342,15 @@ chop_attstream(Form_pg_attribute att, chopper_state *chunks, int pos, zstid last
 	bool		first_chunk_isnulls[60];
 	int			first_chunk_num_elems;
 	zstid		xtid;
-	StringInfoData buf;
-	int			total_encoded;
-	zstid		prevtid;
+	attstream_buffer tmpbuf;
 	zstid		newfirsttid;
 
-	chunks->cursor += pos;
-	Assert(chunks->cursor <= chunks->len);
-	if (chunks->cursor >= chunks->len)
+	buf->cursor += pos;
+	Assert(buf->cursor <= buf->len);
+	if (buf->cursor >= buf->len)
 	{
-		Assert(chunks->cursor == chunks->len);
-		return InvalidZSTid;
+		Assert(buf->cursor == buf->len);
+		return;
 	}
 
 	/* FIXME: arbitrary limit. We need some space before the split point, for the
@@ -266,56 +359,51 @@ chop_attstream(Form_pg_attribute att, chopper_state *chunks, int pos, zstid last
 	 * attstreams to page-sized parts, so this never gets called with a very
 	 * small 'pos'.
 	 */
-	if (chunks->cursor < 500)
+	if (buf->cursor < 500)
 		elog(ERROR, "cannot split");
 
 	/*
 	 * Try to modify the first codeword in place. It just might work out if
 	 * we're lucky.
 	 */
-	first_chunk = chunks->data + chunks->cursor;
+	first_chunk = buf->data + buf->cursor;
 
-	newfirsttid = lasttid + get_chunk_first_tid(att->attlen, first_chunk);
-	if (replace_first_tid(att->attlen, newfirsttid, first_chunk))
+	newfirsttid = lasttid + get_chunk_first_tid(buf->attlen, first_chunk);
+	if (!replace_first_tid(buf->attlen, newfirsttid, first_chunk))
 	{
-		return newfirsttid;
+
+		/* Try to split the first chunk */
+		xtid = lasttid;
+		first_chunk_len = decode_chunk(buf->attbyval, buf->attlen, &xtid,
+									   first_chunk,
+									   &first_chunk_num_elems,
+									   first_chunk_tids,
+									   first_chunk_datums,
+									   first_chunk_isnulls);
+
+		/* re-encode the first chunk */
+		create_attstream(&tmpbuf, buf->attbyval, buf->attlen,
+						 first_chunk_num_elems,
+						 first_chunk_tids,
+						 first_chunk_datums,
+						 first_chunk_isnulls);
+
+		/* replace the chunk in the original stream with the new chunks */
+		buf->cursor += first_chunk_len;
+		if (buf->cursor < tmpbuf.len - tmpbuf.cursor)
+			elog(ERROR, "not enough work space to split");
+		buf->cursor -= (tmpbuf.len - tmpbuf.cursor);
+		memcpy(&buf->data[buf->cursor],
+			   tmpbuf.data + tmpbuf.cursor,
+			   tmpbuf.len - tmpbuf.cursor);
+
+		pfree(tmpbuf.data);
+
 	}
-
-	/* Try to split the first chunk */
-	xtid = lasttid;
-	first_chunk_len = decode_chunk(att->attbyval, att->attlen, &xtid,
-								   first_chunk,
-								   &first_chunk_num_elems,
-								   first_chunk_tids,
-								   first_chunk_datums,
-								   first_chunk_isnulls);
-	initStringInfo(&buf);
-
-	/* re-encode */
-	total_encoded = 0;
-	prevtid = 0;
-	while (total_encoded < first_chunk_num_elems)
-	{
-		int		num_encoded;
-
-		num_encoded = encode_chunk(att->attbyval, att->attlen, prevtid,
-								   first_chunk_num_elems - total_encoded,
-								   &first_chunk_tids[total_encoded],
-								   &first_chunk_datums[total_encoded],
-								   &first_chunk_isnulls[total_encoded],
-								   &buf);
-		total_encoded += num_encoded;
-		prevtid = first_chunk_tids[total_encoded - 1];
-	}
-
-	/* replace the chunk in the original stream with the new chunks */
-	chunks->cursor += first_chunk_len;
-	if (chunks->cursor < buf.len)
-		elog(ERROR, "not enough work space to split");
-	chunks->cursor -= buf.len;
-	memcpy(&chunks->data[chunks->cursor], buf.data, buf.len);
-
-	return first_chunk_tids[0];
+	buf->firsttid = newfirsttid;
+#ifdef USE_ASSERT_CHECKING
+	verify_attstream(buf);
+#endif
 }
 
 /*
@@ -347,19 +435,19 @@ truncate_attstream(Form_pg_attribute att, char *chunks, int len, zstid *lasttid)
 
 #ifdef USE_ASSERT_CHECKING
 static void
-verify_attstream(Form_pg_attribute att, ZSAttStream *attstream)
+verify_attstream(attstream_buffer *attbuf)
 {
-	char	   *p = attstream->t_payload;
-	char	   *pend = ((char *) attstream) + attstream->t_size;
+	char	   *p = attbuf->data + attbuf->cursor;
+	char	   *pend = attbuf->data + attbuf->len;
 	zstid		tid;
 
 	tid = 0;
 
 	while (p < pend)
 	{
-		p += skip_chunk(att->attlen, p, &tid);
+		p += skip_chunk(attbuf->attlen, p, &tid);
 	}
-	Assert(tid == attstream->t_lasttid);
+	Assert(tid == attbuf->lasttid);
 	Assert(p == pend);
 }
 #endif
@@ -404,27 +492,104 @@ decompress_attstream(ZSAttStream *attstream)
 	return result;
 }
 
-static ZSAttStream *
-append_attstreams(Form_pg_attribute attr,
-				  ZSAttStream *attstream1, ZSAttStream *attstream2)
+void
+init_attstream_buffer(attstream_buffer *buf, bool attbyval, int16 attlen,
+					  ZSAttStream *attstream)
 {
-	int			resultbufsize;
-	ZSAttStream *result;
+	buf->data = (char *) attstream;
+	buf->len = attstream->t_size;
+	buf->maxlen = attstream->t_size;
+	buf->cursor = SizeOfZSAttStreamHeader;
 
-	if ((attstream1->t_flags & ATTSTREAM_COMPRESSED) != 0)
-		elog(ERROR, "cannot append compressed attstream");
-	if ((attstream2->t_flags & ATTSTREAM_COMPRESSED) != 0)
-		elog(ERROR, "cannot append compressed attstream");
+	buf->attbyval = attbyval;
+	buf->attlen = attlen;
+}
 
-	resultbufsize = attstream1->t_size + attstream2->t_size;
+void
+vacuum_attstream(Relation rel, AttrNumber attno, attstream_buffer *dst,
+				 ZSAttStream *attstream,
+				 zstid *tids_to_remove, int num_tids_to_remove)
+{
+	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
+	ZSAttrTreeScan scan;
+	zstid	   *tids;
+	Datum	   *datums;
+	bool	   *isnulls;
+	int			remain_elems;
+	int			removeidx;
 
-	result = palloc(resultbufsize);
-	memcpy(result, attstream1, attstream1->t_size);
+	/*
+	 * naive implementation: decode everything, merge arrays, and re-encode.
+	 */
+	memset(&scan, 0, sizeof(scan));
+	scan.context = CurrentMemoryContext;
+	scan.attdesc = &rel->rd_att->attrs[attno - 1];
 
-	if (!append_attstreams_inplace(attr, result, resultbufsize - result->t_size, attstream2))
-		elog(ERROR, "splicing two attstreams failed");
+	decode_attstream(&scan, attstream);
 
-	return result;
+	tids = scan.array_tids;
+	datums = scan.array_datums;
+	isnulls = scan.array_isnulls;
+
+	remain_elems = 0;
+	removeidx = 0;
+	for (int idx = 0; idx < scan.array_num_elements; idx++)
+	{
+		zstid		tid;
+		Datum		datum;
+		bool		isnull;
+
+		tid = tids[idx];
+		datum = datums[idx];
+		isnull = isnulls[idx];
+
+		/* also "merge" in the list of tids to remove */
+		while (removeidx < num_tids_to_remove && tid > tids_to_remove[removeidx])
+			removeidx++;
+		if (removeidx < num_tids_to_remove && tid == tids_to_remove[removeidx])
+		{
+			/*
+			 * This datum needs to be removed. Leave it out from the result.
+			 *
+			 * If it's a toasted datum, also remove the toast blocks.
+			 */
+			if (attr->attlen == -1 && !isnull &&
+				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+			{
+				varatt_zs_toastptr *toastptr = (varatt_zs_toastptr *) DatumGetPointer(datum);
+				BlockNumber toast_blkno = toastptr->zst_block;
+
+				zedstore_toast_delete(rel, scan.attdesc, tid, toast_blkno);
+			}
+		}
+		else
+		{
+			tids[remain_elems] = tid;
+			datums[remain_elems] = datum;
+			isnulls[remain_elems] = isnull;
+			remain_elems++;
+		}
+	}
+
+	if (remain_elems != 0)
+	{
+		for (int i = 1; i < remain_elems; i++)
+			Assert(tids[i] > tids[i-1]);
+
+		create_attstream(dst, attr->attbyval, attr->attlen,
+						 remain_elems, tids, datums, isnulls);
+	}
+	else
+	{
+		dst->len = 0;
+		dst->cursor = 0;
+	}
+
+	pfree(datums);
+	pfree(isnulls);
+	pfree(tids);
+	if (scan.array_cxt)
+		MemoryContextDelete(scan.array_cxt);
 }
 
 /*
@@ -449,67 +614,45 @@ append_attstreams(Form_pg_attribute attr,
  *   always decoded into constituent datums, and re-encoded.
  *
  */
-ZSAttStream *
-merge_attstreams(Relation rel, Form_pg_attribute attr,
-				 ZSAttStream *attstream1, ZSAttStream *attstream2,
-				 zstid *tids_to_remove, int num_tids_to_remove)
+void
+merge_attstream(Form_pg_attribute attr, attstream_buffer *buf, ZSAttStream *attstream2)
 {
-	ZSAttStream *result;
+	if (attstream2 == NULL)
+		return;
+
+	/*
+	 * If the input is compressed, decompress it.
+	 */
+	if ((attstream2->t_flags & ATTSTREAM_COMPRESSED) != 0)
+	{
+		attstream2 = decompress_attstream(attstream2);
+	}
+
+	merge_attstream_guts(attr, buf,
+						 attstream2->t_payload, attstream2->t_size - SizeOfZSAttStreamHeader);
+}
+
+void
+merge_attstream_buffer(Form_pg_attribute attr, attstream_buffer *buf, attstream_buffer *buf2)
+{
+	merge_attstream_guts(attr, buf,
+						 buf2->data + buf2->cursor, buf2->len - buf2->cursor);
+}
+static void
+merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buf, char *chunks2, int chunks2len)
+{
 	ZSAttrTreeScan scan1;
 	ZSAttrTreeScan scan2;
 	Datum	   *result_datums;
 	bool	   *result_isnulls;
 	zstid	   *result_tids;
 	int			total_elems;
-	int			remain_elems;
-	int			removeidx = 0;
-	bool		attstream1_was_compressed = false;
-	bool		attstream2_was_compressed = false;
-	zstid		firsttid1 = InvalidZSTid;
-	zstid		firsttid2 = InvalidZSTid;
+	int			num_elems;
+	zstid		lasttid1;
+	zstid		firsttid2;
 
-	/*
-	 * If either input is compressed, decompress them.
-	 */
-	if (attstream1 && (attstream1->t_flags & ATTSTREAM_COMPRESSED) != 0)
-	{
-		attstream1 = decompress_attstream(attstream1);
-		attstream1_was_compressed = true;
-	}
-
-	if (attstream2 && (attstream2->t_flags & ATTSTREAM_COMPRESSED) != 0)
-	{
-		attstream2 = decompress_attstream(attstream2);
-		attstream2_was_compressed = true;
-	}
-
-	if (attstream1)
-		firsttid1 = get_attstream_first_tid(attr->attlen, attstream1);
-	if (attstream2)
-		firsttid2 = get_attstream_first_tid(attr->attlen, attstream2);
-
-	/*
-	 * Swap the inputs, so that the stream with smaller starting TID is
-	 * 'attstream1'.
-	 */
-	if (attstream1 && attstream2 && firsttid1 > firsttid2)
-	{
-		ZSAttStream *attstream_tmp;
-		bool		attstream_was_compressed_tmp;
-		zstid		firsttid_tmp;
-
-		attstream_tmp = attstream1;
-		attstream_was_compressed_tmp = attstream1_was_compressed;
-		firsttid_tmp = firsttid1;
-
-		attstream1 = attstream2;
-		attstream1_was_compressed = attstream2_was_compressed;
-		firsttid1 = firsttid2;
-
-		attstream2 = attstream_tmp;
-		attstream2_was_compressed = attstream_was_compressed_tmp;
-		firsttid2 = firsttid_tmp;
-	}
+	lasttid1 = buf->lasttid;
+	firsttid2 = get_chunk_first_tid(buf->attlen, chunks2);
 
 	/*
 	 * Fast path:
@@ -519,19 +662,30 @@ merge_attstreams(Relation rel, Form_pg_attribute attr,
 	 * We only do this if the stream that comes first was compressed:
 	 * otherwise it may not be optimally packed, and we want to re-encode it
 	 * to make sure it's using densest possible codewords.
+	 *
+	 * XXX: we don't take this fastpath, if the new stream is strictly
+	 * below the old stream. We could swap the inputs and do it in that
+	 * case too...
+	 *
+	 * FIXME: we don't actually pay attention to the compression anymore.
+	 * We never repack.
 	 */
-	if (tids_to_remove == 0 &&
-		attstream1 && attstream2 &&
-		firsttid2 > attstream1->t_lasttid &&
-		(attstream1_was_compressed || attstream1_was_compressed))
+	if (firsttid2 > lasttid1)
 	{
-		/* repack inputs that were not previously compressed */
-		if (!attstream1_was_compressed)
-			attstream1 = merge_attstreams(rel, attr, attstream1, NULL, NULL, 0);
-		if (!attstream2_was_compressed)
-			attstream2 = merge_attstreams(rel, attr, attstream2, NULL, NULL, 0);
+		char	   *pos_new;
+		uint64		delta;
 
-		return append_attstreams(attr, attstream1, attstream2);
+		enlarge_attstream_buffer(buf, chunks2len);
+		pos_new = buf->data + buf->len;
+
+		memcpy(pos_new, chunks2, chunks2len);
+
+		delta = firsttid2 - lasttid1;
+		replace_first_tid(buf->attlen, delta, pos_new);
+
+		buf->len += chunks2len;
+
+		return;
 	}
 
 	/*
@@ -544,16 +698,15 @@ merge_attstreams(Relation rel, Form_pg_attribute attr,
 	scan2.context = CurrentMemoryContext;
 	scan2.attdesc = attr;
 
-	if (attstream1)
-		decode_attstream(&scan1, attstream1);
-	if (attstream2)
-		decode_attstream(&scan2, attstream2);
+	decode_chunks(&scan1, buf->data + buf->cursor, buf->len - buf->cursor);
+	decode_chunks(&scan2, chunks2, chunks2len);
 	total_elems = scan1.array_num_elements + scan2.array_num_elements;
+
 	result_datums = palloc(total_elems * sizeof(Datum));
 	result_isnulls = palloc(total_elems * sizeof(bool));
 	result_tids = palloc(total_elems * sizeof(zstid));
 
-	remain_elems = 0;
+	num_elems = 0;
 	for (;;)
 	{
 		ZSAttrTreeScan *scannext;
@@ -589,43 +742,33 @@ merge_attstreams(Relation rel, Form_pg_attribute attr,
 		isnull = scannext->array_isnulls[scannext->array_curr_idx];
 		scannext->array_curr_idx++;
 
-		/* also "merge" in the list of tids to remove */
-		while (removeidx < num_tids_to_remove && tid > tids_to_remove[removeidx])
-			removeidx++;
-		if (removeidx < num_tids_to_remove && tid == tids_to_remove[removeidx])
-		{
-			/*
-			 * This datum needs to be removd. Leave it out from the result.
-			 *
-			 * If it's a toasted datum, also remove the toast blocks.
-			 */
-			if (attr->attlen == -1 && !isnull &&
-				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
-			{
-				varatt_zs_toastptr *toastptr = (varatt_zs_toastptr *) DatumGetPointer(datum);
-				BlockNumber toast_blkno = toastptr->zst_block;
-
-				zedstore_toast_delete(rel, attr, tid, toast_blkno);
-			}
-		}
-		else
-		{
-			result_tids[remain_elems] = tid;
-			result_datums[remain_elems] = datum;
-			result_isnulls[remain_elems] = isnull;
-			remain_elems++;
-		}
+		result_tids[num_elems] = tid;
+		result_datums[num_elems] = datum;
+		result_isnulls[num_elems] = isnull;
+		num_elems++;
 	}
 
-	if (remain_elems != 0)
+	if (num_elems != 0)
 	{
-		for (int i = 1; i < remain_elems; i++)
+		char	   *olddata;
+		MemoryContext oldcxt;
+
+		for (int i = 1; i < num_elems; i++)
 			Assert(result_tids[i] > result_tids[i-1]);
 
-		result = create_attstream(attr, remain_elems, result_tids, result_datums, result_isnulls);
+		olddata = buf->data;
+
+		oldcxt = MemoryContextSwitchTo(GetMemoryChunkContext(olddata));
+		create_attstream(buf, buf->attbyval, buf->attlen,
+						 num_elems, result_tids, result_datums, result_isnulls);
+		pfree(olddata);
+		MemoryContextSwitchTo(oldcxt);
 	}
 	else
-		result = NULL;
+	{
+		buf->len = 0;
+		buf->cursor = 0;
+	}
 
 	pfree(result_datums);
 	pfree(result_isnulls);
@@ -646,8 +789,6 @@ merge_attstreams(Relation rel, Form_pg_attribute attr,
 		pfree(scan2.array_tids);
 	if (scan2.array_cxt)
 		MemoryContextDelete(scan2.array_cxt);
-
-	return result;
 }
 
 /*
@@ -663,7 +804,8 @@ merge_attstreams(Relation rel, Form_pg_attribute attr,
  * or pallocs!
  */
 bool
-append_attstreams_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int freespace, ZSAttStream *newstream)
+append_attstream_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int freespace,
+						 attstream_buffer *newbuf)
 {
 	zstid		firstnewtid;
 	char		*pos_new;
@@ -673,18 +815,16 @@ append_attstreams_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int fre
 	 * fast path requirements:
 	 *
 	 * - the new stream goes after the old one
-	 * - there is enough space to append newstream
+	 * - there is enough space to append 'newbuf'
 	 * - neither stream is compressed
 	 */
 	if (oldstream->t_flags & ATTSTREAM_COMPRESSED)
 		return false;
-	if (newstream->t_flags & ATTSTREAM_COMPRESSED)
-		return false;
 
-	if (freespace < newstream->t_size - SizeOfZSAttStreamHeader)
+	if (freespace < newbuf->len - newbuf->cursor)
 		return false;	/* no space */
 
-	firstnewtid = get_chunk_first_tid(att->attlen, newstream->t_payload);
+	firstnewtid = get_chunk_first_tid(att->attlen, newbuf->data + newbuf->cursor);
 	if (firstnewtid <= oldstream->t_lasttid)
 	{
 		/* overlap */
@@ -708,13 +848,15 @@ append_attstreams_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int fre
 	 */
 	pos_new = ((char *) oldstream) + oldstream->t_size;
 	memcpy(pos_new,
-		   newstream->t_payload,
-		   newstream->t_size - SizeOfZSAttStreamHeader);
+		   newbuf->data + newbuf->cursor,
+		   newbuf->len - newbuf->cursor);
 
 	delta = firstnewtid - oldstream->t_lasttid;
 	replace_first_tid(att->attlen, delta, pos_new);
-	oldstream->t_size += newstream->t_size - SizeOfZSAttStreamHeader;
-	oldstream->t_lasttid = newstream->t_lasttid;
+	oldstream->t_size += newbuf->len - newbuf->cursor;
+	oldstream->t_lasttid = newbuf->lasttid;
+
+	newbuf->cursor = newbuf->len;
 
 	return true;
 }
@@ -1157,9 +1299,8 @@ decode_chunk_fixed(bool attbyval, int attlen, zstid *lasttid, char *chunk,
 }
 
 static int
-encode_chunk_fixed(bool attbyval, int attlen, zstid prevtid, int ntids,
-				   zstid *tids, Datum *datums, bool *isnulls,
-				   StringInfo dst)
+encode_chunk_fixed(attstream_buffer *dst, zstid prevtid, int ntids,
+				   zstid *tids, Datum *datums, bool *isnulls)
 {
 	/*
 	 * Select the "mode" to use for this codeword.
@@ -1176,6 +1317,8 @@ encode_chunk_fixed(bool attbyval, int attlen, zstid prevtid, int ntids,
 	 * second is too large to be encoded, we'll end up using the last "mode",
 	 * which has nints == 1.
 	 */
+	bool		attbyval = dst->attbyval;
+	int16		attlen = dst->attlen;
 	int			selector;
 	int			this_nints;
 	int			this_bits;
@@ -1261,15 +1404,16 @@ encode_chunk_fixed(bool attbyval, int attlen, zstid prevtid, int ntids,
 	 * less dense mode. That's fine for sizing the destination buffer, but we
 	 * can't rely on it for the final size of the chunk.
 	 */
-	enlargeStringInfo(dst, size);
-	appendBinaryStringInfo(dst, (char *) &codeword, sizeof(uint64));
+	enlarge_attstream_buffer(dst, size);
+	p = &dst->data[dst->len];
+	memcpy(p, (char *) &codeword, sizeof(uint64));
+	p += sizeof(uint64);
 
 	/*
 	 * Now, the data
 	 */
 
 	/* FIXME: the loops below ignore alignment. 'p' might not be aligned */
-	p = &dst->data[dst->len];
 	if (attbyval)
 	{
 		if (attlen == sizeof(Datum))
@@ -1328,7 +1472,7 @@ encode_chunk_fixed(bool attbyval, int attlen, zstid prevtid, int ntids,
 		}
 	}
 	dst->len = p - dst->data;
-	Assert(dst->len < dst->maxlen);
+	Assert(dst->len <= dst->maxlen);
 
 	return this_nints;
 }
@@ -1633,9 +1777,8 @@ decode_chunk_varlen(zstid *lasttid, char *chunk,
 }
 
 static int
-encode_chunk_varlen(zstid prevtid, int ntids,
-					zstid *tids, Datum *datums, bool *isnulls,
-					StringInfo dst)
+encode_chunk_varlen(attstream_buffer *dst, zstid prevtid, int ntids,
+					zstid *tids, Datum *datums, bool *isnulls)
 {
 	/*
 	 * Select the "mode" to use for this codeword.
@@ -1661,6 +1804,7 @@ encode_chunk_varlen(zstid prevtid, int ntids,
 	int			i;
 	uint64		codeword;
 	uint64		deltas[60];
+	char	   *p;
 
 	/* special case for toast pointers */
 	if (!isnulls[0] && VARATT_IS_EXTERNAL(datums[0]) && VARTAG_EXTERNAL(datums[0]) == VARTAG_ZEDSTORE)
@@ -1669,8 +1813,13 @@ encode_chunk_varlen(zstid prevtid, int ntids,
 		BlockNumber toastblkno = toastptr->zst_block;
 
 		codeword = UINT64CONST(14) << 60 | (tids[0] - prevtid);
-		appendBinaryStringInfo(dst, (char *) &codeword, sizeof(uint64));
-		appendBinaryStringInfo(dst, (char *) &toastblkno, sizeof(BlockNumber));
+
+		enlarge_attstream_buffer(dst, sizeof(uint64) + sizeof(BlockNumber));
+		p = dst->data + dst->len;
+		memcpy(p, (char *) &codeword, sizeof(uint64));
+		p += sizeof(uint64);
+		memcpy(p, (char *) &toastblkno, sizeof(BlockNumber));
+		dst->len += sizeof(uint64) + sizeof(BlockNumber);
 		return 1;
 	}
 
@@ -1764,33 +1913,28 @@ encode_chunk_varlen(zstid prevtid, int ntids,
 	/* add selector to the codeword, and return */
 	codeword |= (uint64) selector << 60;
 
-	appendBinaryStringInfo(dst, (char *) &codeword, sizeof(uint64));
+	enlarge_attstream_buffer(dst, sizeof(uint64) + (1 << this_lenbits) * this_nints);
+	p = &dst->data[dst->len];
+
+	memcpy(p, (char *) &codeword, sizeof(uint64));
+	p += sizeof(uint64);
 
 	/*
 	 * Now, the data
 	 */
+	for (int i = 0; i < this_nints; i++)
 	{
-		char		*p;
-
-		enlargeStringInfo(dst, (1 << this_lenbits) * this_nints );
-		p = &dst->data[dst->len];
-
-		for (int i = 0; i < this_nints; i++)
+		if (!isnulls[i])
 		{
-			if (!isnulls[i])
-			{
-				int			len = VARSIZE_ANY_EXHDR(datums[i]);
+			int			len = VARSIZE_ANY_EXHDR(datums[i]);
 
-				memcpy(p, VARDATA_ANY(datums[i]), len);
-				p += len;
-			}
+			memcpy(p, VARDATA_ANY(datums[i]), len);
+			p += len;
 		}
-
-		Assert(p - dst->data  < dst->maxlen);
-
-		dst->len = p - dst->data;
 	}
 
+	Assert(p - dst->data  < dst->maxlen);
+	dst->len = p - dst->data;
 	return this_nints;
 }
 
@@ -1850,14 +1994,13 @@ decode_chunk(bool attbyval, int attlen, zstid *lasttid, char *chunk,
 }
 
 static int
-encode_chunk(bool attbyval, int attlen, zstid prevtid, int ntids,
-			 zstid *tids, Datum *datums, bool *isnulls,
-			 StringInfo dst)
+encode_chunk(attstream_buffer *buf, zstid prevtid, int ntids,
+			 zstid *tids, Datum *datums, bool *isnulls)
 {
-	if (attlen > 0)
-		return encode_chunk_fixed(attbyval, attlen, prevtid, ntids,
-								  tids, datums, isnulls, dst);
+	if (buf->attlen > 0)
+		return encode_chunk_fixed(buf, prevtid, ntids,
+								  tids, datums, isnulls);
 	else
-		return encode_chunk_varlen(prevtid, ntids,
-								   tids, datums, isnulls, dst);
+		return encode_chunk_varlen(buf, prevtid, ntids,
+								   tids, datums, isnulls);
 }
