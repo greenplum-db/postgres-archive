@@ -846,16 +846,33 @@ extern void zsbt_attstream_change_redo(XLogReaderState *record);
 
 /* prototypes for functions in zedstore_attstream.c */
 
+/*
+ * attstream_buffer is an in-memory representation of an attribute stream. It is used
+ * by the operations that manipulate attribute streams.
+ */
 struct attstream_buffer
 {
+	/*
+	 * Enlargeable buffer. The chunks are stored in 'data', between the
+	 * 'cursor' and 'len' positions. So if cursor > 0, there is some unused
+	 * space before the chunks, and if data < maxlen, there is unused space
+	 * after the chunks.
+	 */
 	char	   *data;		/* contains raw chunks */
 	int			len;
 	int			maxlen;
 	int			cursor;		/* beginning of remaining chunks */
 
+	/*
+	 * First and last TID (inclusive) stored in the chunks.
+	 */
 	zstid		firsttid;
 	zstid		lasttid;
 
+	/*
+	 * meta-data of the attribute, so that we don't need to pass these along
+	 * as separate arguments everywhere.
+	 */
 	int16		attlen;
 	bool		attbyval;
 };

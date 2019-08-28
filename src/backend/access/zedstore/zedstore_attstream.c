@@ -46,6 +46,12 @@
  *   must be read starting from the beginning.
  *
  *
+ * Most of the functions in this file deal with 'attstream_buffers'. An
+ * attstream_buffer is an in-memory representation of an attribute stream.
+ * It is a resizeable buffer, without the ZSAttStream header, but enough
+ * information in the attstream_buffer struct to construct the ZSAttStream
+ * header when needed.
+ *
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
