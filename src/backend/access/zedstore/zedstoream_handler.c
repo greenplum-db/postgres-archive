@@ -1319,7 +1319,12 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction,
 		if (!isnull && attr->attlen == -1 &&
 			VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 		{
+			MemoryContext oldcxt = CurrentMemoryContext;
+
+			if (btscan->decoder.tmpcxt)
+				MemoryContextSwitchTo(btscan->decoder.tmpcxt);
 			datum = zedstore_toast_flatten(scan->rs_scan.rs_rd, natt, this_tid, datum);
+			MemoryContextSwitchTo(oldcxt);
 		}
 
 		/* Check that the values coming out of the b-tree are aligned properly */
@@ -1552,7 +1557,12 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 				if (!isnull && attr->attlen == -1 &&
 					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
 				{
+					MemoryContext oldcxt = CurrentMemoryContext;
+
+					if (btscan->decoder.tmpcxt)
+						MemoryContextSwitchTo(btscan->decoder.tmpcxt);
 					datum = zedstore_toast_flatten(rel, natt, tid, datum);
+					MemoryContextSwitchTo(oldcxt);
 				}
 			}
 			else
