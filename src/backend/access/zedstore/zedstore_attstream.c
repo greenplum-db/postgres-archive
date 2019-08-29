@@ -550,6 +550,42 @@ decompress_attstream(ZSAttStream *attstream)
 }
 
 void
+init_attstream_buffer_from_stream(attstream_buffer *buf, bool attbyval, int16 attlen,
+								  ZSAttStream *attstream)
+{
+	int			buf_size;
+
+	if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
+		buf_size = attstream->t_decompressed_bufsize;
+	else
+		buf_size = attstream->t_size - SizeOfZSAttStreamHeader;
+
+	buf->data = palloc(buf_size);
+	buf->len = 0;
+	buf->maxlen = buf_size;
+	buf->cursor = 0;
+
+	buf->attlen = attlen;
+	buf->attbyval = attbyval;
+
+	if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
+	{
+		zs_decompress(attstream->t_payload, buf->data,
+					  attstream->t_size - SizeOfZSAttStreamHeader,
+					  attstream->t_decompressed_bufsize);
+		buf->len = attstream->t_decompressed_size;
+	}
+	else
+	{
+		memcpy(buf->data, attstream->t_payload, attstream->t_size - SizeOfZSAttStreamHeader);
+		buf->len = attstream->t_size - SizeOfZSAttStreamHeader;
+	}
+
+	buf->firsttid = get_chunk_first_tid(buf->attlen, buf->data + buf->cursor);
+	buf->lasttid = attstream->t_lasttid;
+}
+
+void
 init_attstream_buffer(attstream_buffer *buf, bool attbyval, int16 attlen)
 {
 #define ATTBUF_INIT_SIZE 1024
@@ -733,7 +769,7 @@ merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buf, char *chunks
 	/*
 	 * Fast path:
 	 *
-	 * If we have nothing to remove, and the two streams don't overlap, then
+	 * If the two streams don't overlap, then
 	 * we can avoid re-encoding and just append one stream after the other.
 	 * We only do this if the stream that comes first was compressed:
 	 * otherwise it may not be optimally packed, and we want to re-encode it
@@ -760,6 +796,7 @@ merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buf, char *chunks
 		replace_first_tid(buf->attlen, delta, pos_new);
 
 		buf->len += chunks2len;
+		buf->lasttid = lasttid2;
 
 		return;
 	}

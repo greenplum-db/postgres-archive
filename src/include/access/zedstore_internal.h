@@ -912,6 +912,8 @@ extern void zsbt_attstream_change_redo(XLogReaderState *record);
 extern void create_attstream(attstream_buffer *buffer, bool attbyval, int16 attlen,
 							 int nelems, zstid *tids, Datum *datums, bool *isnulls);
 extern void init_attstream_buffer(attstream_buffer *buf, bool attbyval, int16 attlen);
+extern void init_attstream_buffer_from_stream(attstream_buffer *buf, bool attbyval, int16 attlen,
+											  ZSAttStream *attstream);
 extern int append_attstream(attstream_buffer *buffer, bool all, int nelems,
 							zstid *tids, Datum *datums, bool *isnulls);
 extern void vacuum_attstream(Relation rel, AttrNumber attno, attstream_buffer *buffer,

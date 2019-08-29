@@ -575,15 +575,31 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 		zstid		mintid = attbuf->firsttid;
 
 		/* merge the old items to the working buffer */
-		if (upperstream)
+		if (upperstream && lowerstream)
 		{
+			attstream_buffer tmpbuf;
+
+			mintid = Max(mintid, lowerstream->t_lasttid);
 			mintid = Max(mintid, upperstream->t_lasttid);
-			merge_attstream(attr, attbuf, upperstream);
+
+			init_attstream_buffer_from_stream(&tmpbuf, attr->attbyval, attr->attlen, upperstream);
+
+			merge_attstream(attr, attbuf, lowerstream);
+
+			merge_attstream_buffer(attr, &tmpbuf, attbuf);
+
+			pfree(attbuf->data);
+			*attbuf = tmpbuf;
 		}
-		if (lowerstream)
+		else if (lowerstream)
 		{
 			mintid = Max(mintid, lowerstream->t_lasttid);
 			merge_attstream(attr, attbuf, lowerstream);
+		}
+		else if (upperstream)
+		{
+			mintid = Max(mintid, upperstream->t_lasttid);
+			merge_attstream(attr, attbuf, upperstream);
 		}
 
 		/*
