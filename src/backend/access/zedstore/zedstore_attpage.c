@@ -82,16 +82,13 @@ zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno,
 	scan->attdesc = TupleDescAttr(tdesc, attno - 1);
 
 	scan->context = CurrentMemoryContext;
-	scan->array_datums = NULL;
-	scan->array_isnulls = NULL;
-	scan->array_tids = NULL;
-	scan->array_datums_allocated_size = 0;
-	scan->array_num_elements = 0;
-	scan->array_curr_idx = -1;
-	scan->array_cxt = NULL;
 
-	scan->attr_buf = NULL;
-	scan->attr_buf_size = 0;
+	init_attstream_decoder(&scan->decoder, scan->attdesc->attbyval, scan->attdesc->attlen);
+	scan->decoder.tmpcxt = AllocSetContextCreate(scan->context,
+												"ZedstoreAMAttrScanContext",
+												ALLOCSET_DEFAULT_SIZES);
+
+	scan->decoder_last_idx = -1;
 
 	scan->active = true;
 	scan->lastbuf = InvalidBuffer;
@@ -108,19 +105,8 @@ zsbt_attr_end_scan(ZSAttrTreeScan *scan)
 		ReleaseBuffer(scan->lastbuf);
 
 	scan->active = false;
-	scan->array_num_elements = 0;
-	scan->array_curr_idx = -1;
 
-	if (scan->array_datums)
-		pfree(scan->array_datums);
-	if (scan->array_isnulls)
-		pfree(scan->array_isnulls);
-	if (scan->array_tids)
-		pfree(scan->array_tids);
-	if (scan->attr_buf)
-		pfree(scan->attr_buf);
-	if (scan->array_cxt)
-		MemoryContextDelete(scan->array_cxt);
+	destroy_attstream_decoder(&scan->decoder);
 }
 
 /*
@@ -138,82 +124,101 @@ zsbt_attr_end_scan(ZSAttrTreeScan *scan)
 bool
 zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid nexttid)
 {
+	Buffer		buf;
+	Page		page;
+	ZSAttStream *stream;
+
 	if (!scan->active)
 		return InvalidZSTid;
 
 	/*
-	 * Find the item containing nexttid.
+	 * If the TID we're looking for is in the current attstream, we just
+	 * need to decoder more of it.
+	 *
+	 * TODO: We could restart the decoder, if the current attstream
+	 * covers the target TID, but we already decoded past it.
 	 */
-	for (;;)
+	if (scan->decoder.pos < scan->decoder.chunks_len &&
+		nexttid >= scan->decoder.firsttid &&
+		nexttid <= scan->decoder.lasttid)
 	{
-		Buffer		buf;
-		Page		page;
-		ZSAttStream *stream = NULL;
-		bool		found_candidate = false;
-
-		scan->array_num_elements = 0;
-
-		/*
-		 * Find and lock the leaf page containing scan->nexttid.
-		 */
-		buf = zsbt_find_and_lock_leaf_containing_tid(scan->rel, scan->attno,
-													 scan->lastbuf, nexttid,
-													 BUFFER_LOCK_SHARE);
-		scan->lastbuf = buf;
-		if (!BufferIsValid(buf))
+		if (nexttid <= scan->decoder.prevtid)
 		{
 			/*
-			 * Completely empty tree. This should only happen at the beginning
-			 * of a scan - a tree cannot go missing after it's been created -
-			 * but we don't currently check for that.
+			 * The target TID is in this attstream, but we already scanned
+			 * past it. Restart the decoder.
 			 */
-			break;
-		}
-		page = BufferGetPage(buf);
-
-		/* See if the upper stream matches the target tid */
-		stream = get_page_upperstream(page);
-		if (stream && stream->t_lasttid >= nexttid)
-		{
-			decode_attstream(scan, stream);
-			found_candidate = true;
+			scan->decoder.pos = 0;
+			scan->decoder.prevtid = 0;
 		}
 
-		/* How about the lower stream? */
-		if (!found_candidate)
-		{
-			stream = get_page_lowerstream(page);
-			if (stream && stream->t_lasttid >= nexttid)
-			{
-				decode_attstream(scan, stream);
-				found_candidate = true;
-			}
-		}
+		/* Advance the scan, until we have reached the target TID */
+		while (nexttid > scan->decoder.prevtid)
+			(void) decode_attstream_cont(&scan->decoder);
+		return true;
+	}
 
-		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+	/* reset the decoder */
+	scan->decoder.num_elements = 0;
+	scan->decoder.chunks_len = 0;
+	scan->decoder.pos = 0;
+	scan->decoder.prevtid = 0;
 
-		if (scan->array_num_elements > 0 && scan->array_tids[0] <= nexttid)
+	/*
+	 * Descend the tree, tind and lock the leaf page containing 'nexttid'.
+	 */
+	buf = zsbt_find_and_lock_leaf_containing_tid(scan->rel, scan->attno,
+												 scan->lastbuf, nexttid,
+												 BUFFER_LOCK_SHARE);
+	scan->lastbuf = buf;
+	if (!BufferIsValid(buf))
+	{
+		/*
+		 * Completely empty tree. This should only happen at the beginning
+		 * of a scan - a tree cannot go missing after it's been created -
+		 * but we don't currently check for that.
+		 */
+		return false;
+	}
+	page = BufferGetPage(buf);
+
+	/* See if the upper stream covers the target tid */
+	stream = get_page_upperstream(page);
+	if (stream && nexttid <= stream->t_lasttid)
+	{
+		decode_attstream_begin(&scan->decoder, stream);
+	}
+	/*
+	 * How about the lower stream? (We assume that the upper stream is < lower
+	 * stream, and there's no overlap).
+	 */
+	else
+	{
+		stream = get_page_lowerstream(page);
+		if (stream && nexttid <= stream->t_lasttid)
 		{
-			/* Found it! */
-			return true;
-		}
-		else
-		{
-			/* No matching items. XXX: we should remember the 'next' block, for
-			 * the next call. When we're seqscanning, we will almost certainly need
-			 * that next.
-			 */
-			return false;
+			/* If there is a match, it will be in this attstream */
+			decode_attstream_begin(&scan->decoder, stream);
 		}
 	}
 
-	/* Reached end of scan. */
-	scan->array_num_elements = 0;
-	scan->array_curr_idx = -1;
-	if (BufferIsValid(scan->lastbuf))
-		ReleaseBuffer(scan->lastbuf);
-	scan->lastbuf = InvalidBuffer;
-	return false;
+	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+	/*
+	 * We now have the attstream we need copied into scan->decoder (or not, if
+	 * no covering attstream was found)
+	 */
+	if (scan->decoder.pos < scan->decoder.chunks_len &&
+		nexttid >= scan->decoder.firsttid &&
+		nexttid <= scan->decoder.lasttid)
+	{
+		/* Advance the scan, until we have reached the target TID */
+		while (nexttid > scan->decoder.prevtid)
+			(void) decode_attstream_cont(&scan->decoder);
+		return true;
+	}
+	else
+		return false;
 }
 
 /*
@@ -789,8 +794,8 @@ zsbt_attr_pack_attstream(Form_pg_attribute attr, attstream_buffer *attbuf,
 	}
 
 	/*
-	 * Since we split the chunk stream, inject a reference point to the beginning of
-	 * the remainder.
+	 * Since we split the chunk stream, inject a reference point to the
+	 * beginning of the remainder.
 	 */
 	chop_attstream(attbuf, complete_chunks_len, lasttid);
 }

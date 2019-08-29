@@ -37,7 +37,8 @@ zs_decompress(const char *src, char *dst, int compressedSize, int uncompressedSi
 
 	decompressed_size = LZ4_decompress_safe(src, dst, compressedSize, uncompressedSize);
 	if (decompressed_size < 0)
-		elog(ERROR, "could not decompress chunk");
+		elog(ERROR, "could not decompress chunk (%d bytes compressed, %d bytes uncompressed)",
+			 compressedSize, uncompressedSize);
 	if (decompressed_size != uncompressedSize)
 		elog(ERROR, "unexpected decompressed size");
 }

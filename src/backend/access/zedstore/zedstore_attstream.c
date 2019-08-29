@@ -83,10 +83,7 @@ static void verify_attstream(attstream_buffer *buffer);
 #endif
 
 /* Other internal functions. */
-static void decode_chunks(ZSAttrTreeScan *scan, char *chunks, int chunkslen);
-static void merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buffer, char *chunks2, int chunks2len);
-
-static ZSAttStream *decompress_attstream(ZSAttStream *attstream);
+static void merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buffer, char *chunks2, int chunks2len, zstid lasttid2);
 
 static void
 enlarge_attstream_buffer_slow(attstream_buffer *buf, int needed)
@@ -226,98 +223,152 @@ append_attstream(attstream_buffer *buf, bool all, int nelems,
  * TODO: avoid extracting elements we're not interested in, by passing
  * starttid/endtid.
  */
-static void
-init_scan_decode(ZSAttrTreeScan *scan)
+void
+init_attstream_decoder(attstream_decoder *decoder, bool attbyval, int16 attlen)
 {
-	if (scan->array_datums_allocated_size < 200)
-	{
-		/* initial size */
-		int			newsize = 200;
+	decoder->cxt = CurrentMemoryContext;
+	decoder->tmpcxt = NULL;		/* can be set by caller */
 
-		/*
-		 * Note: we don't allocate these in 'array_cxt'. 'array_cxt' is reset
-		 * that between every invocation of decode_attstream(), but we want to
-		 * reuse these arrays.
-		 */
-		if (scan->array_datums)
-			pfree(scan->array_datums);
-		if (scan->array_isnulls)
-			pfree(scan->array_isnulls);
-		if (scan->array_tids)
-			pfree(scan->array_tids);
-		scan->array_datums = MemoryContextAlloc(scan->context, newsize * sizeof(Datum));
-		scan->array_isnulls = MemoryContextAlloc(scan->context, newsize * sizeof(bool));
-		scan->array_tids = MemoryContextAlloc(scan->context, newsize * sizeof(zstid));
-		scan->array_datums_allocated_size = newsize;
-	}
+	decoder->attbyval = attbyval;
+	decoder->attlen = attlen;
 
-	if (scan->array_cxt == NULL)
-	{
-		scan->array_cxt = AllocSetContextCreate(scan->context,
-												"ZedstoreAMScanContext",
-												ALLOCSET_DEFAULT_SIZES);
-	}
+	decoder->chunks_buf = NULL;
+	decoder->chunks_buf_size = 0;
+	decoder->chunks_len = 0;
+	decoder->lasttid = InvalidZSTid;
+
+	decoder->pos = 0;
+	decoder->prevtid = InvalidZSTid;
+
+	decoder->num_elements = 0;
 }
 
 void
-decode_attstream(ZSAttrTreeScan *scan, ZSAttStream *attstream)
+destroy_attstream_decoder(attstream_decoder *decoder)
 {
-	MemoryContext oldcxt;
+	if (decoder->chunks_buf)
+		pfree(decoder->chunks_buf);
+	decoder->chunks_buf = NULL;
+	decoder->chunks_buf_size = 0;
+	decoder->chunks_len = 0;
+	decoder->num_elements = 0;
+}
 
-	init_scan_decode(scan);
-
-	MemoryContextReset(scan->array_cxt);
-
-	oldcxt = MemoryContextSwitchTo(scan->array_cxt);
+void
+decode_attstream_begin(attstream_decoder *decoder, ZSAttStream *attstream)
+{
+	int			buf_size_needed;
 
 	if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
-		attstream = decompress_attstream(attstream);
+		buf_size_needed = attstream->t_decompressed_bufsize;
+	else
+		buf_size_needed = attstream->t_size - SizeOfZSAttStreamHeader;
 
-	decode_chunks(scan, attstream->t_payload, attstream->t_size - SizeOfZSAttStreamHeader);
+	if (decoder->chunks_buf_size < buf_size_needed)
+	{
+		if (decoder->chunks_buf)
+			pfree(decoder->chunks_buf);
 
-	MemoryContextSwitchTo(oldcxt);
+		decoder->chunks_buf = MemoryContextAlloc(decoder->cxt, buf_size_needed);
+		decoder->chunks_buf_size = buf_size_needed;
+	}
+
+	if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
+	{
+		/* decompress */
+		zs_decompress(attstream->t_payload, decoder->chunks_buf,
+					  attstream->t_size - SizeOfZSAttStreamHeader,
+					  attstream->t_decompressed_bufsize);
+		decoder->chunks_len = attstream->t_decompressed_size;
+	}
+	else
+	{
+		memcpy(decoder->chunks_buf,
+			   ((char *) attstream) + SizeOfZSAttStreamHeader,
+			   attstream->t_size - SizeOfZSAttStreamHeader);
+		decoder->chunks_len = attstream->t_size - SizeOfZSAttStreamHeader;
+	}
+	decoder->firsttid = get_chunk_first_tid(decoder->attlen, decoder->chunks_buf);
+	decoder->lasttid = attstream->t_lasttid;
+
+	decoder->pos = 0;
+	decoder->prevtid = 0;
+
+	decoder->num_elements = 0;
 }
 
 static void
-decode_chunks(ZSAttrTreeScan *scan, char *chunks, int chunkslen)
+decode_chunks_begin(attstream_decoder *decoder, char *chunks, int chunkslen, zstid lasttid)
 {
-	Form_pg_attribute attr = scan->attdesc;
+	if (decoder->chunks_buf_size < chunkslen)
+	{
+		if (decoder->chunks_buf)
+			pfree(decoder->chunks_buf);
+
+		decoder->chunks_buf = MemoryContextAlloc(decoder->cxt, chunkslen);
+		decoder->chunks_buf_size = chunkslen;
+	}
+
+	/* XXX: do we really need to make a copy? */
+	memcpy(decoder->chunks_buf, chunks, chunkslen);
+	decoder->chunks_len = chunkslen;
+	decoder->lasttid = lasttid;
+
+	decoder->pos = 0;
+	decoder->prevtid = 0;
+
+	decoder->num_elements = 0;
+}
+
+bool
+decode_attstream_cont(attstream_decoder *decoder)
+{
 	zstid		lasttid;
 	int			total_decoded;
 	char	   *p;
 	char	   *pend;
+	MemoryContext oldcxt;
 
-	init_scan_decode(scan);
+	oldcxt = CurrentMemoryContext;
+	if (decoder->tmpcxt)
+	{
+		MemoryContextReset(decoder->tmpcxt);
+		MemoryContextSwitchTo(decoder->tmpcxt);
+	}
 
-	p = chunks;
-	pend = chunks + chunkslen;
+	p = decoder->chunks_buf + decoder->pos;
+	pend = decoder->chunks_buf + decoder->chunks_len;
 
 	total_decoded = 0;
-	lasttid = 0;
-	while (p < pend)
+	lasttid = decoder->prevtid;
+
+	if (p >= pend)
+		return false;
+
+	while (p < pend && total_decoded + 60 < DECODER_MAX_ELEMS)
 	{
 		int			num_decoded;
 
-		if (scan->array_datums_allocated_size < total_decoded + 60)
-		{
-			/* initial size */
-			int			newsize = (total_decoded * 2) + 60;
-
-			scan->array_datums = repalloc(scan->array_datums, newsize * sizeof(Datum));
-			scan->array_isnulls = repalloc(scan->array_isnulls, newsize * sizeof(bool));
-			scan->array_tids = repalloc(scan->array_tids, newsize * sizeof(zstid));
-			scan->array_datums_allocated_size = newsize;
-		}
-
-		p += decode_chunk(attr->attbyval, attr->attlen, &lasttid, p,
+		p += decode_chunk(decoder->attbyval, decoder->attlen, &lasttid, p,
 						  &num_decoded,
-						  &scan->array_tids[total_decoded],
-						  &scan->array_datums[total_decoded],
-						  &scan->array_isnulls[total_decoded]);
+						  &decoder->tids[total_decoded],
+						  &decoder->datums[total_decoded],
+						  &decoder->isnulls[total_decoded]);
 		total_decoded += num_decoded;
 	}
-	Assert(p == pend);
-	scan->array_num_elements = total_decoded;
+
+	MemoryContextSwitchTo(oldcxt);
+
+	Assert(p <= pend);
+	decoder->num_elements = total_decoded;
+	decoder->pos = p - decoder->chunks_buf;
+	if (total_decoded > 0)
+	{
+		decoder->prevtid = decoder->tids[total_decoded - 1];
+		return true;
+	}
+	else
+		return false;
 }
 
 /*
@@ -459,7 +510,7 @@ verify_attstream(attstream_buffer *attbuf)
 #endif
 
 void
-print_attstream(Form_pg_attribute att, char *chunk, int len)
+print_attstream(int attlen, char *chunk, int len)
 {
 	char	   *p = chunk;
 	char	   *pend = chunk + len;
@@ -472,7 +523,7 @@ print_attstream(Form_pg_attribute att, char *chunk, int len)
 
 		memcpy(&codeword, p, sizeof(uint64));
 
-		p += skip_chunk(att->attlen, p, &tid);
+		p += skip_chunk(attlen, p, &tid);
 		elog(NOTICE, "%016lX: TID %lu", codeword, tid);
 	}
 }
@@ -499,16 +550,19 @@ decompress_attstream(ZSAttStream *attstream)
 }
 
 void
-init_attstream_buffer(attstream_buffer *buf, bool attbyval, int16 attlen,
-					  ZSAttStream *attstream)
+init_attstream_buffer(attstream_buffer *buf, bool attbyval, int16 attlen)
 {
-	buf->data = (char *) attstream;
-	buf->len = attstream->t_size;
-	buf->maxlen = attstream->t_size;
-	buf->cursor = SizeOfZSAttStreamHeader;
+#define ATTBUF_INIT_SIZE 1024
+	buf->data = palloc(ATTBUF_INIT_SIZE);
+	buf->len = 0;
+	buf->maxlen = ATTBUF_INIT_SIZE;
+	buf->cursor = 0;
 
-	buf->attbyval = attbyval;
+	buf->firsttid = 0;
+	buf->lasttid = 0;
+
 	buf->attlen = attlen;
+	buf->attbyval = attbyval;
 }
 
 void
@@ -517,85 +571,94 @@ vacuum_attstream(Relation rel, AttrNumber attno, attstream_buffer *dst,
 				 zstid *tids_to_remove, int num_tids_to_remove)
 {
 	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
-	ZSAttrTreeScan scan;
+	attstream_decoder decoder;
+	int			removeidx;
 	zstid	   *tids;
 	Datum	   *datums;
 	bool	   *isnulls;
-	int			remain_elems;
-	int			removeidx;
+	int			num_buffered;
+	int			buffer_size = 1000;
 
 	/*
-	 * naive implementation: decode everything, merge arrays, and re-encode.
+	 * Decode the input, leave out the items that are to be removed, and
+	 * re-encode as we go.
 	 */
-	memset(&scan, 0, sizeof(scan));
-	scan.context = CurrentMemoryContext;
-	scan.attdesc = &rel->rd_att->attrs[attno - 1];
+	tids = palloc(buffer_size * sizeof(zstid));
+	datums = palloc(buffer_size * sizeof(Datum));
+	isnulls = palloc(buffer_size * sizeof(bool));
 
-	decode_attstream(&scan, attstream);
+	init_attstream_buffer(dst, attr->attbyval, attr->attlen);
 
-	tids = scan.array_tids;
-	datums = scan.array_datums;
-	isnulls = scan.array_isnulls;
+	init_attstream_decoder(&decoder, attr->attbyval, attr->attlen);
+	decode_attstream_begin(&decoder, attstream);
 
-	remain_elems = 0;
+	num_buffered = 0;
 	removeidx = 0;
-	for (int idx = 0; idx < scan.array_num_elements; idx++)
+	while (decode_attstream_cont(&decoder))
 	{
-		zstid		tid;
-		Datum		datum;
-		bool		isnull;
-
-		tid = tids[idx];
-		datum = datums[idx];
-		isnull = isnulls[idx];
-
-		/* also "merge" in the list of tids to remove */
-		while (removeidx < num_tids_to_remove && tid > tids_to_remove[removeidx])
-			removeidx++;
-		if (removeidx < num_tids_to_remove && tid == tids_to_remove[removeidx])
+		for (int idx = 0; idx < decoder.num_elements; idx++)
 		{
-			/*
-			 * This datum needs to be removed. Leave it out from the result.
-			 *
-			 * If it's a toasted datum, also remove the toast blocks.
-			 */
-			if (attr->attlen == -1 && !isnull &&
-				VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
-			{
-				varatt_zs_toastptr *toastptr = (varatt_zs_toastptr *) DatumGetPointer(datum);
-				BlockNumber toast_blkno = toastptr->zst_block;
+			zstid		tid = decoder.tids[idx];
+			Datum		datum = decoder.datums[idx];
+			bool		isnull = decoder.isnulls[idx];
 
-				zedstore_toast_delete(rel, scan.attdesc, tid, toast_blkno);
+			/* also "merge" in the list of tids to remove */
+			while (removeidx < num_tids_to_remove && tid > tids_to_remove[removeidx])
+				removeidx++;
+			if (removeidx < num_tids_to_remove && tid == tids_to_remove[removeidx])
+			{
+				/*
+				 * This datum needs to be removed. Leave it out from the result.
+				 *
+				 * If it's a toasted datum, also remove the toast blocks.
+				 */
+				if (attr->attlen == -1 && !isnull &&
+					VARATT_IS_EXTERNAL(datum) && VARTAG_EXTERNAL(datum) == VARTAG_ZEDSTORE)
+				{
+					varatt_zs_toastptr *toastptr = (varatt_zs_toastptr *) DatumGetPointer(datum);
+					BlockNumber toast_blkno = toastptr->zst_block;
+
+					zedstore_toast_delete(rel, attr, tid, toast_blkno);
+				}
+			}
+			else
+			{
+				tids[num_buffered] = tid;
+				datums[num_buffered] = datum;
+				isnulls[num_buffered] = isnull;
+				num_buffered++;
+
+				if (num_buffered == buffer_size)
+				{
+					/* encode datums that we've buffered so far */
+					int			num_encoded;
+					int			num_remain;
+
+					num_encoded = append_attstream(dst, false, num_buffered, tids, datums, isnulls);
+
+					/* move the remaining ones to beginning of buffer, and continue */
+					num_remain = num_buffered - num_encoded;
+					memmove(tids, &tids[num_encoded], num_remain * sizeof(zstid));
+					memmove(datums, &datums[num_encoded], num_remain * sizeof(Datum));
+					memmove(isnulls, &isnulls[num_encoded], num_remain * sizeof(bool));
+					num_buffered = num_remain;
+				}
 			}
 		}
-		else
-		{
-			tids[remain_elems] = tid;
-			datums[remain_elems] = datum;
-			isnulls[remain_elems] = isnull;
-			remain_elems++;
-		}
 	}
 
-	if (remain_elems != 0)
-	{
-		for (int i = 1; i < remain_elems; i++)
-			Assert(tids[i] > tids[i-1]);
+	/* flush the rest of buffered datums to the attstream */
+	if (num_buffered > 0)
+		append_attstream(dst, true, num_buffered, tids, datums, isnulls);
 
-		create_attstream(dst, attr->attbyval, attr->attlen,
-						 remain_elems, tids, datums, isnulls);
-	}
-	else
-	{
-		dst->len = 0;
-		dst->cursor = 0;
-	}
+#ifdef USE_ASSERT_CHECKING
+	verify_attstream(dst);
+#endif
 
 	pfree(datums);
 	pfree(isnulls);
 	pfree(tids);
-	if (scan.array_cxt)
-		MemoryContextDelete(scan.array_cxt);
+	destroy_attstream_decoder(&decoder);
 }
 
 /*
@@ -635,27 +698,34 @@ merge_attstream(Form_pg_attribute attr, attstream_buffer *buf, ZSAttStream *atts
 	}
 
 	merge_attstream_guts(attr, buf,
-						 attstream2->t_payload, attstream2->t_size - SizeOfZSAttStreamHeader);
+						 attstream2->t_payload, attstream2->t_size - SizeOfZSAttStreamHeader,
+						 attstream2->t_lasttid);
 }
 
 void
 merge_attstream_buffer(Form_pg_attribute attr, attstream_buffer *buf, attstream_buffer *buf2)
 {
 	merge_attstream_guts(attr, buf,
-						 buf2->data + buf2->cursor, buf2->len - buf2->cursor);
+						 buf2->data + buf2->cursor, buf2->len - buf2->cursor, buf2->lasttid);
 }
 static void
-merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buf, char *chunks2, int chunks2len)
+merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buf, char *chunks2, int chunks2len, zstid lasttid2)
 {
-	ZSAttrTreeScan scan1;
-	ZSAttrTreeScan scan2;
+	attstream_decoder decoder1;
+	bool		decoder1_continues;
+	int			decoder1_idx;
+	attstream_decoder decoder2;
+	bool		decoder2_continues;
+	int			decoder2_idx;
 	Datum	   *result_datums;
 	bool	   *result_isnulls;
 	zstid	   *result_tids;
-	int			total_elems;
-	int			num_elems;
+	int			num_buffered;
 	zstid		lasttid1;
 	zstid		firsttid2;
+	int			buffer_size = 1000;
+	char	   *olddata;
+	int			newmaxlen;
 
 	lasttid1 = buf->lasttid;
 	firsttid2 = get_chunk_first_tid(buf->attlen, chunks2);
@@ -697,104 +767,124 @@ merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buf, char *chunks
 	/*
 	 * naive implementation: decode everything, merge arrays, and re-encode.
 	 */
-	memset(&scan1, 0, sizeof(scan1));
-	memset(&scan2, 0, sizeof(scan1));
-	scan1.context = CurrentMemoryContext;
-	scan1.attdesc = attr;
-	scan2.context = CurrentMemoryContext;
-	scan2.attdesc = attr;
+	init_attstream_decoder(&decoder1, attr->attbyval, attr->attlen);
+	decode_chunks_begin(&decoder1, buf->data + buf->cursor, buf->len - buf->cursor, buf->lasttid);
+	decoder1_continues = decode_attstream_cont(&decoder1);
+	decoder1_idx = 0;
 
-	decode_chunks(&scan1, buf->data + buf->cursor, buf->len - buf->cursor);
-	decode_chunks(&scan2, chunks2, chunks2len);
-	total_elems = scan1.array_num_elements + scan2.array_num_elements;
+	init_attstream_decoder(&decoder2, attr->attbyval, attr->attlen);
+	decode_chunks_begin(&decoder2, chunks2, chunks2len, lasttid2);
+	decoder2_continues = decode_attstream_cont(&decoder2);
+	decoder2_idx = 0;
 
-	result_datums = palloc(total_elems * sizeof(Datum));
-	result_isnulls = palloc(total_elems * sizeof(bool));
-	result_tids = palloc(total_elems * sizeof(zstid));
+	buffer_size = 1000;		/* arbitrary initial size */
+	result_tids = palloc(buffer_size * sizeof(zstid));
+	result_datums = palloc(buffer_size * sizeof(Datum));
+	result_isnulls = palloc(buffer_size * sizeof(bool));
 
-	num_elems = 0;
+	/*
+	 * Reallocate a new buffer, in the same memory context as the old one, to
+	 * write the result to. (We can't write diretly to the old buffer, because
+	 * we'll read it simultaneously.
+	 */
+	newmaxlen = (buf->len - buf->cursor) + chunks2len + 100; /* 100 is gives some headroom, to avoid
+															  * repallocs */
+	olddata = buf->data;
+	buf->data = MemoryContextAlloc(GetMemoryChunkContext(olddata), newmaxlen);
+	buf->maxlen = newmaxlen;
+	buf->len = 0;
+	buf->cursor = 0;
+	buf->firsttid = 0;
+	buf->lasttid = 0;
+
+	num_buffered = 0;
 	for (;;)
 	{
-		ZSAttrTreeScan *scannext;
+		attstream_decoder *decodernext;
+		int		   *decodernext_idx;
+		bool	   *decodernext_continues;
 		zstid		tid;
 		Datum		datum;
 		bool		isnull;
 
-		if (scan1.array_curr_idx < scan1.array_num_elements &&
-			scan2.array_curr_idx < scan2.array_num_elements)
+		if (decoder1_continues && decoder2_continues)
 		{
-			if (scan1.array_tids[scan1.array_curr_idx] < scan2.array_tids[scan2.array_curr_idx])
-				scannext = &scan1;
-			else if (scan1.array_tids[scan1.array_curr_idx] > scan2.array_tids[scan2.array_curr_idx])
-				scannext = &scan2;
+			if (decoder1.tids[decoder1_idx] < decoder2.tids[decoder2_idx])
+			{
+				decodernext = &decoder1;
+				decodernext_idx = &decoder1_idx;
+				decodernext_continues = &decoder1_continues;
+			}
+			else if (decoder1.tids[decoder1_idx] > decoder2.tids[decoder2_idx])
+			{
+				decodernext = &decoder2;
+				decodernext_idx = &decoder2_idx;
+				decodernext_continues = &decoder2_continues;
+			}
 			else
-				elog(ERROR, "attstream with duplicate TIDs");
+				elog(ERROR, "cannot merge attstreams with duplicate TIDs");
 		}
-		else if (scan1.array_curr_idx < scan1.array_num_elements)
+		else if (decoder1_continues)
 		{
-			scannext = &scan1;
+			decodernext = &decoder1;
+			decodernext_idx = &decoder1_idx;
+			decodernext_continues = &decoder1_continues;
 		}
-		else if (scan2.array_curr_idx < scan2.array_num_elements)
+		else if (decoder2_continues)
 		{
-			scannext = &scan2;
+			decodernext = &decoder2;
+			decodernext_idx = &decoder2_idx;
+			decodernext_continues = &decoder2_continues;
 		}
 		else
 		{
 			break;	/* all done */
 		}
 
-		tid = scannext->array_tids[scannext->array_curr_idx];
-		datum = scannext->array_datums[scannext->array_curr_idx];
-		isnull = scannext->array_isnulls[scannext->array_curr_idx];
-		scannext->array_curr_idx++;
+		tid = decodernext->tids[*decodernext_idx];
+		datum = decodernext->datums[*decodernext_idx];
+		isnull = decodernext->isnulls[*decodernext_idx];
+		(*decodernext_idx)++;
 
-		result_tids[num_elems] = tid;
-		result_datums[num_elems] = datum;
-		result_isnulls[num_elems] = isnull;
-		num_elems++;
+		result_tids[num_buffered] = tid;
+		result_datums[num_buffered] = datum;
+		result_isnulls[num_buffered] = isnull;
+		num_buffered++;
+
+		if (num_buffered == buffer_size)
+		{
+			/* encode datums that we've buffered so far */
+			int			num_encoded;
+			int			num_remain;
+
+			num_encoded = append_attstream(buf, false, num_buffered,
+										   result_tids, result_datums, result_isnulls);
+
+			/* move the remaining ones to beginning of buffer, and continue */
+			num_remain = num_buffered - num_encoded;
+			memmove(result_tids, &result_tids[num_encoded], num_remain * sizeof(zstid));
+			memmove(result_datums, &result_datums[num_encoded], num_remain * sizeof(Datum));
+			memmove(result_isnulls, &result_isnulls[num_encoded], num_remain * sizeof(bool));
+			num_buffered = num_remain;
+		}
+
+		if (*decodernext_idx == decodernext->num_elements)
+		{
+			*decodernext_continues = decode_attstream_cont(decodernext);
+			*decodernext_idx = 0;
+		}
 	}
 
-	if (num_elems != 0)
-	{
-		char	   *olddata;
-		MemoryContext oldcxt;
+	/* flush the rest of buffered datums to the attstream */
+	if (num_buffered > 0)
+		append_attstream(buf, true, num_buffered, result_tids, result_datums, result_isnulls);
 
-		for (int i = 1; i < num_elems; i++)
-			Assert(result_tids[i] > result_tids[i-1]);
-
-		olddata = buf->data;
-
-		oldcxt = MemoryContextSwitchTo(GetMemoryChunkContext(olddata));
-		create_attstream(buf, buf->attbyval, buf->attlen,
-						 num_elems, result_tids, result_datums, result_isnulls);
-		pfree(olddata);
-		MemoryContextSwitchTo(oldcxt);
-	}
-	else
-	{
-		buf->len = 0;
-		buf->cursor = 0;
-	}
-
+	pfree(olddata);
 	pfree(result_datums);
 	pfree(result_isnulls);
 	pfree(result_tids);
-	if (scan1.array_datums)
-		pfree(scan1.array_datums);
-	if (scan1.array_isnulls)
-		pfree(scan1.array_isnulls);
-	if (scan1.array_tids)
-		pfree(scan1.array_tids);
-	if (scan1.array_cxt)
-		MemoryContextDelete(scan1.array_cxt);
-	if (scan2.array_datums)
-		pfree(scan2.array_datums);
-	if (scan2.array_isnulls)
-		pfree(scan2.array_isnulls);
-	if (scan2.array_tids)
-		pfree(scan2.array_tids);
-	if (scan2.array_cxt)
-		MemoryContextDelete(scan2.array_cxt);
+	destroy_attstream_decoder(&decoder1);
+	destroy_attstream_decoder(&decoder2);
 }
 
 /*

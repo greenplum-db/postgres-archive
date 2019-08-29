@@ -23,9 +23,80 @@ struct zs_pending_undo_op;
 
 #define ZS_META_ATTRIBUTE_NUM 0
 
-
-
 #define INVALID_SPECULATIVE_TOKEN 0
+
+/*
+ * attstream_buffer is an in-memory representation of an attribute stream. It is used
+ * by the operations that construct and manipulate attribute streams.
+ */
+typedef struct
+{
+	/*
+	 * Enlargeable buffer. The chunks are stored in 'data', between the
+	 * 'cursor' and 'len' positions. So if cursor > 0, there is some unused
+	 * space before the chunks, and if data < maxlen, there is unused space
+	 * after the chunks.
+	 */
+	char	   *data;		/* contains raw chunks */
+	int			len;
+	int			maxlen;
+	int			cursor;		/* beginning of remaining chunks */
+
+	/*
+	 * First and last TID (inclusive) stored in the chunks.
+	 */
+	zstid		firsttid;
+	zstid		lasttid;
+
+	/*
+	 * meta-data of the attribute, so that we don't need to pass these along
+	 * as separate arguments everywhere.
+	 */
+	int16		attlen;
+	bool		attbyval;
+} attstream_buffer;
+
+/*
+ * attstream_decoder is used to unpack an attstream into tids/datums/isnulls.
+ */
+typedef struct
+{
+	/* memory context holding the buffer */
+	MemoryContext cxt;
+
+	/* this is for holding decoded element data in the arrays, reset between decoder_attstream_cont calls */
+	MemoryContext tmpcxt;
+
+	/*
+	 * meta-data of the attribute, so that we don't need to pass these along
+	 * as separate arguments everywhere.
+	 */
+	int16		attlen;
+	bool		attbyval;
+
+	/* buffer and its allocated size */
+	char	   *chunks_buf;
+	int			chunks_buf_size;
+
+	/* information about the current attstream in the buffer */
+	int			chunks_len;
+	zstid		firsttid;
+	zstid		lasttid;
+
+	/* next position within the attstream */
+	int			pos;
+	zstid		prevtid;
+
+	/*
+	 * currently decoded batch of elements
+	 */
+/* must be >= the max number of items in one codeword (that is, >= 60)*/
+#define DECODER_MAX_ELEMS	90
+	zstid		tids[DECODER_MAX_ELEMS];
+	Datum		datums[DECODER_MAX_ELEMS];
+	bool		isnulls[DECODER_MAX_ELEMS];
+	int			num_elements;
+} attstream_decoder;
 
 /*
  * A ZedStore table contains different kinds of pages, all in the same file.
@@ -616,18 +687,10 @@ typedef struct ZSAttrTreeScan
 	 * These fields are used, when the scan is processing an array tuple.
 	 * They are filled in by zsbt_attr_scan_fetch_array().
 	 */
-	int			array_datums_allocated_size;
-	Datum	   *array_datums;
-	bool	   *array_isnulls;
-	zstid	   *array_tids;
-	int			array_num_elements;
-	MemoryContext array_cxt;
+	attstream_decoder decoder;
 
-	int			array_curr_idx;
-
-	/* working area for zsbt_attr_scan_fetch_array() */
-	char	   *attr_buf;
-	int			attr_buf_size;
+	/* last index into attr_decoder arrays */
+	int			decoder_last_idx;
 
 } ZSAttrTreeScan;
 
@@ -846,46 +909,11 @@ extern void zsbt_attstream_change_redo(XLogReaderState *record);
 
 /* prototypes for functions in zedstore_attstream.c */
 
-/*
- * attstream_buffer is an in-memory representation of an attribute stream. It is used
- * by the operations that manipulate attribute streams.
- */
-struct attstream_buffer
-{
-	/*
-	 * Enlargeable buffer. The chunks are stored in 'data', between the
-	 * 'cursor' and 'len' positions. So if cursor > 0, there is some unused
-	 * space before the chunks, and if data < maxlen, there is unused space
-	 * after the chunks.
-	 */
-	char	   *data;		/* contains raw chunks */
-	int			len;
-	int			maxlen;
-	int			cursor;		/* beginning of remaining chunks */
-
-	/*
-	 * First and last TID (inclusive) stored in the chunks.
-	 */
-	zstid		firsttid;
-	zstid		lasttid;
-
-	/*
-	 * meta-data of the attribute, so that we don't need to pass these along
-	 * as separate arguments everywhere.
-	 */
-	int16		attlen;
-	bool		attbyval;
-};
-typedef struct attstream_buffer attstream_buffer;
-
 extern void create_attstream(attstream_buffer *buffer, bool attbyval, int16 attlen,
 							 int nelems, zstid *tids, Datum *datums, bool *isnulls);
+extern void init_attstream_buffer(attstream_buffer *buf, bool attbyval, int16 attlen);
 extern int append_attstream(attstream_buffer *buffer, bool all, int nelems,
 							zstid *tids, Datum *datums, bool *isnulls);
-
-extern void init_attstream_buffer(attstream_buffer *buffer, bool attbyval, int16 attlen,
-								   ZSAttStream *attstream);
-
 extern void vacuum_attstream(Relation rel, AttrNumber attno, attstream_buffer *buffer,
 							 ZSAttStream *attstream,
 							 zstid *tids_to_remove, int num_tids_to_remove);
@@ -895,12 +923,16 @@ extern void merge_attstream_buffer(Form_pg_attribute attr, attstream_buffer *buf
 
 extern bool append_attstream_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int freespace, attstream_buffer *newstream);
 
-extern void decode_attstream(ZSAttrTreeScan *scan, ZSAttStream *chunks);
 extern int truncate_attstream(Form_pg_attribute att, char *chunks, int len, zstid *lasttid);
 extern zstid get_attstream_first_tid(int attlen, ZSAttStream *chunk);
 
 extern void chop_attstream(attstream_buffer *buffer, int pos, zstid lasttid);
-extern void print_attstream(Form_pg_attribute att, char *chunk, int len);
+extern void print_attstream(int attlen, char *chunk, int len);
+
+extern void init_attstream_decoder(attstream_decoder *decoder, bool attbyval, int16 attlen);
+extern void destroy_attstream_decoder(attstream_decoder *decoder);
+extern void decode_attstream_begin(attstream_decoder *decoder, ZSAttStream *attstream);
+extern bool decode_attstream_cont(attstream_decoder *decoder);
 
 /* prototypes for functions in zedstore_btree.c */
 extern zs_split_stack *zsbt_newroot(Relation rel, AttrNumber attno, int level, List *downlinks);
@@ -935,36 +967,36 @@ zsbt_attr_fetch(ZSAttrTreeScan *scan, Datum *datum, bool *isnull, zstid tid)
 	 * Fetch the next item from the scan. The item we're looking for might
 	 * already be in scan->array_*.
 	 */
-	if (scan->array_num_elements == 0 ||
-		tid < scan->array_tids[0] ||
-		scan->array_tids[scan->array_num_elements - 1] < tid)
+	if (scan->decoder.num_elements == 0 ||
+		tid < scan->decoder.tids[0] ||
+		tid > scan->decoder.tids[scan->decoder.num_elements - 1])
 	{
 		if (!zsbt_attr_scan_fetch_array(scan, tid))
 			return false;
-		scan->array_curr_idx = -1;
+		scan->decoder_last_idx = -1;
 	}
-	Assert(scan->array_num_elements > 0 &&
-		   scan->array_tids[0] <= tid &&
-		   scan->array_tids[scan->array_num_elements - 1] >= tid);
+	Assert(scan->decoder.num_elements > 0 &&
+		   tid >= scan->decoder.tids[0] &&
+		   tid <= scan->decoder.tids[scan->decoder.num_elements - 1]);
 
 	/*
 	 * Optimize for the common case that we're scanning forward from the previous
 	 * TID.
 	 */
-	if (scan->array_curr_idx != -1 && scan->array_tids[scan->array_curr_idx] < tid)
-		idx = scan->array_curr_idx + 1;
+	if (scan->decoder_last_idx != -1 && scan->decoder.tids[scan->decoder_last_idx] < tid)
+		idx = scan->decoder_last_idx + 1;
 	else
 		idx = 0;
 
-	for (; idx < scan->array_num_elements; idx++)
+	for (; idx < scan->decoder.num_elements; idx++)
 	{
-		zstid		this_tid = scan->array_tids[idx];
+		zstid		this_tid = scan->decoder.tids[idx];
 
 		if (this_tid == tid)
 		{
-			*isnull = scan->array_isnulls[idx];
-			*datum = scan->array_datums[idx];
-			scan->array_curr_idx = idx;
+			*isnull = scan->decoder.isnulls[idx];
+			*datum = scan->decoder.datums[idx];
+			scan->decoder_last_idx = idx;
 			return true;
 		}
 		if (this_tid > tid)
