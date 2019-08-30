@@ -785,7 +785,7 @@ zsbt_attr_pack_attstream(Form_pg_attribute attr, attstream_buffer *attbuf,
 			lasttid = attbuf->lasttid;
 		}
 		else
-			complete_chunks_len = truncate_attstream(attr, pstart, bytes_compressed, &lasttid);
+			complete_chunks_len = find_attstream_chop_pos(attr, pstart, bytes_compressed, &lasttid);
 
 		if (complete_chunks_len == 0)
 			elog(ERROR, "could not fit any chunks on page");
@@ -815,7 +815,7 @@ zsbt_attr_pack_attstream(Form_pg_attribute attr, attstream_buffer *attbuf,
 			lasttid = attbuf->lasttid;
 		}
 		else
-			complete_chunks_len = truncate_attstream(attr, pstart, freespc, &lasttid);
+			complete_chunks_len = find_attstream_chop_pos(attr, pstart, freespc, &lasttid);
 
 		if (complete_chunks_len == 0)
 			elog(ERROR, "could not fit any chunks on page");
@@ -834,8 +834,7 @@ zsbt_attr_pack_attstream(Form_pg_attribute attr, attstream_buffer *attbuf,
 	}
 
 	/*
-	 * Since we split the chunk stream, inject a reference point to the
-	 * beginning of the remainder.
+	 * Chop off the part of the chunk stream in 'attbuf' that we wrote out.
 	 */
 	chop_attstream(attbuf, complete_chunks_len, lasttid);
 }

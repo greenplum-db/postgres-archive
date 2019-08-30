@@ -52,6 +52,9 @@
  * information in the attstream_buffer struct to construct the ZSAttStream
  * header when needed.
  *
+ * Another in-memory representation is 'attstream_decoder'. It holds state
+ * when reading an attribute stream.
+ *
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -78,12 +81,198 @@ static int decode_chunk(bool attbyval, int attlen, zstid *lasttid, char *chunk,
 						int *num_elems, zstid *tids, Datum *datums, bool *isnulls);
 static int encode_chunk(attstream_buffer *dst, zstid prevtid, int ntids,
 						zstid *tids, Datum *datums, bool *isnulls);
+
+/* Other internal functions. */
+static void merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buffer, char *chunks2, int chunks2len, zstid lasttid2);
 #ifdef USE_ASSERT_CHECKING
 static void verify_attstream(attstream_buffer *buffer);
 #endif
 
-/* Other internal functions. */
-static void merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buffer, char *chunks2, int chunks2len, zstid lasttid2);
+
+/* ----------------------------------------------------------------------------
+ * Decoder routines
+ *
+ * To read an attribute stream, initialize a "decoder" by calling
+ * init_attstream_decoder(). Then call decode_attstream_begin()
+ * to load the decoder with data. Read the data, one chunk at a time,
+ * by calling decode_attstream_cont(), until it returns false. Each
+ * call to decode_attstream_cont() fills the arrays in the decoder
+ * struct with the TIDs, Datums and isnull-flags in current chunk.
+ * ----------------------------------------------------------------------------
+ */
+
+/*
+ * Initialize a decoder.
+ */
+void
+init_attstream_decoder(attstream_decoder *decoder, bool attbyval, int16 attlen)
+{
+	decoder->cxt = CurrentMemoryContext;
+	decoder->tmpcxt = NULL;		/* can be set by caller */
+
+	decoder->attbyval = attbyval;
+	decoder->attlen = attlen;
+
+	decoder->chunks_buf = NULL;
+	decoder->chunks_buf_size = 0;
+	decoder->chunks_len = 0;
+	decoder->lasttid = InvalidZSTid;
+
+	decoder->pos = 0;
+	decoder->prevtid = InvalidZSTid;
+
+	decoder->num_elements = 0;
+}
+
+void
+destroy_attstream_decoder(attstream_decoder *decoder)
+{
+	if (decoder->chunks_buf)
+		pfree(decoder->chunks_buf);
+	decoder->chunks_buf = NULL;
+	decoder->chunks_buf_size = 0;
+	decoder->chunks_len = 0;
+	decoder->num_elements = 0;
+}
+
+/*
+ * Begin reading an attribute stream.
+ */
+void
+decode_attstream_begin(attstream_decoder *decoder, ZSAttStream *attstream)
+{
+	int			buf_size_needed;
+
+	if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
+		buf_size_needed = attstream->t_decompressed_bufsize;
+	else
+		buf_size_needed = attstream->t_size - SizeOfZSAttStreamHeader;
+
+	if (decoder->chunks_buf_size < buf_size_needed)
+	{
+		if (decoder->chunks_buf)
+			pfree(decoder->chunks_buf);
+
+		decoder->chunks_buf = MemoryContextAlloc(decoder->cxt, buf_size_needed);
+		decoder->chunks_buf_size = buf_size_needed;
+	}
+
+	if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
+	{
+		/* decompress */
+		zs_decompress(attstream->t_payload, decoder->chunks_buf,
+					  attstream->t_size - SizeOfZSAttStreamHeader,
+					  attstream->t_decompressed_bufsize);
+		decoder->chunks_len = attstream->t_decompressed_size;
+	}
+	else
+	{
+		memcpy(decoder->chunks_buf,
+			   ((char *) attstream) + SizeOfZSAttStreamHeader,
+			   attstream->t_size - SizeOfZSAttStreamHeader);
+		decoder->chunks_len = attstream->t_size - SizeOfZSAttStreamHeader;
+	}
+	decoder->firsttid = get_chunk_first_tid(decoder->attlen, decoder->chunks_buf);
+	decoder->lasttid = attstream->t_lasttid;
+
+	decoder->pos = 0;
+	decoder->prevtid = 0;
+
+	decoder->num_elements = 0;
+}
+
+/*
+ * internal routine like decode_attstream_begin(), for reading chunks without the
+ * ZSAttStream header.
+ */
+static void
+decode_chunks_begin(attstream_decoder *decoder, char *chunks, int chunkslen, zstid lasttid)
+{
+	if (decoder->chunks_buf_size < chunkslen)
+	{
+		if (decoder->chunks_buf)
+			pfree(decoder->chunks_buf);
+
+		decoder->chunks_buf = MemoryContextAlloc(decoder->cxt, chunkslen);
+		decoder->chunks_buf_size = chunkslen;
+	}
+
+	/* XXX: do we really need to make a copy? */
+	memcpy(decoder->chunks_buf, chunks, chunkslen);
+	decoder->chunks_len = chunkslen;
+	decoder->lasttid = lasttid;
+
+	decoder->pos = 0;
+	decoder->prevtid = 0;
+
+	decoder->num_elements = 0;
+}
+
+/*
+ * Decode the next chunk in an attribute steam.
+ *
+ * The TIDs, Datums and isnull flags in 'decoder' are filled in with
+ * data from the next chunk. Returns true if there was more data,
+ * false if the end of chunk was reached.
+ *
+ * TODO: avoid extracting elements we're not interested in, by passing
+ * starttid/endtid. Or provide a separate "fast forward" function.
+ */
+bool
+decode_attstream_cont(attstream_decoder *decoder)
+{
+	zstid		lasttid;
+	int			total_decoded;
+	char	   *p;
+	char	   *pend;
+	MemoryContext oldcxt;
+
+	oldcxt = CurrentMemoryContext;
+	if (decoder->tmpcxt)
+	{
+		MemoryContextReset(decoder->tmpcxt);
+		MemoryContextSwitchTo(decoder->tmpcxt);
+	}
+
+	p = decoder->chunks_buf + decoder->pos;
+	pend = decoder->chunks_buf + decoder->chunks_len;
+
+	total_decoded = 0;
+	lasttid = decoder->prevtid;
+
+	if (p >= pend)
+		return false;
+
+	while (p < pend && total_decoded + 60 < DECODER_MAX_ELEMS)
+	{
+		int			num_decoded;
+
+		p += decode_chunk(decoder->attbyval, decoder->attlen, &lasttid, p,
+						  &num_decoded,
+						  &decoder->tids[total_decoded],
+						  &decoder->datums[total_decoded],
+						  &decoder->isnulls[total_decoded]);
+		total_decoded += num_decoded;
+	}
+
+	MemoryContextSwitchTo(oldcxt);
+
+	Assert(p <= pend);
+	decoder->num_elements = total_decoded;
+	decoder->pos = p - decoder->chunks_buf;
+	if (total_decoded > 0)
+	{
+		decoder->prevtid = decoder->tids[total_decoded - 1];
+		return true;
+	}
+	else
+		return false;
+}
+
+/* ----------------------------------------------------------------------------
+ * Functions for constructing and manipulating attribute streams.
+ * ----------------------------------------------------------------------------
+ */
 
 static void
 enlarge_attstream_buffer_slow(attstream_buffer *buf, int needed)
@@ -216,173 +405,6 @@ append_attstream(attstream_buffer *buf, bool all, int nelems,
 }
 
 /*
- * Extract TID and Datum/isnull arrays an attstream.
- *
- * The arrays are stored directly into the scan->array_* fields.
- *
- * TODO: avoid extracting elements we're not interested in, by passing
- * starttid/endtid.
- */
-void
-init_attstream_decoder(attstream_decoder *decoder, bool attbyval, int16 attlen)
-{
-	decoder->cxt = CurrentMemoryContext;
-	decoder->tmpcxt = NULL;		/* can be set by caller */
-
-	decoder->attbyval = attbyval;
-	decoder->attlen = attlen;
-
-	decoder->chunks_buf = NULL;
-	decoder->chunks_buf_size = 0;
-	decoder->chunks_len = 0;
-	decoder->lasttid = InvalidZSTid;
-
-	decoder->pos = 0;
-	decoder->prevtid = InvalidZSTid;
-
-	decoder->num_elements = 0;
-}
-
-void
-destroy_attstream_decoder(attstream_decoder *decoder)
-{
-	if (decoder->chunks_buf)
-		pfree(decoder->chunks_buf);
-	decoder->chunks_buf = NULL;
-	decoder->chunks_buf_size = 0;
-	decoder->chunks_len = 0;
-	decoder->num_elements = 0;
-}
-
-void
-decode_attstream_begin(attstream_decoder *decoder, ZSAttStream *attstream)
-{
-	int			buf_size_needed;
-
-	if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
-		buf_size_needed = attstream->t_decompressed_bufsize;
-	else
-		buf_size_needed = attstream->t_size - SizeOfZSAttStreamHeader;
-
-	if (decoder->chunks_buf_size < buf_size_needed)
-	{
-		if (decoder->chunks_buf)
-			pfree(decoder->chunks_buf);
-
-		decoder->chunks_buf = MemoryContextAlloc(decoder->cxt, buf_size_needed);
-		decoder->chunks_buf_size = buf_size_needed;
-	}
-
-	if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
-	{
-		/* decompress */
-		zs_decompress(attstream->t_payload, decoder->chunks_buf,
-					  attstream->t_size - SizeOfZSAttStreamHeader,
-					  attstream->t_decompressed_bufsize);
-		decoder->chunks_len = attstream->t_decompressed_size;
-	}
-	else
-	{
-		memcpy(decoder->chunks_buf,
-			   ((char *) attstream) + SizeOfZSAttStreamHeader,
-			   attstream->t_size - SizeOfZSAttStreamHeader);
-		decoder->chunks_len = attstream->t_size - SizeOfZSAttStreamHeader;
-	}
-	decoder->firsttid = get_chunk_first_tid(decoder->attlen, decoder->chunks_buf);
-	decoder->lasttid = attstream->t_lasttid;
-
-	decoder->pos = 0;
-	decoder->prevtid = 0;
-
-	decoder->num_elements = 0;
-}
-
-static void
-decode_chunks_begin(attstream_decoder *decoder, char *chunks, int chunkslen, zstid lasttid)
-{
-	if (decoder->chunks_buf_size < chunkslen)
-	{
-		if (decoder->chunks_buf)
-			pfree(decoder->chunks_buf);
-
-		decoder->chunks_buf = MemoryContextAlloc(decoder->cxt, chunkslen);
-		decoder->chunks_buf_size = chunkslen;
-	}
-
-	/* XXX: do we really need to make a copy? */
-	memcpy(decoder->chunks_buf, chunks, chunkslen);
-	decoder->chunks_len = chunkslen;
-	decoder->lasttid = lasttid;
-
-	decoder->pos = 0;
-	decoder->prevtid = 0;
-
-	decoder->num_elements = 0;
-}
-
-bool
-decode_attstream_cont(attstream_decoder *decoder)
-{
-	zstid		lasttid;
-	int			total_decoded;
-	char	   *p;
-	char	   *pend;
-	MemoryContext oldcxt;
-
-	oldcxt = CurrentMemoryContext;
-	if (decoder->tmpcxt)
-	{
-		MemoryContextReset(decoder->tmpcxt);
-		MemoryContextSwitchTo(decoder->tmpcxt);
-	}
-
-	p = decoder->chunks_buf + decoder->pos;
-	pend = decoder->chunks_buf + decoder->chunks_len;
-
-	total_decoded = 0;
-	lasttid = decoder->prevtid;
-
-	if (p >= pend)
-		return false;
-
-	while (p < pend && total_decoded + 60 < DECODER_MAX_ELEMS)
-	{
-		int			num_decoded;
-
-		p += decode_chunk(decoder->attbyval, decoder->attlen, &lasttid, p,
-						  &num_decoded,
-						  &decoder->tids[total_decoded],
-						  &decoder->datums[total_decoded],
-						  &decoder->isnulls[total_decoded]);
-		total_decoded += num_decoded;
-	}
-
-	MemoryContextSwitchTo(oldcxt);
-
-	Assert(p <= pend);
-	decoder->num_elements = total_decoded;
-	decoder->pos = p - decoder->chunks_buf;
-	if (total_decoded > 0)
-	{
-		decoder->prevtid = decoder->tids[total_decoded - 1];
-		return true;
-	}
-	else
-		return false;
-}
-
-/*
- * Get the first TID of an attream.
- */
-zstid
-get_attstream_first_tid(int attlen, ZSAttStream *attstream)
-{
-	if ((attstream->t_flags & ATTSTREAM_COMPRESSED) != 0)
-		elog(ERROR, "cannot get first tid of compressed chunk");
-	return get_chunk_first_tid(attlen, attstream->t_payload);
-}
-
-/*
  * Split 'chunk' at 'pos'. 'lasttid' is the TID of the item,
  * 'pos'
  *
@@ -410,11 +432,11 @@ chop_attstream(attstream_buffer *buf, int pos, zstid lasttid)
 		return;
 	}
 
-	/* FIXME: arbitrary limit. We need some space before the split point, for the
-	 * new attstream header. Compute this correctly, and perhaps reallocate a
-	 * bigger buffer if needed. ATM, though, this is only used to chop large
-	 * attstreams to page-sized parts, so this never gets called with a very
-	 * small 'pos'.
+	/* FIXME: arbitrary limit. We need some space before the split point, in
+	 * case we need to re-encode the first new chunk. Compute this correctly,
+	 * and perhaps reallocate a bigger buffer if needed. ATM, though, this is
+	 * only used to chop large attstreams to page-sized parts, so this never
+	 * gets called with a very small 'pos'.
 	 */
 	if (buf->cursor < 500)
 		elog(ERROR, "cannot split");
@@ -466,10 +488,10 @@ chop_attstream(attstream_buffer *buf, int pos, zstid lasttid)
 /*
  * Find the beginning offset of last chunk that fits in 'len'.
  *
- * Returns -1 if there are no full chunks.
+ * Returns -1 if there are no full chunks. (FIXME: no it doesn't currently)
  */
 int
-truncate_attstream(Form_pg_attribute att, char *chunks, int len, zstid *lasttid)
+find_attstream_chop_pos(Form_pg_attribute att, char *chunks, int len, zstid *lasttid)
 {
 	char	   *p = chunks;
 	char	   *pend = p + len;
@@ -488,65 +510,6 @@ truncate_attstream(Form_pg_attribute att, char *chunks, int len, zstid *lasttid)
 	}
 	/* 'p' now points to the first incomplete chunk */
 	return p - (char *) chunks;
-}
-
-#ifdef USE_ASSERT_CHECKING
-static void
-verify_attstream(attstream_buffer *attbuf)
-{
-	char	   *p = attbuf->data + attbuf->cursor;
-	char	   *pend = attbuf->data + attbuf->len;
-	zstid		tid;
-
-	tid = 0;
-
-	while (p < pend)
-	{
-		p += skip_chunk(attbuf->attlen, p, &tid);
-	}
-	Assert(tid == attbuf->lasttid);
-	Assert(p == pend);
-}
-#endif
-
-void
-print_attstream(int attlen, char *chunk, int len)
-{
-	char	   *p = chunk;
-	char	   *pend = chunk + len;
-	zstid		tid;
-
-	tid = 0;
-	while (p < pend)
-	{
-		uint64		codeword;
-
-		memcpy(&codeword, p, sizeof(uint64));
-
-		p += skip_chunk(attlen, p, &tid);
-		elog(NOTICE, "%016lX: TID %lu", codeword, tid);
-	}
-}
-
-static ZSAttStream *
-decompress_attstream(ZSAttStream *attstream)
-{
-	ZSAttStream *result;
-
-	Assert(attstream->t_flags & ATTSTREAM_COMPRESSED);
-
-	result = palloc(SizeOfZSAttStreamHeader + attstream->t_decompressed_bufsize);
-	zs_decompress(attstream->t_payload, result->t_payload,
-				  attstream->t_size - SizeOfZSAttStreamHeader,
-				  attstream->t_decompressed_bufsize);
-
-	result->t_size = SizeOfZSAttStreamHeader + attstream->t_decompressed_size;
-	result->t_flags = 0;
-	result->t_decompressed_size = 0;
-	result->t_decompressed_bufsize = 0;
-	result->t_lasttid = attstream->t_lasttid;
-
-	return result;
 }
 
 void
@@ -730,12 +693,25 @@ merge_attstream(Form_pg_attribute attr, attstream_buffer *buf, ZSAttStream *atts
 	 */
 	if ((attstream2->t_flags & ATTSTREAM_COMPRESSED) != 0)
 	{
-		attstream2 = decompress_attstream(attstream2);
-	}
+		char	   *decompress_buf;
 
-	merge_attstream_guts(attr, buf,
-						 attstream2->t_payload, attstream2->t_size - SizeOfZSAttStreamHeader,
-						 attstream2->t_lasttid);
+		decompress_buf = palloc(attstream2->t_decompressed_bufsize);
+		zs_decompress(attstream2->t_payload, decompress_buf,
+					  attstream2->t_size - SizeOfZSAttStreamHeader,
+					  attstream2->t_decompressed_bufsize);
+
+		merge_attstream_guts(attr, buf,
+							 decompress_buf, attstream2->t_decompressed_size,
+							 attstream2->t_lasttid);
+
+		pfree(decompress_buf);
+	}
+	else
+	{
+		merge_attstream_guts(attr, buf,
+							 attstream2->t_payload, attstream2->t_size - SizeOfZSAttStreamHeader,
+							 attstream2->t_lasttid);
+	}
 }
 
 void
@@ -992,6 +968,48 @@ append_attstream_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int free
 	newbuf->cursor = newbuf->len;
 
 	return true;
+}
+
+
+#ifdef USE_ASSERT_CHECKING
+static void
+verify_attstream(attstream_buffer *attbuf)
+{
+	char	   *p = attbuf->data + attbuf->cursor;
+	char	   *pend = attbuf->data + attbuf->len;
+	zstid		tid;
+
+	tid = 0;
+
+	while (p < pend)
+	{
+		p += skip_chunk(attbuf->attlen, p, &tid);
+	}
+	Assert(tid == attbuf->lasttid);
+	Assert(p == pend);
+}
+#endif
+
+void
+print_attstream(int attlen, char *chunk, int len)
+{
+	char	   *p = chunk;
+	char	   *pend = chunk + len;
+	zstid		tid;
+
+	tid = 0;
+	while (p < pend)
+	{
+		uint64		codeword;
+		int			len;
+
+		memcpy(&codeword, p, sizeof(uint64));
+
+		len = skip_chunk(attlen, p, &tid);
+		elog(NOTICE, "%016lX: TID %lu, %d bytes", codeword, tid, len);
+
+		p += len;
+	}
 }
 
 /* ----------------------------------------------------------------------------

@@ -908,7 +908,6 @@ extern void zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
 extern void zsbt_attstream_change_redo(XLogReaderState *record);
 
 /* prototypes for functions in zedstore_attstream.c */
-
 extern void create_attstream(attstream_buffer *buffer, bool attbyval, int16 attlen,
 							 int nelems, zstid *tids, Datum *datums, bool *isnulls);
 extern void init_attstream_buffer(attstream_buffer *buf, bool attbyval, int16 attlen);
@@ -925,10 +924,9 @@ extern void merge_attstream_buffer(Form_pg_attribute attr, attstream_buffer *buf
 
 extern bool append_attstream_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int freespace, attstream_buffer *newstream);
 
-extern int truncate_attstream(Form_pg_attribute att, char *chunks, int len, zstid *lasttid);
-extern zstid get_attstream_first_tid(int attlen, ZSAttStream *chunk);
-
+extern int find_attstream_chop_pos(Form_pg_attribute att, char *chunks, int len, zstid *lasttid);
 extern void chop_attstream(attstream_buffer *buffer, int pos, zstid lasttid);
+
 extern void print_attstream(int attlen, char *chunk, int len);
 
 extern void init_attstream_decoder(attstream_decoder *decoder, bool attbyval, int16 attlen);
