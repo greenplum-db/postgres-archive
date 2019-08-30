@@ -206,50 +206,6 @@ zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid, zstid t
 	ZSUndoRec_Insert *undorec;
 	zs_pending_undo_op *pending_op;
 
-	static RelFileNode cached_relfilenode;
-	static TransactionId cached_xid;
-	static CommandId cached_cid;
-	static zstid	cached_endtid;
-	static ZSUndoRecPtr cached_prev_undo_ptr;
-	static ZSUndoRecPtr cached_undo_ptr;
-
-	if (speculative_token == INVALID_SPECULATIVE_TOKEN &&
-		RelFileNodeEquals(rel->rd_node, cached_relfilenode) &&
-		xid == cached_xid &&
-		cid == cached_cid &&
-		tid == cached_endtid &&
-		prev_undo_ptr.counter == cached_prev_undo_ptr.counter)
-	{
-		Buffer		buf;
-		ZSUndoRec_Insert *orig_undorec;
-
-		orig_undorec = (ZSUndoRec_Insert *) zsundo_fetch(rel, cached_undo_ptr,
-														 &buf, BUFFER_LOCK_EXCLUSIVE, false);
-
-		if (orig_undorec->rec.type != ZSUNDO_TYPE_INSERT)
-			elog(ERROR, "unexpected undo record type %d, expected INSERT", orig_undorec->rec.type);
-
-		/* Extend the range of the old record to cover the new TID */
-		Assert(orig_undorec->endtid == tid);
-		Assert(orig_undorec->speculative_token == INVALID_SPECULATIVE_TOKEN);
-
-		pending_op = palloc(offsetof(zs_pending_undo_op, payload) + sizeof(ZSUndoRec_Insert));
-		undorec = (ZSUndoRec_Insert *) pending_op->payload;
-
-		pending_op->reservation.undobuf = buf;
-		pending_op->reservation.undorecptr = cached_undo_ptr;
-		pending_op->reservation.length = sizeof(ZSUndoRec_Insert);
-		pending_op->reservation.ptr = (char *) orig_undorec;
-		pending_op->is_update = true;
-
-		memcpy(undorec, orig_undorec, sizeof(ZSUndoRec_Insert));
-		undorec->endtid = tid + nitems;
-
-		cached_endtid = tid + nitems;
-
-		return pending_op;
-	}
-
 	/*
 	 * Cache miss. Create a new UNDO record.
 	 */
@@ -267,16 +223,6 @@ zsundo_create_for_insert(Relation rel, TransactionId xid, CommandId cid, zstid t
 	undorec->firsttid = tid;
 	undorec->endtid = tid + nitems;
 	undorec->speculative_token = speculative_token;
-
-	if (speculative_token == INVALID_SPECULATIVE_TOKEN)
-	{
-		cached_relfilenode = rel->rd_node;
-		cached_xid = xid;
-		cached_cid = cid;
-		cached_endtid = tid + nitems;
-		cached_prev_undo_ptr = prev_undo_ptr;
-		cached_undo_ptr = pending_op->reservation.undorecptr;
-	}
 
 	return pending_op;
 }

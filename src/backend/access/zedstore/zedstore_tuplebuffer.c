@@ -21,6 +21,16 @@
 
 #define TID_RESERVATION_SIZE		100
 
+/*
+ * If we see more than TID_RESERVATION_THRESHOLD insertions with the
+ * same XID and CID, with no "flush" calls in between, we start reserving
+ * TIDs in batches. The downside of reserving TIDs in batches is that if we
+ * are left with any unused TIDs at end of transaction (or when a "flush"
+ * call comes), we need to go and kill the unused TIDs. So only do batching
+ * when it seems like we're inserting a lot of rows.
+ */
+#define TID_RESERVATION_THRESHOLD	5
+
 #define ATTBUFFER_SIZE				(1024 * 1024)
 
 typedef struct
@@ -42,6 +52,14 @@ typedef struct
 	int			natts;			/* # of attributes on table might change, if it's ALTERed */
 	attbuffer	*attbuffers;
 
+	uint64		num_repeated_inserts;	/* number of inserted tuples since last flush */
+
+	TransactionId reserved_tids_xid;
+	CommandId	reserved_tids_cid;
+	zstid		reserved_tids_start;
+	zstid		reserved_tids_next;
+	zstid		reserved_tids_end;
+
 } tuplebuffer;
 
 
@@ -62,7 +80,7 @@ typedef struct
 static void zsbt_attbuffer_spool(Relation rel, AttrNumber attno, attbuffer *attbuffer, int ntuples, zstid *tids, Datum *datums, bool *isnulls);
 static void zsbt_attbuffer_init(Form_pg_attribute attr, attbuffer *attbuffer);
 static void zsbt_attbuffer_flush(Relation rel, AttrNumber attno, attbuffer *attbuffer, bool all);
-
+static void tuplebuffer_kill_unused_reserved_tids(Relation rel, tuplebuffer *tupbuffer);
 
 static MemoryContext tuplebuffers_cxt = NULL;
 static struct tuplebuffers_hash *tuplebuffers = NULL;
@@ -100,6 +118,14 @@ retry:
 
 			zsbt_attbuffer_init(attr, attbuffer);
 		}
+
+		tupbuffer->reserved_tids_xid = InvalidTransactionId;
+		tupbuffer->reserved_tids_cid = InvalidCommandId;
+		tupbuffer->reserved_tids_start = InvalidZSTid;
+		tupbuffer->reserved_tids_next = InvalidZSTid;
+		tupbuffer->reserved_tids_end = InvalidZSTid;
+		tupbuffer->num_repeated_inserts = 0;
+
 		MemoryContextSwitchTo(oldcxt);
 	}
 	else if (rel->rd_att->natts > tupbuffer->natts)
@@ -109,6 +135,59 @@ retry:
 	}
 
 	return tupbuffer;
+}
+
+/*
+ * Allocate a TID for insert.
+ */
+zstid
+zsbt_tuplebuffer_allocate_tid(Relation rel, TransactionId xid, CommandId cid)
+{
+	tuplebuffer *tupbuffer;
+	zstid		result;
+
+	tupbuffer = get_tuplebuffer(rel);
+
+	if (tupbuffer->reserved_tids_xid != xid ||
+		tupbuffer->reserved_tids_cid != cid)
+	{
+		/*
+		 * This insertion is for a different XID or CID than before. (Or this
+		 * is the first insertion.)
+		 */
+		tuplebuffer_kill_unused_reserved_tids(rel, tupbuffer);
+		tupbuffer->num_repeated_inserts = 0;
+
+		tupbuffer->reserved_tids_xid = xid;
+		tupbuffer->reserved_tids_cid = cid;
+	}
+
+	if (tupbuffer->reserved_tids_next < tupbuffer->reserved_tids_end)
+	{
+		/* We have pre-reserved TIDs. Consume one of them. */
+		Assert(tupbuffer->reserved_tids_next >= tupbuffer->reserved_tids_start);
+		Assert(tupbuffer->reserved_tids_next < tupbuffer->reserved_tids_end);
+		result = (tupbuffer->reserved_tids_next++);
+	}
+	else if (tupbuffer->num_repeated_inserts < TID_RESERVATION_THRESHOLD)
+	{
+		/* We haven't seen many inserts yet, so just allocate a single TID for this. */
+		result = zsbt_tid_multi_insert(rel, 1, xid, cid,
+									   INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
+	}
+	else
+	{
+		/* We're in batch mode. Reserve a new block of TIDs. */
+		result = zsbt_tid_multi_insert(rel, TID_RESERVATION_SIZE, xid, cid,
+									   INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
+		tupbuffer->reserved_tids_start = result;
+		tupbuffer->reserved_tids_next = result + 1;
+		tupbuffer->reserved_tids_end = result + TID_RESERVATION_SIZE;
+	}
+
+	tupbuffer->num_repeated_inserts++;
+
+	return result;
 }
 
 /* buffer more data */
@@ -286,11 +365,66 @@ zsbt_attbuffer_flush(Relation rel, AttrNumber attno, attbuffer *attbuffer, bool 
 	}
 }
 
+/*
+ * Remove any reserved but unused TIDs from the TID tree.
+ */
+static void
+tuplebuffer_kill_unused_reserved_tids(Relation rel, tuplebuffer *tupbuffer)
+{
+	IntegerSet *unused_tids;
+	zstid		tid;
+
+	if (tupbuffer->reserved_tids_next == tupbuffer->reserved_tids_end)
+		return;	/* no reserved TIDs */
+
+	/*
+	 * XXX: We use the zsbt_tid_remove() function for this, but it's
+	 * a bit too heavy-weight. It's geared towards VACUUM and removing
+	 * millions of TIDs in one go. Also, we leak the IntegerSet object;
+	 * usually flushing is done at end of transaction, so that's not
+	 * a problem, but it could be if we need to flush a lot in the
+	 * same transaction.
+	 *
+	 * XXX: It would be nice to adjust the UNDO record, too. Otherwise,
+	 * if we abort, the poor sod that tries to discard the UNDO record
+	 * will try to mark these TIDs as unused in vein.
+	 */
+	unused_tids = intset_create();
+
+	for (tid = tupbuffer->reserved_tids_next;
+		 tid < tupbuffer->reserved_tids_end;
+		 tid++)
+	{
+		intset_add_member(unused_tids, tid);
+	}
+
+	zsbt_tid_remove(rel, unused_tids);
+
+	tupbuffer->reserved_tids_start = InvalidZSTid;
+	tupbuffer->reserved_tids_next = InvalidZSTid;
+	tupbuffer->reserved_tids_end = InvalidZSTid;
+}
+
+static void
+tuplebuffer_flush_internal(Relation rel, tuplebuffer *tupbuffer)
+{
+	tuplebuffer_kill_unused_reserved_tids(rel, tupbuffer);
+
+	/* Flush the attribute data */
+	for (AttrNumber attno = 1; attno <= tupbuffer->natts; attno++)
+	{
+		attbuffer *attbuffer = &tupbuffer->attbuffers[attno - 1];
+
+		zsbt_attbuffer_flush(rel, attno, attbuffer, true);
+	}
+
+	tupbuffer->num_repeated_inserts = 0;
+}
+
 void
 zsbt_tuplebuffer_flush(Relation rel)
 {
 	tuplebuffer *tupbuffer;
-	AttrNumber	attno;
 
 	if (!tuplebuffers)
 		return;
@@ -298,12 +432,8 @@ zsbt_tuplebuffer_flush(Relation rel)
 	if (!tupbuffer)
 		return;
 
-	for (attno = 1; attno <= tupbuffer->natts; attno++)
-	{
-		attbuffer *attbuffer = &tupbuffer->attbuffers[attno - 1];
+	tuplebuffer_flush_internal(rel, tupbuffer);
 
-		zsbt_attbuffer_flush(rel, attno, attbuffer, true);
-	}
 	tuplebuffers_delete(tuplebuffers, RelationGetRelid(rel));
 }
 
@@ -317,16 +447,10 @@ zsbt_tuplebuffers_flush(void)
 	while ((tupbuffer = tuplebuffers_iterate(tuplebuffers, &iter)) != NULL)
 	{
 		Relation	rel;
-		AttrNumber	attno;
 
 		rel = table_open(tupbuffer->relid, NoLock);
 
-		for (attno = 1; attno <= tupbuffer->natts; attno++)
-		{
-			attbuffer *attbuffer = &tupbuffer->attbuffers[attno - 1];
-
-			zsbt_attbuffer_flush(rel, attno, attbuffer, true);
-		}
+		tuplebuffer_flush_internal(rel, tupbuffer);
 
 		table_close(rel, NoLock);
 	}

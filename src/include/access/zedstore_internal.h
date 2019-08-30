@@ -862,10 +862,9 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan, ScanDirection direction)
 }
 
 
-extern void zsbt_tid_multi_insert(Relation rel,
-								  zstid *tids, int ntuples,
-								  TransactionId xid, CommandId cid,
-								  uint32 speculative_token, ZSUndoRecPtr prevundoptr);
+extern zstid zsbt_tid_multi_insert(Relation rel, int ntuples,
+								   TransactionId xid, CommandId cid,
+								   uint32 speculative_token, ZSUndoRecPtr prevundoptr);
 extern TM_Result zsbt_tid_delete(Relation rel, zstid tid,
 								 TransactionId xid, CommandId cid,
 								 Snapshot snapshot, Snapshot crosscheck, bool wait,
@@ -935,6 +934,7 @@ extern void decode_attstream_begin(attstream_decoder *decoder, ZSAttStream *atts
 extern bool decode_attstream_cont(attstream_decoder *decoder);
 
 /* prototypes for functions in zedstore_tuplebuffer.c */
+extern zstid zsbt_tuplebuffer_allocate_tid(Relation rel, TransactionId xid, CommandId cid);
 extern void zsbt_tuplebuffer_flush(Relation rel);
 extern void zsbt_tuplebuffer_spool_tuple(Relation rel, zstid tid, Datum *datums, bool *isnulls);
 extern void zsbt_tuplebuffer_spool_slots(Relation rel, zstid *tids, TupleTableSlot **slots, int ntuples);

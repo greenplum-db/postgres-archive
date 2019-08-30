@@ -52,8 +52,8 @@ static TM_Result zsbt_tid_update_lock_old(Relation rel, zstid otid,
 										  TransactionId xid, CommandId cid, bool key_update, Snapshot snapshot,
 										  Snapshot crosscheck, bool wait, TM_FailureData *hufd,
 										  bool *this_xact_has_lock, ZSUndoRecPtr *prevundoptr_p);
-static void zsbt_tid_update_insert_new(Relation rel, zstid *newtid,
-					   TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr);
+static zstid zsbt_tid_update_insert_new(Relation rel, TransactionId xid, CommandId cid,
+										ZSUndoRecPtr prevundoptr);
 static bool zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 									  TransactionId xid, CommandId cid, bool key_update, ZSUndoRecPtr prevrecptr);
 static OffsetNumber zsbt_binsrch_tidpage(zstid key, Page page);
@@ -428,8 +428,8 @@ zsbt_get_last_tid(Relation rel)
  * first column of the row, pass invalid, and for other columns, pass the TID
  * you got for the first column.)
  */
-void
-zsbt_tid_multi_insert(Relation rel, zstid *tids, int ntuples,
+zstid
+zsbt_tid_multi_insert(Relation rel, int ntuples,
 					  TransactionId xid, CommandId cid, uint32 speculative_token, ZSUndoRecPtr prevundoptr)
 {
 	Buffer		buf;
@@ -507,8 +507,7 @@ zsbt_tid_multi_insert(Relation rel, zstid *tids, int ntuples,
 	list_free_deep(newitems);
 
 	/* Return the TIDs to the caller */
-	for (int i = 0; i < ntuples; i++)
-		tids[i] = tid + i;
+	return tid;
 }
 
 TM_Result
@@ -682,7 +681,7 @@ retry:
 		return result;
 
 	/* insert new version */
-	zsbt_tid_update_insert_new(rel, newtid_p, xid, cid, prevundoptr);
+	*newtid_p = zsbt_tid_update_insert_new(rel, xid, cid, prevundoptr);
 
 	/* update the old item with the "t_ctid pointer" for the new item */
 	success = zsbt_tid_mark_old_updated(rel, otid, *newtid_p, xid, cid, key_update, prevundoptr);
@@ -779,12 +778,10 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 /*
  * Subroutine of zsbt_update(): inserts the new, updated, item.
  */
-static void
-zsbt_tid_update_insert_new(Relation rel,
-					   zstid *newtid,
-					   TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr)
+static zstid
+zsbt_tid_update_insert_new(Relation rel, TransactionId xid, CommandId cid, ZSUndoRecPtr prevundoptr)
 {
-	zsbt_tid_multi_insert(rel, newtid, 1, xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
+	return zsbt_tid_multi_insert(rel, 1, xid, cid, INVALID_SPECULATIVE_TOKEN, prevundoptr);
 }
 
 /*
@@ -1022,7 +1019,16 @@ zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo)
 	off = zsbt_tid_fetch(rel, tid, &buf, &item_undoptr, &isdead);
 	if (!OffsetNumberIsValid(off))
 	{
-		elog(WARNING, "could not find tuple to mark dead with TID (%u, %u)",
+		/*
+		 * This can happen, at least in this scenario:
+		 * 1. a backend reserves a range of TIDs, by inserting them to the
+		 *    TID tree.
+		 * 2. it "cancels" the reservation in the middle of the transaction,
+		 *    by removing the TIDs from the tree again.
+		 * 3. It then aborts. The UNDO record for the insertion is still in
+		 *    place, but the backend removed the TIDs already.
+		 */
+		elog(DEBUG1, "could not find tuple to mark dead with TID (%u, %u)",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid));
 		UnlockReleaseBuffer(buf);
 		return;

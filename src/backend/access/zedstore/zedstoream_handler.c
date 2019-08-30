@@ -183,9 +183,11 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 	if (slot->tts_tupleDescriptor->natts != relation->rd_att->natts)
 		elog(ERROR, "slot's attribute count doesn't match relcache entry");
 
-	tid = InvalidZSTid;
-	zsbt_tid_multi_insert(relation, &tid, 1,
-						  xid, cid, speculative_token, InvalidUndoPtr);
+	if (speculative_token == INVALID_SPECULATIVE_TOKEN)
+		tid = zsbt_tuplebuffer_allocate_tid(relation, xid, cid);
+	else
+		tid = zsbt_tid_multi_insert(relation, 1, xid, cid, speculative_token,
+									InvalidUndoPtr);
 
 	/*
 	 * We only need to check for table-level SSI locks. Our
@@ -250,6 +252,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 {
 	int			i;
 	TransactionId xid = GetCurrentTransactionId();
+	zstid		firsttid;
 	zstid	   *tids;
 
 	if (ntuples == 0)
@@ -258,10 +261,12 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		return;
 	}
 
-	tids = palloc(ntuples * sizeof(zstid));
+	firsttid = zsbt_tid_multi_insert(relation, ntuples, xid, cid,
+									 INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
 
-	zsbt_tid_multi_insert(relation, tids, ntuples,
-						  xid, cid, INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
+	tids = palloc(ntuples * sizeof(zstid));
+	for (i = 0; i < ntuples; i++)
+		tids[i] = firsttid + i;
 
 	/*
 	 * We only need to check for table-level SSI locks. Our
@@ -276,12 +281,10 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	for (i = 0; i < ntuples; i++)
 	{
 		slots[i]->tts_tableOid = RelationGetRelid(relation);
-		slots[i]->tts_tid = ItemPointerFromZSTid(tids[i]);
+		slots[i]->tts_tid = ItemPointerFromZSTid(firsttid + i);
 	}
 
 	pgstat_count_heap_insert(relation, ntuples);
-
-	pfree(tids);
 }
 
 static TM_Result
@@ -2193,15 +2196,15 @@ zs_cluster_process_tuple(Relation OldHeap, Relation NewHeap,
 	if (this_xmin != InvalidTransactionId)
 	{
 		/* Insert the first version of the row. */
-		zstid		newtid = InvalidZSTid;
+		zstid		newtid;
 
 		/* First, insert the tuple. */
-		zsbt_tid_multi_insert(NewHeap,
-							  &newtid, 1,
-							  this_xmin,
-							  this_cmin,
-							  INVALID_SPECULATIVE_TOKEN,
-							  InvalidUndoPtr);
+		newtid = zsbt_tid_multi_insert(NewHeap,
+									   1,
+									   this_xmin,
+									   this_cmin,
+									   INVALID_SPECULATIVE_TOKEN,
+									   InvalidUndoPtr);
 
 		/* And if the tuple was deleted/updated away, do the same in the new table. */
 		if (this_xmax != InvalidTransactionId)
