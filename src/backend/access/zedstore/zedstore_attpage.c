@@ -155,7 +155,12 @@ zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid nexttid)
 		/* Advance the scan, until we have reached the target TID */
 		while (nexttid > scan->decoder.prevtid)
 			(void) decode_attstream_cont(&scan->decoder);
-		return true;
+
+		if (scan->decoder.num_elements == 0 ||
+			nexttid < scan->decoder.tids[0])
+			return false;
+		else
+			return true;
 	}
 
 	/* reset the decoder */
@@ -215,7 +220,12 @@ zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid nexttid)
 		/* Advance the scan, until we have reached the target TID */
 		while (nexttid > scan->decoder.prevtid)
 			(void) decode_attstream_cont(&scan->decoder);
-		return true;
+
+		if (scan->decoder.num_elements == 0 ||
+			nexttid < scan->decoder.tids[0])
+			return false;
+		else
+			return true;
 	}
 	else
 		return false;
