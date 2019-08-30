@@ -1024,6 +1024,7 @@ zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo)
 	{
 		elog(WARNING, "could not find tuple to mark dead with TID (%u, %u)",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid));
+		UnlockReleaseBuffer(buf);
 		return;
 	}
 
