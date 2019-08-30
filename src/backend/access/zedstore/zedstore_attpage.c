@@ -397,6 +397,9 @@ get_page_lowerstream(Page page)
 	{
 		lowerstream = (ZSAttStream *) (((char *) page) + SizeOfPageHeaderData);
 		Assert((lowerstream)->t_size == lowersize);
+
+		/* by convention, lower stream is always uncompressed */
+		Assert((lowerstream->t_flags & ATTSTREAM_COMPRESSED) == 0);
 	}
 	else
 	{
@@ -418,6 +421,8 @@ get_page_upperstream(Page page)
 	{
 		upperstream = (ZSAttStream *) (((char *) page) + ((PageHeader) page)->pd_upper);
 		Assert(upperstream->t_size == uppersize);
+		/* by convention, upper stream is always compressed */
+		Assert((upperstream->t_flags & ATTSTREAM_COMPRESSED) != 0);
 	}
 	else
 	{
@@ -516,8 +521,6 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 		/*
 		 * Try to append the new data to the old data
 		 */
-		Assert(lowerstream->t_size == orig_pd_lower - SizeOfPageHeaderData);
-
 		START_CRIT_SECTION();
 
 		if (append_attstream_inplace(attr, lowerstream,
