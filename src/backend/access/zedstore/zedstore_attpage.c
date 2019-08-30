@@ -55,7 +55,6 @@ static ZSAttStream *get_page_upperstream(Page page);
 static void wal_log_attstream_change(Relation rel, Buffer buf, ZSAttStream *attstream, bool is_upper,
 									 uint16 begin_offset, uint16 end_offset);
 
-static void zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf);
 static void zsbt_attr_repack_init(zsbt_attr_repack_context *cxt, AttrNumber attno, Buffer oldbuf, bool append);
 static void zsbt_attr_repack_newpage(zsbt_attr_repack_context *cxt, zstid nexttid);
 static void zsbt_attr_pack_attstream(Form_pg_attribute attr, attstream_buffer *buf, Page page);
@@ -230,29 +229,6 @@ zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid nexttid)
 	else
 		return false;
 }
-
-/*
- *
- * Insert multiple items to the given attribute's btree.
- */
-void
-zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
-					   Datum *datums, bool *isnulls, zstid *tids, int nitems)
-{
-	Form_pg_attribute attr;
-	attstream_buffer attbuf;
-
-	Assert (attno >= 1);
-	attr = &rel->rd_att->attrs[attno - 1];
-
-	/* Create items to insert. */
-	create_attstream(&attbuf, attr->attbyval, attr->attlen, nitems, tids, datums, isnulls);
-
-	/* recompress and possibly split the page */
-	while (attbuf.len - attbuf.cursor > 0)
-		zsbt_attr_add(rel, attno, &attbuf);
-}
-
 
 /*
  * Remove data for the given TIDs from the attribute tree.
@@ -448,7 +424,7 @@ get_page_upperstream(Page page)
  * This function handles decompressing and recompressing items, and splitting
  * the page, as needed.
  */
-static void
+void
 zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 {
 	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
@@ -499,7 +475,7 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 
 			memcpy(origpage + SizeOfPageHeaderData, &newhdr, SizeOfZSAttStreamHeader);
 			memcpy(origpage + SizeOfPageHeaderData + SizeOfZSAttStreamHeader,
-				   attbuf->data + attbuf->cursor, attbuf->len -attbuf->cursor);
+				   attbuf->data + attbuf->cursor, attbuf->len - attbuf->cursor);
 			((PageHeader) origpage)->pd_lower = new_pd_lower;
 
 			MarkBufferDirty(origbuf);

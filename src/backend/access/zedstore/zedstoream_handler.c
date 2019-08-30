@@ -121,6 +121,8 @@ zedstoream_fetch_row_version(Relation rel,
 	IndexFetchTableData *fetcher;
 	bool		result;
 
+	zsbt_tuplebuffer_flush(rel);
+
 	fetcher = zedstoream_begin_index_fetch(rel);
 
 	result = zedstoream_fetch_row((ZedStoreIndexFetchData *) fetcher,
@@ -150,17 +152,16 @@ zedstoream_get_latest_tid(TableScanDesc sscan,
 {
 	zstid		ztid = ZSTidFromItemPointer(*tid);
 
+	zsbt_tuplebuffer_flush(sscan->rs_rd);
+
 	zsbt_find_latest_tid(sscan->rs_rd, &ztid, sscan->rs_snapshot);
 	*tid = ItemPointerFromZSTid(ztid);
 }
 
 static inline void
 zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId cid,
-				  int options, struct BulkInsertStateData *bistate, uint32 speculative_token)
+						   int options, struct BulkInsertStateData *bistate, uint32 speculative_token)
 {
-	AttrNumber	attno;
-	Datum	   *d;
-	bool	   *isnulls;
 	zstid		tid;
 	TransactionId xid = GetCurrentTransactionId();
 	MemoryContext oldcontext;
@@ -182,10 +183,6 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 	if (slot->tts_tupleDescriptor->natts != relation->rd_att->natts)
 		elog(ERROR, "slot's attribute count doesn't match relcache entry");
 
-	slot_getallattrs(slot);
-	d = slot->tts_values;
-	isnulls = slot->tts_isnull;
-
 	tid = InvalidZSTid;
 	zsbt_tid_multi_insert(relation, &tid, 1,
 						  xid, cid, speculative_token, InvalidUndoPtr);
@@ -198,28 +195,8 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 	 */
 	CheckForSerializableConflictIn(relation, NULL, InvalidBlockNumber);
 
-	for (attno = 1; attno <= relation->rd_att->natts; attno++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, attno - 1);
-		Datum       datum;
-		bool        isnull;
-
-		datum = d[attno - 1];
-		isnull = isnulls[attno - 1];
-
-		if (!isnull && attr->attlen < 0 && VARATT_IS_EXTERNAL(datum))
-			datum = PointerGetDatum(heap_tuple_fetch_attr((struct varlena *) DatumGetPointer(datum)));
-
-		/* If this datum is too large, toast it */
-		if (!isnull && attr->attlen < 0 &&
-			VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
-		{
-			datum = zedstore_toast_datum(relation, attno, datum, tid);
-		}
-
-		zsbt_attr_multi_insert(relation, attno,
-						  &datum, &isnull, &tid, 1);
-	}
+	slot_getallattrs(slot);
+	zsbt_tuplebuffer_spool_tuple(relation, tid, slot->tts_values, slot->tts_isnull);
 
 	slot->tts_tableOid = RelationGetRelid(relation);
 	slot->tts_tid = ItemPointerFromZSTid(tid);
@@ -271,12 +248,8 @@ static void
 zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 						CommandId cid, int options, BulkInsertState bistate)
 {
-	AttrNumber	attno;
 	int			i;
-	bool		slotgetandset = true;
 	TransactionId xid = GetCurrentTransactionId();
-	Datum	   *datums;
-	bool	   *isnulls;
 	zstid	   *tids;
 
 	if (ntuples == 0)
@@ -285,12 +258,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		return;
 	}
 
-	datums = palloc0(ntuples * sizeof(Datum));
-	isnulls = palloc(ntuples * sizeof(bool));
-	tids = palloc0(ntuples * sizeof(zstid));
-
-	for (i = 0; i < ntuples; i++)
-		isnulls[i] = true;
+	tids = palloc(ntuples * sizeof(zstid));
 
 	zsbt_tid_multi_insert(relation, tids, ntuples,
 						  xid, cid, INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
@@ -303,33 +271,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	 */
 	CheckForSerializableConflictIn(relation, NULL, InvalidBlockNumber);
 
-	for (attno = 1; attno <= relation->rd_att->natts; attno++)
-	{
-		Form_pg_attribute attr = TupleDescAttr((slots[0])->tts_tupleDescriptor, attno - 1);
-
-		for (i = 0; i < ntuples; i++)
-		{
-			Datum		datum = slots[i]->tts_values[attno - 1];
-			bool		isnull = slots[i]->tts_isnull[attno - 1];
-
-			if (slotgetandset)
-				slot_getallattrs(slots[i]);
-
-			/* If this datum is too large, toast it */
-			if (!isnull && attr->attlen < 0 &&
-				VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
-			{
-				datum = zedstore_toast_datum(relation, attno, datum, tids[i]);
-			}
-			datums[i] = datum;
-			isnulls[i] = isnull;
-		}
-
-		zsbt_attr_multi_insert(relation, attno,
-							   datums, isnulls, tids, ntuples);
-
-		slotgetandset = false;
-	}
+	zsbt_tuplebuffer_spool_slots(relation, tids, slots, ntuples);
 
 	for (i = 0; i < ntuples; i++)
 	{
@@ -340,8 +282,6 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	pgstat_count_heap_insert(relation, ntuples);
 
 	pfree(tids);
-	pfree(datums);
-	pfree(isnulls);
 }
 
 static TM_Result
@@ -354,6 +294,8 @@ zedstoream_delete(Relation relation, ItemPointer tid_p, CommandId cid,
 	TM_Result result = TM_Ok;
 	bool		this_xact_has_lock = false;
 	bool		have_tuple_lock = false;
+
+	zsbt_tuplebuffer_flush(relation);
 
 retry:
 	result = zsbt_tid_delete(relation, tid, xid, cid,
@@ -517,6 +459,8 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	bool		locked_something = false;
 	ZSUndoSlotVisibility *visi_info = &((ZedstoreTupleTableSlot *) slot)->visi_info_buf;
 	bool		follow_updates = false;
+
+	zsbt_tuplebuffer_flush(relation);
 
 	slot->tts_tableOid = RelationGetRelid(relation);
 	slot->tts_tid = *tid_p;
@@ -839,7 +783,6 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 {
 	zstid		otid = ZSTidFromItemPointer(*otid_p);
 	TransactionId xid = GetCurrentTransactionId();
-	AttrNumber	attno;
 	bool		key_update;
 	Datum	   *d;
 	bool	   *isnulls;
@@ -851,6 +794,8 @@ zedstoream_update(Relation relation, ItemPointer otid_p, TupleTableSlot *slot,
 	MemoryContext insert_mcontext;
 	bool		this_xact_has_lock = false;
 	bool		have_tuple_lock = false;
+
+	zsbt_tuplebuffer_flush(relation);
 
 	/*
 	 * insert code performs allocations for creating items and merging
@@ -907,25 +852,7 @@ retry:
 		 */
 		CheckForSerializableConflictIn(relation, otid_p, ItemPointerGetBlockNumber(otid_p));
 
-		for (attno = 1; attno <= relation->rd_att->natts; attno++)
-		{
-			Form_pg_attribute attr = TupleDescAttr(relation->rd_att, attno - 1);
-			Datum		newdatum = d[attno - 1];
-			bool		newisnull = isnulls[attno - 1];
-
-			if (!newisnull && attr->attlen < 0 && VARATT_IS_EXTERNAL(newdatum))
-				newdatum = PointerGetDatum(heap_tuple_fetch_attr((struct varlena *) DatumGetPointer(newdatum)));
-
-			/* If this datum is too large, toast it */
-			if (!newisnull && attr->attlen < 0 &&
-				VARSIZE_ANY_EXHDR(newdatum) > MaxZedStoreDatumSize)
-			{
-				newdatum = zedstore_toast_datum(relation, attno, newdatum, newtid);
-			}
-
-			zsbt_attr_multi_insert(relation, attno,
-								   &newdatum, &newisnull, &newtid, 1);
-		}
+		zsbt_tuplebuffer_spool_tuple(relation, newtid, d, isnulls);
 
 		slot->tts_tableOid = RelationGetRelid(relation);
 		slot->tts_tid = ItemPointerFromZSTid(newtid);
@@ -1057,6 +984,8 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 											Bitmapset *project_columns)
 {
 	ZedStoreDesc scan;
+
+	zsbt_tuplebuffer_flush(relation);
 
 	/* Sample scans have no snapshot, but we need one */
 	if (!snapshot)
@@ -1411,8 +1340,11 @@ zedstoream_compute_xid_horizon_for_tuples(Relation rel,
 static IndexFetchTableData *
 zedstoream_begin_index_fetch(Relation rel)
 {
-	ZedStoreIndexFetch zscan = palloc0(sizeof(ZedStoreIndexFetchData));
+	ZedStoreIndexFetch zscan;
 
+	zsbt_tuplebuffer_flush(rel);
+
+	zscan = palloc0(sizeof(ZedStoreIndexFetchData));
 	zscan->idx_fetch_data.rel = rel;
 	zscan->proj_data.context = CurrentMemoryContext;
 
@@ -1483,6 +1415,7 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 		 */
 		PredicateLockTID(scan->rel, tid_p, snapshot);
 	}
+
 	return result;
 }
 
@@ -1823,6 +1756,7 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	if (!IsBootstrapProcessingMode() && !indexInfo->ii_Concurrent)
 		OldestXmin = GetOldestXmin(baseRelation, PROCARRAY_FLAGS_VACUUM);
 
+	zsbt_tuplebuffer_flush(baseRelation);
 	if (!scan)
 	{
 		int			attno;
@@ -2012,6 +1946,8 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 static void
 zedstoream_finish_bulk_insert(Relation relation, int options)
 {
+	zsbt_tuplebuffer_flush(relation);
+
 	/*
 	 * If we skipped writing WAL, then we need to sync the zedstore (but not
 	 * indexes since those use WAL anyway / don't go through tableam)
@@ -2033,6 +1969,9 @@ zedstoream_relation_set_new_filenode(Relation rel,
 									 MultiXactId *minmulti)
 {
 	SMgrRelation srel;
+
+	/* XXX: I think we could just throw away all data in the buffer */
+	zsbt_tuplebuffer_flush(rel);
 
 	/*
 	 * Initialize to the minimum XID that could put tuples in the table. We
@@ -2076,6 +2015,8 @@ zedstoream_relation_set_new_filenode(Relation rel,
 static void
 zedstoream_relation_nontransactional_truncate(Relation rel)
 {
+	/* XXX: I think we could just throw away all data in the buffer */
+	zsbt_tuplebuffer_flush(rel);
 	zsmeta_invalidate_cache(rel);
 	RelationTruncate(rel, 0);
 }
@@ -2084,6 +2025,8 @@ static void
 zedstoream_relation_copy_data(Relation rel, const RelFileNode *newrnode)
 {
 	SMgrRelation dstrel;
+
+	zsbt_tuplebuffer_flush(rel);
 
 	dstrel = smgropen(*newrnode, rel->rd_backend);
 	RelationOpenSmgr(rel);
@@ -2297,6 +2240,10 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(OldHeap);
 	int			attno;
 	IndexScanDesc indexScan;
+	Datum	   *newdatums;
+	bool       *newisnulls;
+
+	zsbt_tuplebuffer_flush(OldHeap);
 
 	olddesc = RelationGetDescr(OldHeap),
 
@@ -2322,6 +2269,9 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 							 attno,
 							 &attr_scans[attno - 1]);
 	}
+
+	newdatums = palloc(olddesc->natts * sizeof(Datum));
+	newisnulls = palloc(olddesc->natts * sizeof(bool));
 
 	/* TODO: sorting not implemented yet. (it would require materializing each
 	 * row into a HeapTuple or something like that, which could carry the xmin/xmax
@@ -2371,8 +2321,6 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		zstid		old_tid;
 		ZSUndoRecPtr old_undoptr;
 		zstid		new_tid;
-		Datum		datum;
-		bool        isnull;
 		zstid		fetchtid = InvalidZSTid;
 
 		CHECK_FOR_INTERRUPTS();
@@ -2417,6 +2365,8 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			for (attno = 1; attno <= olddesc->natts; attno++)
 			{
 				Form_pg_attribute att = TupleDescAttr(olddesc, attno - 1);
+				Datum		datum;
+				bool		isnull;
 
 				if (att->attisdropped)
 				{
@@ -2436,15 +2386,12 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 					{
 						datum = zedstore_toast_flatten(OldHeap, attno, old_tid, datum);
 					}
-
-					if (VARSIZE_ANY_EXHDR(datum) > MaxZedStoreDatumSize)
-					{
-						datum = zedstore_toast_datum(NewHeap, attno, datum, new_tid);
-					}
 				}
-
-				zsbt_attr_multi_insert(NewHeap, attno, &datum, &isnull, &new_tid, 1);
+				newdatums[attno - 1] = datum;
+				newisnulls[attno - 1] = isnull;
 			}
+
+			zsbt_tuplebuffer_spool_tuple(NewHeap, new_tid, newdatums, newisnulls);
 		}
 	}
 
@@ -2459,6 +2406,8 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 		zsbt_attr_end_scan(&attr_scans[attno - 1]);
 	}
+
+	zsbt_tuplebuffer_flush(NewHeap);
 }
 
 /*
@@ -2927,6 +2876,7 @@ static void
 zedstoream_vacuum_rel(Relation onerel, VacuumParams *params,
 					  BufferAccessStrategy bstrategy)
 {
+	zsbt_tuplebuffer_flush(onerel);
 	zsundo_vacuum(onerel, params, bstrategy,
 				  GetOldestXmin(onerel, PROCARRAY_FLAGS_VACUUM));
 }

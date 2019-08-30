@@ -402,6 +402,23 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 
 	rootblk = metacache->cache_attrs[attno].root;
 
+	/*
+	 * Don't believe a cached result that says that the root is empty.
+	 * It's possible that it was created after we populated the cache. If the
+	 * root block number is out-of-date, that's OK because the caller will
+	 * detect that case, but if the tree is missing altogether, the caller
+	 * will have nothing to detect and will incorrectly return an empty result.
+	 *
+	 * XXX: It's a inefficient to repopulate the cache here, if we just
+	 * did so in the zsmeta_get_cache() call above already.
+	 */
+	if (readonly && rootblk == InvalidBlockNumber)
+	{
+		zsmeta_invalidate_cache(rel);
+		metacache = zsmeta_get_cache(rel);
+		rootblk = metacache->cache_attrs[attno].root;
+	}
+
 	if (!readonly && rootblk == InvalidBlockNumber)
 	{
 		/* try to allocate one */

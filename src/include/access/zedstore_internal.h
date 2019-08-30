@@ -903,8 +903,8 @@ extern void zsbt_attr_begin_scan(Relation rel, TupleDesc tdesc, AttrNumber attno
 								 ZSAttrTreeScan *scan);
 extern void zsbt_attr_end_scan(ZSAttrTreeScan *scan);
 extern bool zsbt_attr_scan_fetch_array(ZSAttrTreeScan *scan, zstid tid);
-extern void zsbt_attr_multi_insert(Relation rel, AttrNumber attno,
-								   Datum *datums, bool *isnulls, zstid *tids, int ndatums);
+
+extern void zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *newstream);
 extern void zsbt_attstream_change_redo(XLogReaderState *record);
 
 /* prototypes for functions in zedstore_attstream.c */
@@ -933,6 +933,14 @@ extern void init_attstream_decoder(attstream_decoder *decoder, bool attbyval, in
 extern void destroy_attstream_decoder(attstream_decoder *decoder);
 extern void decode_attstream_begin(attstream_decoder *decoder, ZSAttStream *attstream);
 extern bool decode_attstream_cont(attstream_decoder *decoder);
+
+/* prototypes for functions in zedstore_tuplebuffer.c */
+extern void zsbt_tuplebuffer_flush(Relation rel);
+extern void zsbt_tuplebuffer_spool_tuple(Relation rel, zstid tid, Datum *datums, bool *isnulls);
+extern void zsbt_tuplebuffer_spool_slots(Relation rel, zstid *tids, TupleTableSlot **slots, int ntuples);
+
+extern void AtEOXact_zedstream_tuplebuffers(bool isCommit);
+
 
 /* prototypes for functions in zedstore_btree.c */
 extern zs_split_stack *zsbt_newroot(Relation rel, AttrNumber attno, int level, List *downlinks);
