@@ -728,8 +728,6 @@ AllocSetAlloc(MemoryContext context, Size size)
 	 */
 	if (size > set->allocChunkLimit)
 	{
-		if (size > 10*1024*1024)
-			elog(NOTICE, "allocating large chunk: %zu in %s", size, set->header.name);
 		chunk_size = MAXALIGN(size);
 		blksize = chunk_size + ALLOC_BLOCKHDRSZ + ALLOC_CHUNKHDRSZ;
 		block = (AllocBlock) malloc(blksize);
@@ -1073,9 +1071,6 @@ AllocSetRealloc(MemoryContext context, void *pointer, Size size)
 	AllocChunk	chunk = AllocPointerGetChunk(pointer);
 	Size		oldsize;
 
-	if (size > 10*1024*1024)
-		elog(NOTICE, "reallocating large chunk: %zu in %s", size, set->header.name);
-	
 	/* Allow access to private part of chunk header. */
 	VALGRIND_MAKE_MEM_DEFINED(chunk, ALLOCCHUNK_PRIVATE_LEN);
 
