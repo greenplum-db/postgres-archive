@@ -2,3 +2,5 @@
 
 \i sql/onecol.sql
 \i sql/nullcol.sql
+
+\i sql/lockperf.sql
