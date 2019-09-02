@@ -829,10 +829,19 @@ lazy_cleanup_index(Relation indrel,
  * undo pointer older than this is known to be visible to everyone. (i.e.
  * an inserted tuple is known to be visible, and a deleted tuple is known to
  * be invisible.)
+ *
+ * If 'attempt_trim' is true, this not only gets the current oldest UNDO pointer,
+ * but tries to first advance it as much as possible, by scanning and discarding
+ * old UNDO log. That's pretty expensive, but fetching records from the UNDO log
+ * is very expensive, too, so until that is somehow sped up, it is a good tradeoff
+ * to advance the discard pointer aggressively. It is only safe to trim the UNDO
+ * log when you're not holding any other page locks, however.
  */
 ZSUndoRecPtr
-zsundo_get_oldest_undo_ptr(Relation rel)
+zsundo_get_oldest_undo_ptr(Relation rel, bool attempt_trim)
 {
+	ZSUndoRecPtr result;
+
 	/* do nothing if the table is completely empty. */
 	if (RelationGetTargetBlock(rel) == 0 ||
 		RelationGetTargetBlock(rel) == InvalidBlockNumber)
@@ -847,15 +856,27 @@ zsundo_get_oldest_undo_ptr(Relation rel)
 	}
 
 	/*
-	 * Scan the UNDO log, to discard as much of it as possible. This
-	 * advances the oldest UNDO pointer past as many transactions as possible.
-	 *
-	 * TODO:
-	 * We could get the latest cached value directly from the metapage, but
-	 * this allows trimming the UNDO log more aggressively, whenever we're
-	 * scanning. Fetching records from the UNDO log is pretty expensive,
-	 * so until that is somehow sped up, it is a good tradeoff to be
-	 * aggressive about that.
+	 * If the caller asked for trimming the UNDO log, do that. Otherwise,
+	 * just get the current value from the metapage.
 	 */
-	return zsundo_trim(rel, RecentGlobalXmin);
+	if (attempt_trim)
+		result = zsundo_trim(rel, RecentGlobalXmin);
+	else
+	{
+		/*
+		 * Get the current oldest undo page from the metapage.
+		 */
+		Buffer		metabuf;
+		Page		metapage;
+		ZSMetaPageOpaque *metaopaque;
+
+		metabuf = ReadBuffer(rel, ZS_META_BLK);
+		metapage = BufferGetPage(metabuf);
+		LockBuffer(metabuf, BUFFER_LOCK_SHARE);
+		metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
+
+		result = metaopaque->zs_undo_oldestptr;
+		UnlockReleaseBuffer(metabuf);
+	}
+	return result;
 }

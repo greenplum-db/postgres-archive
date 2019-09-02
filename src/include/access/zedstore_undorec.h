@@ -191,6 +191,6 @@ extern Buffer XLogRedoUndoOp(XLogReaderState *record, uint8 block_id);
 struct VacuumParams;
 extern void zsundo_vacuum(Relation rel, struct VacuumParams *params, BufferAccessStrategy bstrategy,
 			  TransactionId OldestXmin);
-extern ZSUndoRecPtr zsundo_get_oldest_undo_ptr(Relation rel);
+extern ZSUndoRecPtr zsundo_get_oldest_undo_ptr(Relation rel, bool attempt_trim);
 
 #endif							/* ZEDSTORE_UNDOREC_H */

@@ -240,7 +240,7 @@ zedstoream_complete_speculative(Relation relation, TupleTableSlot *slot, uint32 
 	 */
 	if (!succeeded)
 	{
-		ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(relation);
+		ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(relation, true);
 
 		zsbt_tid_mark_dead(relation, tid, recent_oldest_undo);
 	}
@@ -2240,7 +2240,7 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	TupleDesc	olddesc;
 	ZSTidTreeScan tid_scan;
 	ZSAttrTreeScan *attr_scans;
-	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(OldHeap);
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(OldHeap, true);
 	int			attno;
 	IndexScanDesc indexScan;
 	Datum	   *newdatums;

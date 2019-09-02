@@ -56,7 +56,7 @@ am_i_holding_lock(Relation rel, ZSUndoRecPtr undo_ptr,
 		undorec = zsundo_fetch_record(rel, undo_ptr);
 		if (!undorec)
 		{
-			recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+			recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, false);
 			if (undo_ptr.counter >= recent_oldest_undo.counter)
 				elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
 					 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
@@ -154,7 +154,7 @@ retry_fetch:
 	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
-		recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, false);
 		if (undo_ptr.counter >= recent_oldest_undo.counter)
 			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
 				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
@@ -392,7 +392,7 @@ fetch_undo_record:
 	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
-		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, false);
 		if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
 			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
 				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
@@ -476,7 +476,7 @@ fetch_undo_record:
 	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
-		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, false);
 		if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
 			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
 				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
@@ -559,7 +559,7 @@ fetch_undo_record:
 	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
-		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, false);
 		if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
 			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
 				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
@@ -656,7 +656,7 @@ fetch_undo_record:
 	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
-		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, false);
 		if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
 			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
 				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
@@ -778,7 +778,7 @@ fetch_undo_record:
 	undorec = zsundo_fetch_record(rel, undo_ptr);
 	if (!undorec)
 	{
-		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+		scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, false);
 		if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
 			elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
 				 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);
@@ -836,7 +836,7 @@ fetch_undo_record:
 			undorec = zsundo_fetch_record(rel, prevptr);
 			if (!undorec)
 			{
-				scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+				scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, false);
 				if (undo_ptr.counter >= scan->recent_oldest_undo.counter)
 					elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u",
 						 undo_ptr.counter, undo_ptr.blkno, undo_ptr.offset);

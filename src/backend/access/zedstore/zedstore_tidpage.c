@@ -88,7 +88,7 @@ zsbt_tid_begin_scan(Relation rel, zstid starttid,
 	scan->lastbuf = InvalidBuffer;
 	scan->lastoff = InvalidOffsetNumber;
 
-	scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+	scan->recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
 }
 
 /*
@@ -516,7 +516,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 				Snapshot snapshot, Snapshot crosscheck, bool wait,
 				TM_FailureData *hufd, bool changingPart, bool *this_xact_has_lock)
 {
-	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
 	ZSUndoRecPtr item_undoptr;
 	bool		item_isdead;
 	TM_Result	result;
@@ -600,7 +600,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 void
 zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot)
 {
-	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
 	ZSUndoRecPtr item_undoptr;
 	bool		item_isdead;
 	int			idx;
@@ -687,7 +687,7 @@ retry:
 	success = zsbt_tid_mark_old_updated(rel, otid, *newtid_p, xid, cid, key_update, prevundoptr);
 	if (!success)
 	{
-		ZSUndoRecPtr oldest_undoptr = zsundo_get_oldest_undo_ptr(rel);
+		ZSUndoRecPtr oldest_undoptr = zsundo_get_oldest_undo_ptr(rel, true);
 
 		zsbt_tid_mark_dead(rel, *newtid_p, oldest_undoptr);
 		goto retry;
@@ -705,7 +705,7 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 						 Snapshot crosscheck, bool wait, TM_FailureData *hufd, bool *this_xact_has_lock,
 						 ZSUndoRecPtr *prevundoptr_p)
 {
-	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
 	Buffer		buf;
 	ZSUndoRecPtr olditem_undoptr;
 	bool		olditem_isdead;
@@ -791,7 +791,7 @@ static bool
 zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 						  TransactionId xid, CommandId cid, bool key_update, ZSUndoRecPtr prevrecptr)
 {
-	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, false /* we trimmed in the zsbt_tid_update_lock_old() call */);
 	Buffer		buf;
 	Page		page;
 	ZSUndoRecPtr olditem_undoptr;
@@ -849,7 +849,7 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 			  TM_FailureData *hufd, zstid *next_tid, bool *this_xact_has_lock,
 			  ZSUndoSlotVisibility *visi_info)
 {
-	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
 	Buffer		buf;
 	Page		page;
 	ZSUndoRecPtr item_undoptr;
@@ -1059,7 +1059,7 @@ zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo)
 void
 zsbt_tid_remove(Relation rel, IntegerSet *tids)
 {
-	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel);
+	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
 	zstid		nexttid;
 	MemoryContext oldcontext;
 	MemoryContext tmpcontext;
