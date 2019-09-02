@@ -304,7 +304,9 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 	bool		can_advance_oldestundorecptr;
 	char	   *ptr;
 	char	   *endptr;
-	BlockNumber deleted_undo_pages = 0;
+	char	   *pagebuf;
+
+	pagebuf = palloc(BLCKSZ);
 
 	oldest_undorecptr = InvalidUndoPtr;
 
@@ -364,6 +366,17 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 
 		if (opaque->zs_page_id != ZS_UNDO_PAGE_ID)
 			elog(ERROR, "unexpected page id on UNDO page");
+
+		/*
+		 * Make a copy of the page, because we cannot hold the
+		 * lock while we reach out to the TID tree, to mark items dead.
+		 * That would cause a deadlock risk (scans lock TID tree pages
+		 * first, and then UNDO pages to check visibility)
+		 */
+		memcpy(pagebuf, page, BLCKSZ);
+		page = pagebuf;
+		UnlockReleaseBuffer(buf);
+		buf = InvalidBuffer;
 
 		/* loop through all records on the page */
 		endptr = (char *) page + ((PageHeader) page)->pd_lower;
@@ -450,7 +463,6 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 
 		if (ptr < endptr)
 		{
-			UnlockReleaseBuffer(buf);
 			break;
 		}
 		else
@@ -458,9 +470,6 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 			/* We processed all records on the page. Step to the next one, if any. */
 			Assert(ptr == endptr);
 			lastblk = opaque->next;
-			UnlockReleaseBuffer(buf);
-			if (lastblk != InvalidBlockNumber)
-				deleted_undo_pages++;
 		}
 	}
 
@@ -481,6 +490,8 @@ zsundo_trim(Relation rel, TransactionId OldestXmin)
 	}
 
 	UnlockPage(rel, ZS_META_BLK, ExclusiveLock);
+
+	pfree(pagebuf);
 
 	return oldest_undorecptr;
 }
