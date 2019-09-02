@@ -130,6 +130,7 @@ retry_lock_tail:
 			 * tail block is already full, but we're not smart about it.)
 			 */
 			zspage_delete_page(rel, newbuf, metabuf);
+			UnlockReleaseBuffer(newbuf);
 			goto retry_lock_tail;
 		}
 		if (BufferIsValid(tail_buf))
