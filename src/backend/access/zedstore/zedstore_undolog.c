@@ -280,24 +280,53 @@ char *
 zsundo_fetch(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode,
 			 bool missing_ok)
 {
-	Buffer		buf;
+	Buffer		buf = InvalidBuffer;
 	Page		page;
 	PageHeader	pagehdr;
 	ZSUndoPageOpaque *opaque;
 	char	   *ptr;
+	Buffer		metabuf = InvalidBuffer;
 
 	buf = ReadBuffer(rel, undoptr.blkno);
 	page = BufferGetPage(buf);
 	pagehdr = (PageHeader) page;
 
 	/*
-	 * FIXME: If the page might've been discarded away, there's a small chance of deadlock if
-	 * the buffer now holds an unrelated page, and we or someone else is holding a lock on
-	 * it already. We could optimistically try lock the page without blocking first, and
-	 * and update oldest undo pointer from the metapage if that fails. And only if the
-	 * oldest undo pointer indicates that the record should still be there, wait for the lock.
+	 * If the page might've been discarded away, there's a small chance that
+	 * the buffer now holds an unrelated page. In that case, it's possible
+	 * that we or someone else is holding a lock on it already. If we tried
+	 * to lock the page unconditionally, we could accidentally break the
+	 * lock ordering rules, by trying to lock a different kind of a page
+	 * than we thought.
+	 *
+	 * To avoid that, try to lock the page optimistically, but if we would
+	 * block, check in the metapage that the page hasn't been discarded away.
+	 * zsundo_discard() keeps the metapage locked, so if we lock the page
+	 * while holding the metapage, we can be sure that it's the UNDO page
+	 * we're looking for.
 	 */
-	LockBuffer(buf, lockmode);
+	if (!ConditionalLockBufferInMode(buf, lockmode))
+	{
+		Page		metapage;
+		ZSMetaPageOpaque *metaopaque;
+
+		metabuf = ReadBuffer(rel, ZS_META_BLK);
+		metapage = BufferGetPage(metabuf);
+		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+		metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
+
+		if (metaopaque->zs_undo_oldestptr.counter > undoptr.counter)
+		{
+			/* the record has already been discarded */
+			ReleaseBuffer(buf);
+			buf = InvalidBuffer;
+			UnlockReleaseBuffer(metabuf);
+			metabuf = InvalidBuffer;
+			goto record_missing;
+		}
+		LockBuffer(buf, lockmode);
+	}
+
 	if (PageIsNew(page))
 		goto record_missing;
 	opaque = (ZSUndoPageOpaque *) PageGetSpecialPointer(page);
@@ -309,6 +338,12 @@ zsundo_fetch(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode,
 		!IsZSUndoRecPtrValid(&opaque->last_undorecptr) ||
 		undoptr.counter > opaque->last_undorecptr.counter)
 		goto record_missing;
+
+	if (BufferIsValid(metabuf))
+	{
+		UnlockReleaseBuffer(metabuf);
+		metabuf = InvalidBuffer;
+	}
 
 	/* FIXME: the callers could do a more thorough check like this,
 	 * since they know the record size */
@@ -342,10 +377,17 @@ zsundo_fetch(Relation rel, ZSUndoRecPtr undoptr, Buffer *buf_p, int lockmode,
 	return ptr;
 
 record_missing:
-	UnlockReleaseBuffer(buf);
+	if (BufferIsValid(metabuf))
+		UnlockReleaseBuffer(metabuf);
+	if (buf)
+		UnlockReleaseBuffer(buf);
 	*buf_p = InvalidBuffer;
 
-	if (missing_ok)
+	/*
+	 * If the metapage says that the page is there, but it doesn't contain the
+	 * data we thought, that's an error even with 'missing_ok.
+	 */
+	if (missing_ok && !BufferIsValid(metabuf))
 		return NULL;
 	else
 		elog(ERROR, "could not find UNDO record " UINT64_FORMAT " at blk %u offset %u; not an UNDO page",

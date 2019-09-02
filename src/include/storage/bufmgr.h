@@ -213,6 +213,7 @@ extern void MarkBufferDirtyHint(Buffer buffer, bool buffer_std);
 extern void UnlockBuffers(void);
 extern void LockBuffer(Buffer buffer, int mode);
 extern bool ConditionalLockBuffer(Buffer buffer);
+extern bool ConditionalLockBufferInMode(Buffer buffer, int mode);
 extern void LockBufferForCleanup(Buffer buffer);
 extern bool ConditionalLockBufferForCleanup(Buffer buffer);
 extern bool IsBufferCleanupOK(Buffer buffer);

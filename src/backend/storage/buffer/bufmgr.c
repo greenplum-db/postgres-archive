@@ -3609,6 +3609,28 @@ LockBuffer(Buffer buffer, int mode)
 
 /*
  * Acquire the content_lock for the buffer, but only if we don't have to wait.
+ */
+bool
+ConditionalLockBufferInMode(Buffer buffer, int mode)
+{
+	BufferDesc *buf;
+
+	Assert(BufferIsValid(buffer));
+	if (BufferIsLocal(buffer))
+		return true;			/* act as though we got it */
+
+	buf = GetBufferDescriptor(buffer - 1);
+
+	if (mode == BUFFER_LOCK_SHARE)
+		return LWLockConditionalAcquire(BufferDescriptorGetContentLock(buf), LW_SHARED);
+	else if (mode == BUFFER_LOCK_EXCLUSIVE)
+		return LWLockConditionalAcquire(BufferDescriptorGetContentLock(buf), LW_EXCLUSIVE);
+	else
+		elog(ERROR, "unrecognized buffer lock mode: %d", mode);
+}
+
+/*
+ * Acquire the content_lock for the buffer, but only if we don't have to wait.
  *
  * This assumes the caller wants BUFFER_LOCK_EXCLUSIVE mode.
  */
