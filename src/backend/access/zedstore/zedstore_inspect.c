@@ -522,35 +522,57 @@ pg_zs_btree_pages(PG_FUNCTION_ARGS)
 		uncompressedsz = 0;
 		if (opaque->zs_level == 0)
 		{
-			/* leaf page */
-			PageHeader	phdr = (PageHeader) page;
-			ZSAttStream *streams[2];
-			int			nstreams = 0;
+			/* meta leaf page */
+			if (opaque->zs_attno == ZS_META_ATTRIBUTE_NUM) {
+				OffsetNumber maxoff;
+				OffsetNumber off;
 
-			if (phdr->pd_lower - SizeOfPageHeaderData > SizeOfZSAttStreamHeader)
-			{
-				streams[nstreams++] =  (ZSAttStream *) (((char *) page) + SizeOfPageHeaderData);
-			}
-
-			if (phdr->pd_special - phdr->pd_upper > SizeOfZSAttStreamHeader)
-			{
-				streams[nstreams++] =  (ZSAttStream *) (((char *) page) + phdr->pd_upper);
-			}
-
-			for (int i = 0; i < nstreams; i++)
-			{
-				ZSAttStream *stream = streams[i];
-
-				totalsz += stream->t_size;
-				nitems++;
-				if ((stream->t_flags & ATTSTREAM_COMPRESSED) != 0)
+				maxoff = PageGetMaxOffsetNumber(page);
+				for (off = FirstOffsetNumber; off <= maxoff; off++)
 				{
-					ncompressed++;
-					uncompressedsz += stream->t_decompressed_size;
+					ItemId iid = PageGetItemId(page, off);
+
+					ZSTidArrayItem
+						*item = (ZSTidArrayItem *) PageGetItem(page, iid);
+
+					nitems++;
+					totalsz += item->t_size;
+
+					uncompressedsz += item->t_size;
 				}
-				else
+			}
+			/* attribute leaf page */
+			else
+			{
+				PageHeader	phdr = (PageHeader) page;
+				ZSAttStream *streams[2];
+				int			nstreams = 0;
+
+				if (phdr->pd_lower - SizeOfPageHeaderData > SizeOfZSAttStreamHeader)
 				{
-					uncompressedsz += stream->t_size;
+					streams[nstreams++] =  (ZSAttStream *) (((char *) page) + SizeOfPageHeaderData);
+				}
+
+				if (phdr->pd_special - phdr->pd_upper > SizeOfZSAttStreamHeader)
+				{
+					streams[nstreams++] =  (ZSAttStream *) (((char *) page) + phdr->pd_upper);
+				}
+
+				for (int i = 0; i < nstreams; i++)
+				{
+					ZSAttStream *stream = streams[i];
+
+					totalsz += stream->t_size;
+					nitems++;
+					if ((stream->t_flags & ATTSTREAM_COMPRESSED) != 0)
+					{
+						ncompressed++;
+						uncompressedsz += stream->t_decompressed_size;
+					}
+					else
+					{
+						uncompressedsz += stream->t_size;
+					}
 				}
 			}
 		}
