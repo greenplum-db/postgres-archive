@@ -709,7 +709,7 @@ zsbt_attr_repack_newpage(zsbt_attr_repack_context *cxt, zstid nexttid)
 
 /*
  * Compress and write as much of the data from 'attbuf' onto 'page' as fits.
- * 'attbuf' is updatd in place, so that one exit, it contains the remaining chunks
+ * 'attbuf' is updated in place, so that on exit, it contains the remaining chunks
  * that did not fit on 'page'.
  */
 static void

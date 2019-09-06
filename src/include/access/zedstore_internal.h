@@ -177,7 +177,7 @@ ZSBtreeInternalPageIsFull(Page page)
  * Attribute B-tree leaf page layout
  *
  * Leaf pages in the attribute trees don't follow the normal page layout
- * with line pointers and items. They use the standard page page header,
+ * with line pointers and items. They use the standard page header,
  * with pd_lower and pd_upper, but the data stored in the lower and upper
  * parts are different from the normal usage.
  *
@@ -226,7 +226,7 @@ ZSBtreeInternalPageIsFull(Page page)
  * replacing both with one larger compressed stream.
  *
  * The names "lower" and "upper" refer to the physical location of
- * the stream on the page. The data in the in the lower attstream
+ * the stream on the page. The data in the lower attstream
  * have higher-numbered TIDs than the data in the upper attstream.
  * No overlap is allowed. This works well with the usual usage
  * pattern that new data is added to the end (i.e. with increasing
@@ -255,7 +255,7 @@ ZSBtreeInternalPageIsFull(Page page)
  * fits, and second time to compress just what fits. But that would be twice
  * as slow. In practice, the wasted space doesn't matter much. We try to
  * keep each chunk relatively small, to minimize the waste. And because we
- * now the next chunk wouldn't fit on the page anyway, there isn't much else
+ * know the next chunk wouldn't fit on the page anyway, there isn't much else
  * we could do with the wasted space, anyway.
  */
 typedef struct
