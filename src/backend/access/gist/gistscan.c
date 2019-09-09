@@ -17,6 +17,7 @@
 #include "access/gist_private.h"
 #include "access/gistscan.h"
 #include "access/relscan.h"
+#include "utils/float.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -32,12 +33,30 @@ pairingheap_GISTSearchItem_cmp(const pairingheap_node *a, const pairingheap_node
 	const GISTSearchItem *sb = (const GISTSearchItem *) b;
 	IndexScanDesc scan = (IndexScanDesc) arg;
 	int			i;
+	double	   *da = GISTSearchItemDistanceValues(sa, scan->numberOfOrderBys),
+			   *db = GISTSearchItemDistanceValues(sb, scan->numberOfOrderBys);
+	bool	   *na = GISTSearchItemDistanceNulls(sa, scan->numberOfOrderBys),
+			   *nb = GISTSearchItemDistanceNulls(sb, scan->numberOfOrderBys);
 
 	/* Order according to distance comparison */
 	for (i = 0; i < scan->numberOfOrderBys; i++)
 	{
-		if (sa->distances[i] != sb->distances[i])
-			return (sa->distances[i] < sb->distances[i]) ? 1 : -1;
+		if (na[i])
+		{
+			if (!nb[i])
+				return -1;
+		}
+		else if (nb[i])
+		{
+			return 1;
+		}
+		else
+		{
+			int			cmp = -float8_cmp_internal(da[i], db[i]);
+
+			if (cmp != 0)
+				return cmp;
+		}
 	}
 
 	/* Heap items go before inner pages, to ensure a depth-first search */
@@ -81,7 +100,8 @@ gistbeginscan(Relation r, int nkeys, int norderbys)
 	so->queueCxt = giststate->scanCxt;	/* see gistrescan */
 
 	/* workspaces with size dependent on numberOfOrderBys: */
-	so->distances = palloc(sizeof(double) * scan->numberOfOrderBys);
+	so->distanceValues = palloc(sizeof(double) * scan->numberOfOrderBys);
+	so->distanceNulls = palloc(sizeof(bool) * scan->numberOfOrderBys);
 	so->qual_ok = true;			/* in case there are zero keys */
 	if (scan->numberOfOrderBys > 0)
 	{

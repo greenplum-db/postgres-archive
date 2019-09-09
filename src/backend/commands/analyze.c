@@ -16,6 +16,7 @@
 
 #include <math.h>
 
+#include "access/detoast.h"
 #include "access/genam.h"
 #include "access/multixact.h"
 #include "access/relation.h"
@@ -24,7 +25,6 @@
 #include "access/tableam.h"
 #include "access/transam.h"
 #include "access/tupconvert.h"
-#include "access/tuptoaster.h"
 #include "access/visibilitymap.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
@@ -1361,8 +1361,7 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 					TupleConversionMap *map;
 
 					map = convert_tuples_by_name(RelationGetDescr(childrel),
-												 RelationGetDescr(onerel),
-												 gettext_noop("could not convert row type"));
+												 RelationGetDescr(onerel));
 					if (map != NULL)
 					{
 						int			j;

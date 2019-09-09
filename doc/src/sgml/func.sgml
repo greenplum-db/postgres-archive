@@ -4122,6 +4122,14 @@ cast(-44 as bit(12))           <lineannotation>111111010100</lineannotation>
    </para>
 
    <para>
+    According to the SQL standard, omitting <literal>ESCAPE</literal>
+    means there is no escape character (rather than defaulting to a
+    backslash), and a zero-length <literal>ESCAPE</literal> value is
+    disallowed.  <productname>PostgreSQL</productname>'s behavior in
+    this regard is therefore slightly nonstandard.
+   </para>
+
+   <para>
     The key word <token>ILIKE</token> can be used instead of
     <token>LIKE</token> to make the match case-insensitive according
     to the active locale.  This is not in the <acronym>SQL</acronym> standard but is a
@@ -4139,9 +4147,9 @@ cast(-44 as bit(12))           <lineannotation>111111010100</lineannotation>
    </para>
 
    <para>
-    There is also the prefix operator <literal>^@</literal> and corresponding
-    <function>starts_with</function> function which covers cases when only
-    searching by beginning of the string is needed.
+    Also see the prefix operator <literal>^@</literal> and corresponding
+    <function>starts_with</function> function, which are useful in cases
+    where simply matching the beginning of a string is needed.
    </para>
   </sect2>
 
@@ -4172,7 +4180,7 @@ cast(-44 as bit(12))           <lineannotation>111111010100</lineannotation>
     It is similar to <function>LIKE</function>, except that it
     interprets the pattern using the SQL standard's definition of a
     regular expression.  SQL regular expressions are a curious cross
-    between <function>LIKE</function> notation and common regular
+    between <function>LIKE</function> notation and common (POSIX) regular
     expression notation.
    </para>
 
@@ -4256,18 +4264,38 @@ cast(-44 as bit(12))           <lineannotation>111111010100</lineannotation>
    </para>
 
    <para>
-    As with <function>LIKE</function>, a backslash disables the special meaning
-    of any of these metacharacters; or a different escape character can
-    be specified with <literal>ESCAPE</literal>.
+    As with <function>LIKE</function>, a backslash disables the special
+    meaning of any of these metacharacters.  A different escape character
+    can be specified with <literal>ESCAPE</literal>, or the escape
+    capability can be disabled by writing <literal>ESCAPE ''</literal>.
+   </para>
+
+   <para>
+    According to the SQL standard, omitting <literal>ESCAPE</literal>
+    means there is no escape character (rather than defaulting to a
+    backslash), and a zero-length <literal>ESCAPE</literal> value is
+    disallowed.  <productname>PostgreSQL</productname>'s behavior in
+    this regard is therefore slightly nonstandard.
+   </para>
+
+   <para>
+    Another nonstandard extension is that following the escape character
+    with a letter or digit provides access to the escape sequences
+    defined for POSIX regular expressions; see
+    <xref linkend="posix-character-entry-escapes-table"/>,
+    <xref linkend="posix-class-shorthand-escapes-table"/>, and
+    <xref linkend="posix-constraint-escapes-table"/> below.
    </para>
 
    <para>
     Some examples:
 <programlisting>
-'abc' SIMILAR TO 'abc'      <lineannotation>true</lineannotation>
-'abc' SIMILAR TO 'a'        <lineannotation>false</lineannotation>
-'abc' SIMILAR TO '%(b|d)%'  <lineannotation>true</lineannotation>
-'abc' SIMILAR TO '(b|c)%'   <lineannotation>false</lineannotation>
+'abc' SIMILAR TO 'abc'          <lineannotation>true</lineannotation>
+'abc' SIMILAR TO 'a'            <lineannotation>false</lineannotation>
+'abc' SIMILAR TO '%(b|d)%'      <lineannotation>true</lineannotation>
+'abc' SIMILAR TO '(b|c)%'       <lineannotation>false</lineannotation>
+'-abc-' SIMILAR TO '%\mabc\M%'  <lineannotation>true</lineannotation>
+'xabcy' SIMILAR TO '%\mabc\M%'  <lineannotation>false</lineannotation>
 </programlisting>
    </para>
 
@@ -5178,7 +5206,7 @@ SELECT foo FROM regexp_split_to_table('the quick brown fox', '\s*') AS foo;
    </para>
 
    <table id="posix-character-entry-escapes-table">
-    <title>Regular Expression Character-entry Escapes</title>
+    <title>Regular Expression Character-Entry Escapes</title>
 
     <tgroup cols="2">
      <thead>
@@ -5319,7 +5347,7 @@ SELECT foo FROM regexp_split_to_table('the quick brown fox', '\s*') AS foo;
    </para>
 
    <table id="posix-class-shorthand-escapes-table">
-    <title>Regular Expression Class-shorthand Escapes</title>
+    <title>Regular Expression Class-Shorthand Escapes</title>
 
     <tgroup cols="2">
      <thead>
@@ -5513,7 +5541,7 @@ SELECT foo FROM regexp_split_to_table('the quick brown fox', '\s*') AS foo;
    </para>
 
    <table id="posix-embedded-options-table">
-    <title>ARE Embedded-option Letters</title>
+    <title>ARE Embedded-Option Letters</title>
 
     <tgroup cols="2">
      <thead>
@@ -16397,7 +16425,7 @@ WHERE EXISTS (SELECT 1 FROM tab2 WHERE col2 = tab1.col2);
   </sect2>
 
   <sect2>
-   <title>Single-row Comparison</title>
+   <title>Single-Row Comparison</title>
 
    <indexterm zone="functions-subquery">
     <primary>comparison</primary>
@@ -19308,7 +19336,7 @@ SELECT collation for ('foo' COLLATE "de_DE");
    </para>
 
    <table id="functions-commit-timestamp">
-    <title>Committed transaction information</title>
+    <title>Committed Transaction Information</title>
     <tgroup cols="3">
      <thead>
       <row><entry>Name</entry> <entry>Return Type</entry> <entry>Description</entry></row>
@@ -22323,7 +22351,7 @@ CREATE EVENT TRIGGER test_event_trigger_for_drops
    </para>
 
    <table id="functions-event-trigger-table-rewrite">
-    <title>Table Rewrite information</title>
+    <title>Table Rewrite Information</title>
     <tgroup cols="3">
      <thead>
       <row><entry>Name</entry> <entry>Return Type</entry> <entry>Description</entry></row>
@@ -22391,7 +22419,7 @@ CREATE EVENT TRIGGER test_table_rewrite_oid
    </para>
 
   <sect2 id="functions-statistics-mcv">
-   <title>Inspecting MCV lists</title>
+   <title>Inspecting MCV Lists</title>
 
    <indexterm>
      <primary>pg_mcv_list_items</primary>

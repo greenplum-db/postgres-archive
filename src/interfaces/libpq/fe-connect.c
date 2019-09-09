@@ -1264,9 +1264,9 @@ connectOptions2(PGconn *conn)
 		if (strcmp(conn->gssencmode, "require") == 0)
 		{
 			conn->status = CONNECTION_BAD;
-			printfPQExpBuffer(
-							  &conn->errorMessage,
-							  libpq_gettext("no GSSAPI support; cannot require GSSAPI\n"));
+			printfPQExpBuffer(&conn->errorMessage,
+							  libpq_gettext("gssencmode value \"%s\" invalid when GSSAPI support is not compiled in\n"),
+							  conn->gssencmode);
 			return false;
 		}
 #endif
@@ -1675,7 +1675,7 @@ parse_int_param(const char *value, int *result, PGconn *conn,
 	}
 
 	appendPQExpBuffer(&conn->errorMessage,
-					  libpq_gettext("invalid integer value \"%s\" for keyword \"%s\"\n"),
+					  libpq_gettext("invalid integer value \"%s\" for connection option \"%s\"\n"),
 					  value, context);
 	return false;
 }
@@ -2748,13 +2748,13 @@ keep_going:						/* We will come back to here until there is
 #ifdef ENABLE_GSS
 
 				/*
-				 * If GSSAPI is enabled and we have a ccache, try to set it up
-				 * before sending startup messages.  If it's already
+				 * If GSSAPI is enabled and we have a credential cache, try to
+				 * set it up before sending startup messages.  If it's already
 				 * operating, don't try SSL and instead just build the startup
 				 * packet.
 				 */
 				if (conn->try_gss && !conn->gctx)
-					conn->try_gss = pg_GSS_have_ccache(&conn->gcred);
+					conn->try_gss = pg_GSS_have_cred_cache(&conn->gcred);
 				if (conn->try_gss && !conn->gctx)
 				{
 					ProtocolVersion pv = pg_hton32(NEGOTIATE_GSS_CODE);
@@ -2774,7 +2774,7 @@ keep_going:						/* We will come back to here until there is
 				else if (!conn->gctx && conn->gssencmode[0] == 'r')
 				{
 					appendPQExpBufferStr(&conn->errorMessage,
-										 libpq_gettext("GSSAPI encryption required, but was impossible (possibly no ccache, no server support, or using a local socket)\n"));
+										 libpq_gettext("GSSAPI encryption required but was impossible (possibly no credential cache, no server support, or using a local socket)\n"));
 					goto error_return;
 				}
 #endif
@@ -3885,7 +3885,10 @@ freePGconn(PGconn *conn)
 			if (conn->connhost[i].port != NULL)
 				free(conn->connhost[i].port);
 			if (conn->connhost[i].password != NULL)
+			{
+				explicit_bzero(conn->connhost[i].password, strlen(conn->connhost[i].password));
 				free(conn->connhost[i].password);
+			}
 		}
 		free(conn->connhost);
 	}
@@ -3919,7 +3922,10 @@ freePGconn(PGconn *conn)
 	if (conn->pguser)
 		free(conn->pguser);
 	if (conn->pgpass)
+	{
+		explicit_bzero(conn->pgpass, strlen(conn->pgpass));
 		free(conn->pgpass);
+	}
 	if (conn->pgpassfile)
 		free(conn->pgpassfile);
 	if (conn->keepalives)
@@ -6931,6 +6937,7 @@ passwordFromFile(const char *hostname, const char *port, const char *dbname,
 		if (!ret)
 		{
 			/* Out of memory. XXX: an error message would be nice. */
+			explicit_bzero(buf, sizeof(buf));
 			return NULL;
 		}
 
@@ -6947,6 +6954,7 @@ passwordFromFile(const char *hostname, const char *port, const char *dbname,
 	}
 
 	fclose(fp);
+	explicit_bzero(buf, sizeof(buf));
 	return NULL;
 
 #undef LINELEN
