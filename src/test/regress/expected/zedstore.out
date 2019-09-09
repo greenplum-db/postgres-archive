@@ -210,6 +210,8 @@ select c1, length(t) from t_zedtoast;
  10 |  10000
 (10 rows)
 
+-- TODO: this test won't actually work when we start using the UNDO framework
+-- because we will not have control over when the undo record will be removed
 delete from t_zedtoast;
 select count(*) > 0 as has_toast_pages from pg_zs_toast_pages('t_zedtoast');
  has_toast_pages 

@@ -11,8 +11,8 @@
  */
 #include "postgres.h"
 
+#include "access/detoast.h"
 #include "access/table.h"
-#include "access/tuptoaster.h"
 #include "access/zedstoream.h"
 #include "access/zedstore_internal.h"
 #include "miscadmin.h"

@@ -22,7 +22,6 @@
 #include "access/tableam.h"
 #include "access/tsmapi.h"
 #include "access/tupdesc_details.h"
-#include "access/tuptoaster.h"
 #include "access/xact.h"
 #include "access/zedstore_internal.h"
 #include "access/zedstore_undorec.h"
