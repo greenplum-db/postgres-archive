@@ -514,7 +514,7 @@ find_attstream_chop_pos(Form_pg_attribute att, char *chunks, int len, zstid *las
 
 void
 init_attstream_buffer_from_stream(attstream_buffer *buf, bool attbyval, int16 attlen,
-								  ZSAttStream *attstream)
+								  ZSAttStream *attstream, MemoryContext memcontext)
 {
 	int			buf_size;
 
@@ -523,7 +523,7 @@ init_attstream_buffer_from_stream(attstream_buffer *buf, bool attbyval, int16 at
 	else
 		buf_size = attstream->t_size - SizeOfZSAttStreamHeader;
 
-	buf->data = palloc(buf_size);
+	buf->data = MemoryContextAlloc(memcontext, buf_size);
 	buf->len = 0;
 	buf->maxlen = buf_size;
 	buf->cursor = 0;

@@ -582,7 +582,8 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 			mintid = Max(mintid, lowerstream->t_lasttid);
 			mintid = Max(mintid, upperstream->t_lasttid);
 
-			init_attstream_buffer_from_stream(&tmpbuf, attr->attbyval, attr->attlen, upperstream);
+			init_attstream_buffer_from_stream(&tmpbuf, attr->attbyval,
+				attr->attlen, upperstream, GetMemoryChunkContext(attbuf->data));
 
 			merge_attstream(attr, attbuf, lowerstream);
 
