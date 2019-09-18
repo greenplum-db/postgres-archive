@@ -434,6 +434,13 @@ zsbt_tuplebuffer_flush(Relation rel)
 
 	tuplebuffer_flush_internal(rel, tupbuffer);
 
+	for (int attno = 1 ; attno <= tupbuffer->natts; attno++)
+	{
+		attbuffer *attbuf = &(tupbuffer->attbuffers[attno-1]);
+		pfree(attbuf->chunks.data);
+	}
+	pfree(tupbuffer->attbuffers);
+
 	tuplebuffers_delete(tuplebuffers, RelationGetRelid(rel));
 }
 
