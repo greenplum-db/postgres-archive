@@ -942,7 +942,6 @@ zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid, uint64 *num_
 		{
 			buf = ReleaseAndReadBuffer(buf, rel, nextblock);
 			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-			page = BufferGetPage(buf);
 
 			if (!zsbt_page_is_expected(rel, ZS_META_ATTRIBUTE_NUM, nexttid, 0, buf))
 			{
@@ -956,8 +955,9 @@ zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid, uint64 *num_
 			buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, nexttid, 0, true);
 			if (!BufferIsValid(buf))
 				return result;
-			page = BufferGetPage(buf);
 		}
+
+		page = BufferGetPage(buf);
 
 		maxoff = PageGetMaxOffsetNumber(page);
 		for (off = FirstOffsetNumber; off <= maxoff; off++)
