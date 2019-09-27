@@ -1,0 +1,213 @@
+select '1'::zstid;
+ zstid 
+-------
+ 1
+(1 row)
+
+select '-1'::zstid;
+ERROR:  value "-1" is out of range for type zstid
+LINE 1: select '-1'::zstid;
+               ^
+select -'1'::zstid;
+ERROR:  operator does not exist: - zstid
+LINE 1: select -'1'::zstid;
+               ^
+HINT:  No operator matches the given name and argument type. You might need to add an explicit type cast.
+-- int2 conversion
+select 1::int2::zstid;
+ zstid 
+-------
+ 1
+(1 row)
+
+select (-1)::int2::zstid;
+ERROR:  value -1 is out of range for type zstid
+select -1::int2::zstid;
+ERROR:  operator does not exist: - zstid
+LINE 1: select -1::int2::zstid;
+               ^
+HINT:  No operator matches the given name and argument type. You might need to add an explicit type cast.
+-- int4 conversion
+select 1::zstid;
+ zstid 
+-------
+ 1
+(1 row)
+
+select (-1)::zstid;
+ERROR:  value -1 is out of range for type zstid
+select -1::zstid;
+ERROR:  operator does not exist: - zstid
+LINE 1: select -1::zstid;
+               ^
+HINT:  No operator matches the given name and argument type. You might need to add an explicit type cast.
+-- int8 conversion
+select 1::int8::zstid;
+ zstid 
+-------
+ 1
+(1 row)
+
+select 1000000000000000::zstid; -- bigger than MaxZSTid
+ERROR:  value 1000000000000000 is out of range for type zstid
+select (-1)::int8::zstid;
+ERROR:  value -1 is out of range for type zstid
+select -1::int8::zstid;
+ERROR:  operator does not exist: - zstid
+LINE 1: select -1::int8::zstid;
+               ^
+HINT:  No operator matches the given name and argument type. You might need to add an explicit type cast.
+create table if not exists zstidscan(a int) using zedstore;
+insert into zstidscan values (1), (2), (3);
+explain (costs off)
+select ctid, ctid::zstid as zstid, a from zstidscan;
+      QUERY PLAN       
+-----------------------
+ Seq Scan on zstidscan
+(1 row)
+
+select ctid, ctid::zstid as zstid, a from zstidscan;
+ ctid  | zstid | a 
+-------+-------+---
+ (0,1) | 1     | 1
+ (0,2) | 2     | 2
+ (0,3) | 3     | 3
+(3 rows)
+
+explain (costs off)
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid = 2;
+               QUERY PLAN               
+----------------------------------------
+ Seq Scan on zstidscan
+   Filter: ((ctid)::zstid = '2'::zstid)
+(2 rows)
+
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid = 2;
+ ctid  | zstid | a 
+-------+-------+---
+ (0,2) | 2     | 2
+(1 row)
+
+explain (costs off)
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid >= 2;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on zstidscan
+   Filter: ((ctid)::zstid >= '2'::zstid)
+(2 rows)
+
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid >= 2;
+ ctid  | zstid | a 
+-------+-------+---
+ (0,2) | 2     | 2
+ (0,3) | 3     | 3
+(2 rows)
+
+explain (costs off)
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid <= 2;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on zstidscan
+   Filter: ((ctid)::zstid <= '2'::zstid)
+(2 rows)
+
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid <= 2;
+ ctid  | zstid | a 
+-------+-------+---
+ (0,1) | 1     | 1
+ (0,2) | 2     | 2
+(2 rows)
+
+explain (costs off)
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid < 2;
+               QUERY PLAN               
+----------------------------------------
+ Seq Scan on zstidscan
+   Filter: ((ctid)::zstid < '2'::zstid)
+(2 rows)
+
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid < 2;
+ ctid  | zstid | a 
+-------+-------+---
+ (0,1) | 1     | 1
+(1 row)
+
+explain (costs off)
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid > 2;
+               QUERY PLAN               
+----------------------------------------
+ Seq Scan on zstidscan
+   Filter: ((ctid)::zstid > '2'::zstid)
+(2 rows)
+
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid > 2;
+ ctid  | zstid | a 
+-------+-------+---
+ (0,3) | 3     | 3
+(1 row)
+
+explain (costs off)
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid <> 2;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on zstidscan
+   Filter: ((ctid)::zstid <> '2'::zstid)
+(2 rows)
+
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid <> 2;
+ ctid  | zstid | a 
+-------+-------+---
+ (0,1) | 1     | 1
+ (0,3) | 3     | 3
+(2 rows)
+
+explain (costs off)
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid in (2,3);
+                     QUERY PLAN                     
+----------------------------------------------------
+ Seq Scan on zstidscan
+   Filter: ((ctid)::zstid = ANY ('{2,3}'::zstid[]))
+(2 rows)
+
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid in (2,3);
+ ctid  | zstid | a 
+-------+-------+---
+ (0,2) | 2     | 2
+ (0,3) | 3     | 3
+(2 rows)
+
+-- TODO: casting to int2 or int4 might be useful
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid::int2 % 3 = 0;
+ERROR:  cannot cast type zstid to smallint
+LINE 1: ...zstid as zstid, a from zstidscan where ctid::zstid::int2 % 3...
+                                                             ^
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid::int4 % 3 = 0;
+ERROR:  cannot cast type zstid to integer
+LINE 1: ...zstid as zstid, a from zstidscan where ctid::zstid::int4 % 3...
+                                                             ^
+explain (costs off)
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid::int8 % 3 = 0;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Seq Scan on zstidscan
+   Filter: ((((ctid)::zstid)::bigint % '3'::bigint) = 0)
+(2 rows)
+
+select ctid, ctid::zstid as zstid, a from zstidscan where ctid::zstid::int8 % 3 = 0;
+ ctid  | zstid | a 
+-------+-------+---
+ (0,3) | 3     | 3
+(1 row)
+
+-- TODO: Add necessary functions to do these useful aggregates on zstid types
+select max(ctid::zstid) from zstidscan;
+ERROR:  function max(zstid) does not exist
+LINE 1: select max(ctid::zstid) from zstidscan;
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+select min(ctid::zstid) from zstidscan;
+ERROR:  function min(zstid) does not exist
+LINE 1: select min(ctid::zstid) from zstidscan;
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+drop table zstidscan;

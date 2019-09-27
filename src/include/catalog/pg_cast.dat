@@ -512,4 +512,15 @@
 { castsource => 'jsonb', casttarget => 'float8', castfunc => 'float8(jsonb)',
   castcontext => 'e', castmethod => 'f' },
 
+# zedstore
+{ castsource => 'tid', casttarget => 'zstid', castfunc => 'zstid(tid)',
+  castcontext => 'e', castmethod => 'f' },
+{ castsource => 'zstid', casttarget => 'int8', castfunc => 'int8(zstid)',
+  castcontext => 'e', castmethod => 'f' },
+{ castsource => 'int2', casttarget => 'zstid', castfunc => 'zstid(int2)',
+  castcontext => 'i', castmethod => 'f' },
+{ castsource => 'int4', casttarget => 'zstid', castfunc => 'zstid(int4)',
+  castcontext => 'i', castmethod => 'f' },
+{ castsource => 'int8', casttarget => 'zstid', castfunc => 'zstid(int8)',
+  castcontext => 'i', castmethod => 'f' },
 ]

@@ -195,6 +195,12 @@ typedef ItemPointerData *ItemPointer;
 #define ItemPointerSetMovedPartitions(pointer) \
 	ItemPointerSet((pointer), MovedPartitionsBlockNumber, MovedPartitionsOffsetNumber)
 
+/* fmgr interface macros */
+#define DatumGetItemPointer(X)	 ((ItemPointer) DatumGetPointer(X))
+#define ItemPointerGetDatum(X)	 PointerGetDatum(X)
+#define PG_GETARG_ITEMPOINTER(n) DatumGetItemPointer(PG_GETARG_DATUM(n))
+#define PG_RETURN_ITEMPOINTER(x) return ItemPointerGetDatum(x)
+
 /* ----------------
  *		externs
  * ----------------

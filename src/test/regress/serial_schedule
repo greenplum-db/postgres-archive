@@ -132,8 +132,9 @@ test: dbsize
 test: misc_functions
 test: sysviews
 test: tsrf
-test: tidscan
 test: collate.icu.utf8
+test: tidscan
+test: zstidscan
 test: zedstore
 test: rules
 test: psql

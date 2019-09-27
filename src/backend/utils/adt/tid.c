@@ -28,18 +28,13 @@
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "parser/parsetree.h"
+#include "storage/itemptr.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/hashutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/varlena.h"
-
-
-#define DatumGetItemPointer(X)	 ((ItemPointer) DatumGetPointer(X))
-#define ItemPointerGetDatum(X)	 PointerGetDatum(X)
-#define PG_GETARG_ITEMPOINTER(n) DatumGetItemPointer(PG_GETARG_DATUM(n))
-#define PG_RETURN_ITEMPOINTER(x) return ItemPointerGetDatum(x)
 
 #define LDELIM			'('
 #define RDELIM			')'
