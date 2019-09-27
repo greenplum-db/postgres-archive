@@ -535,6 +535,7 @@ DropSubscriptionStmt
 DropTableSpaceStmt
 DropUserMappingStmt
 DropdbStmt
+DummyIndexOptions
 DumpComponents
 DumpId
 DumpOptions
@@ -1043,6 +1044,7 @@ IndexList
 IndexOnlyScan
 IndexOnlyScanState
 IndexOptInfo
+IndexOrderByDistance
 IndexPath
 IndexRuntimeKeyInfo
 IndexScan

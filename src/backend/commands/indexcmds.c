@@ -2350,7 +2350,8 @@ ReindexIndex(RangeVar *indexRelation, int options, bool concurrent)
 	if (concurrent)
 		ReindexRelationConcurrently(indOid, options);
 	else
-		reindex_index(indOid, false, persistence, options);
+		reindex_index(indOid, false, persistence,
+					  options | REINDEXOPT_REPORT_PROGRESS);
 }
 
 /*
@@ -2453,7 +2454,7 @@ ReindexTable(RangeVar *relation, int options, bool concurrent)
 		result = reindex_relation(heapOid,
 								  REINDEX_REL_PROCESS_TOAST |
 								  REINDEX_REL_CHECK_CONSTRAINTS,
-								  options);
+								  options | REINDEXOPT_REPORT_PROGRESS);
 		if (!result)
 			ereport(NOTICE,
 					(errmsg("table \"%s\" has no indexes to reindex",
@@ -2657,7 +2658,7 @@ ReindexMultipleTables(const char *objectName, ReindexObjectType objectKind,
 			result = reindex_relation(relid,
 									  REINDEX_REL_PROCESS_TOAST |
 									  REINDEX_REL_CHECK_CONSTRAINTS,
-									  options);
+									  options | REINDEXOPT_REPORT_PROGRESS);
 
 			if (result && (options & REINDEXOPT_VERBOSE))
 				ereport(INFO,

@@ -124,6 +124,11 @@ static int	ldapServiceLookup(const char *purl, PQconninfoOption *options,
 #define DefaultTty		""
 #define DefaultOption	""
 #define DefaultAuthtype		  ""
+#ifdef USE_SSL
+#define DefaultChannelBinding	"prefer"
+#else
+#define DefaultChannelBinding	"disable"
+#endif
 #define DefaultTargetSessionAttrs	"any"
 #ifdef USE_SSL
 #define DefaultSSLMode "prefer"
@@ -170,7 +175,7 @@ typedef struct _internalPQconninfoOption
 	char	   *keyword;		/* The keyword of the option			*/
 	char	   *envvar;			/* Fallback environment variable name	*/
 	char	   *compiled;		/* Fallback compiled in default value	*/
-	char	   *val;			/* Option's current value, or NULL		 */
+	char	   *val;			/* Option's current value, or NULL		*/
 	char	   *label;			/* Label for field in connect dialog	*/
 	char	   *dispchar;		/* Indicates how to display this field in a
 								 * connect dialog. Values are: "" Display
@@ -210,6 +215,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 	{"passfile", "PGPASSFILE", NULL, NULL,
 		"Database-Password-File", "", 64,
 	offsetof(struct pg_conn, pgpassfile)},
+
+	{"channel_binding", "PGCHANNELBINDING", NULL, NULL,
+		"Channel-Binding", "", 7,	/* sizeof("require") */
+	offsetof(struct pg_conn, channel_binding)},
 
 	{"connect_timeout", "PGCONNECT_TIMEOUT", NULL, NULL,
 		"Connect-timeout", "", 10,	/* strlen(INT32_MAX) == 10 */
@@ -1195,6 +1204,29 @@ connectOptions2(PGconn *conn)
 									 conn->pgpassfile);
 			}
 		}
+	}
+
+	/*
+	 * validate channel_binding option
+	 */
+	if (conn->channel_binding)
+	{
+		if (strcmp(conn->channel_binding, "disable") != 0
+			&& strcmp(conn->channel_binding, "prefer") != 0
+			&& strcmp(conn->channel_binding, "require") != 0)
+		{
+			conn->status = CONNECTION_BAD;
+			printfPQExpBuffer(&conn->errorMessage,
+							  libpq_gettext("invalid channel_binding value: \"%s\"\n"),
+							  conn->channel_binding);
+			return false;
+		}
+	}
+	else
+	{
+		conn->channel_binding = strdup(DefaultChannelBinding);
+		if (!conn->channel_binding)
+			goto oom_error;
 	}
 
 	/*
@@ -3434,6 +3466,13 @@ keep_going:						/* We will come back to here until there is
 					return PGRES_POLLING_WRITING;
 				}
 
+				/* Almost there now ... */
+				conn->status = CONNECTION_CHECK_TARGET;
+				goto keep_going;
+			}
+
+		case CONNECTION_CHECK_TARGET:
+			{
 				/*
 				 * If a read-write connection is required, see if we have one.
 				 *
@@ -3476,66 +3515,37 @@ keep_going:						/* We will come back to here until there is
 			}
 
 		case CONNECTION_SETENV:
-
-			/*
-			 * Do post-connection housekeeping (only needed in protocol 2.0).
-			 *
-			 * We pretend that the connection is OK for the duration of these
-			 * queries.
-			 */
-			conn->status = CONNECTION_OK;
-
-			switch (pqSetenvPoll(conn))
 			{
-				case PGRES_POLLING_OK:	/* Success */
-					break;
-
-				case PGRES_POLLING_READING: /* Still going */
-					conn->status = CONNECTION_SETENV;
-					return PGRES_POLLING_READING;
-
-				case PGRES_POLLING_WRITING: /* Still going */
-					conn->status = CONNECTION_SETENV;
-					return PGRES_POLLING_WRITING;
-
-				default:
-					goto error_return;
-			}
-
-			/*
-			 * If a read-write connection is required, see if we have one.
-			 * (This should match the stanza in the CONNECTION_AUTH_OK case
-			 * above.)
-			 *
-			 * Servers before 7.4 lack the transaction_read_only GUC, but by
-			 * the same token they don't have any read-only mode, so we may
-			 * just skip the test in that case.
-			 */
-			if (conn->sversion >= 70400 &&
-				conn->target_session_attrs != NULL &&
-				strcmp(conn->target_session_attrs, "read-write") == 0)
-			{
-				if (!saveErrorMessage(conn, &savedMessage))
-					goto error_return;
-
+				/*
+				 * Do post-connection housekeeping (only needed in protocol
+				 * 2.0).
+				 *
+				 * We pretend that the connection is OK for the duration of
+				 * these queries.
+				 */
 				conn->status = CONNECTION_OK;
-				if (!PQsendQuery(conn,
-								 "SHOW transaction_read_only"))
+
+				switch (pqSetenvPoll(conn))
 				{
-					restoreErrorMessage(conn, &savedMessage);
-					goto error_return;
+					case PGRES_POLLING_OK:	/* Success */
+						break;
+
+					case PGRES_POLLING_READING: /* Still going */
+						conn->status = CONNECTION_SETENV;
+						return PGRES_POLLING_READING;
+
+					case PGRES_POLLING_WRITING: /* Still going */
+						conn->status = CONNECTION_SETENV;
+						return PGRES_POLLING_WRITING;
+
+					default:
+						goto error_return;
 				}
-				conn->status = CONNECTION_CHECK_WRITABLE;
-				restoreErrorMessage(conn, &savedMessage);
-				return PGRES_POLLING_READING;
+
+				/* Almost there now ... */
+				conn->status = CONNECTION_CHECK_TARGET;
+				goto keep_going;
 			}
-
-			/* We can release the address list now. */
-			release_conn_addrinfo(conn);
-
-			/* We are open for business! */
-			conn->status = CONNECTION_OK;
-			return PGRES_POLLING_OK;
 
 		case CONNECTION_CONSUME:
 			{
@@ -3928,6 +3938,8 @@ freePGconn(PGconn *conn)
 	}
 	if (conn->pgpassfile)
 		free(conn->pgpassfile);
+	if (conn->channel_binding)
+		free(conn->channel_binding);
 	if (conn->keepalives)
 		free(conn->keepalives);
 	if (conn->keepalives_idle)

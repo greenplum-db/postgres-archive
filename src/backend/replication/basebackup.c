@@ -131,7 +131,7 @@ static bool noverify_checksums = false;
  * Note: this list should be kept in sync with the filter lists in pg_rewind's
  * filemap.c.
  */
-static const char *excludeDirContents[] =
+static const char *const excludeDirContents[] =
 {
 	/*
 	 * Skip temporary statistics files. PG_STAT_TMP_DIR must be skipped even
@@ -172,7 +172,7 @@ static const char *excludeDirContents[] =
 /*
  * List of files excluded from backups.
  */
-static const char *excludeFiles[] =
+static const char *const excludeFiles[] =
 {
 	/* Skip auto conf temporary file. */
 	PG_AUTOCONF_FILENAME ".tmp",
@@ -1442,7 +1442,7 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 		if (verify_checksum && (cnt % BLCKSZ != 0))
 		{
 			ereport(WARNING,
-					(errmsg("cannot verify checksum in file \"%s\", block "
+					(errmsg("could not verify checksum in file \"%s\", block "
 							"%d: read buffer size %d and page size %d "
 							"differ",
 							readfilename, blkno, (int) cnt, BLCKSZ)));
@@ -1599,8 +1599,10 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 	if (checksum_failures > 1)
 	{
 		ereport(WARNING,
-				(errmsg("file \"%s\" has a total of %d checksum verification "
-						"failures", readfilename, checksum_failures)));
+				(errmsg_plural("file \"%s\" has a total of %d checksum verification failure",
+							   "file \"%s\" has a total of %d checksum verification failures",
+							   checksum_failures,
+							   readfilename, checksum_failures)));
 
 		pgstat_report_checksum_failures_in_db(dboid, checksum_failures);
 	}

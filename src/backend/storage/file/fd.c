@@ -307,8 +307,6 @@ static int	FreeDesc(AllocateDesc *desc);
 
 static void AtProcExit_Files(int code, Datum arg);
 static void CleanupTempFiles(bool isCommit, bool isProcExit);
-static void RemovePgTempFilesInDir(const char *tmpdirname, bool missing_ok,
-								   bool unlink_all);
 static void RemovePgTempRelationFiles(const char *tsdirname);
 static void RemovePgTempRelationFilesInDbspace(const char *dbspacedirname);
 
@@ -1688,7 +1686,7 @@ PathNameDeleteTemporaryFile(const char *path, bool error_on_failure)
 		if (errno != ENOENT)
 			ereport(error_on_failure ? ERROR : LOG,
 					(errcode_for_file_access(),
-					 errmsg("cannot unlink temporary file \"%s\": %m",
+					 errmsg("could not unlink temporary file \"%s\": %m",
 							path)));
 		return false;
 	}
@@ -2919,11 +2917,10 @@ RemovePgTempFiles(void)
 
 	/*
 	 * In EXEC_BACKEND case there is a pgsql_tmp directory at the top level of
-	 * DataDir as well.
+	 * DataDir as well.  However, that is *not* cleaned here because doing so
+	 * would create a race condition.  It's done separately, earlier in
+	 * postmaster startup.
 	 */
-#ifdef EXEC_BACKEND
-	RemovePgTempFilesInDir(PG_TEMP_FILES_DIR, true, false);
-#endif
 }
 
 /*
@@ -2941,7 +2938,7 @@ RemovePgTempFiles(void)
  * (These two flags could be replaced by one, but it seems clearer to keep
  * them separate.)
  */
-static void
+void
 RemovePgTempFilesInDir(const char *tmpdirname, bool missing_ok, bool unlink_all)
 {
 	DIR		   *temp_dir;
@@ -3325,7 +3322,7 @@ unlink_if_exists_fname(const char *fname, bool isdir, int elevel)
 		if (rmdir(fname) != 0 && errno != ENOENT)
 			ereport(elevel,
 					(errcode_for_file_access(),
-					 errmsg("could not rmdir directory \"%s\": %m", fname)));
+					 errmsg("could not remove directory \"%s\": %m", fname)));
 	}
 	else
 	{

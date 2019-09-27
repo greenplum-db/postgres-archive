@@ -188,7 +188,7 @@ shared_buffers = 128MB
      a <productname>PostgreSQL</productname> data directory contains a file
      <filename>postgresql.auto.conf</filename><indexterm><primary>postgresql.auto.conf</primary></indexterm>,
      which has the same format as <filename>postgresql.conf</filename> but
-     is intended to be edited automatically not manually.  This file holds
+     is intended to be edited automatically, not manually.  This file holds
      settings provided through the <xref linkend="sql-altersystem"/> command.
      This file is read whenever <filename>postgresql.conf</filename> is,
      and its settings take effect in the same way.  Settings
@@ -3156,7 +3156,9 @@ include_dir 'conf.d'
      use parameters in both <xref
      linkend="runtime-config-wal-archive-recovery"/> and <xref
      linkend="runtime-config-replication-standby"/>.  Parameters from
-     <xref linkend="runtime-config-wal-recovery-target"/> will not be used.
+     <xref linkend="runtime-config-wal-recovery-target"/> will not be used,
+     with the exception of <xref linkend="guc-recovery-target-timeline"/>
+     which allows a timeline to be selected for recovery.
     </para>
 
     <para>
