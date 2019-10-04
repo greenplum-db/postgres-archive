@@ -210,7 +210,7 @@ zsbt_tuplebuffer_spool_tuple(Relation rel, zstid tid, Datum *datums, bool *isnul
 		isnull = isnulls[attno - 1];
 
 		if (!isnull && attr->attlen < 0 && VARATT_IS_EXTERNAL(datum))
-			datum = PointerGetDatum(heap_tuple_fetch_attr((struct varlena *) DatumGetPointer(datum)));
+			datum = PointerGetDatum(detoast_external_attr((struct varlena *) DatumGetPointer(datum)));
 
 		/* If this datum is too large, toast it */
 		if (!isnull && attr->attlen < 0 &&
@@ -250,7 +250,7 @@ zsbt_tuplebuffer_spool_slots(Relation rel, zstid *tids, TupleTableSlot **slots, 
 				slot_getallattrs(slots[i]);
 
 			if (!isnull && attr->attlen < 0 && VARATT_IS_EXTERNAL(datum))
-				datum = PointerGetDatum(heap_tuple_fetch_attr((struct varlena *) DatumGetPointer(datum)));
+				datum = PointerGetDatum(detoast_external_attr((struct varlena *) DatumGetPointer(datum)));
 
 			/* If this datum is too large, toast it */
 			if (!isnull && attr->attlen < 0 &&
