@@ -10,6 +10,7 @@
  */
 #include "postgres.h"
 
+#include "access/toast_internals.h"
 #include "access/xlogutils.h"
 #include "access/zedstore_internal.h"
 #include "access/zedstore_wal.h"
@@ -41,8 +42,11 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid)
 	ZSToastPageOpaque *prevopaque = NULL;
 	char	   *ptr;
 	int32		total_size;
+	int32		decompressed_size = 0;
 	int32		offset;
+	bool		is_compressed;
 	bool		is_first;
+	Datum		toasted_datum;
 
 	Assert(tid != InvalidZSTid);
 
@@ -51,14 +55,38 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid)
 	 */
 	Assert(RelationGetNumberOfBlocks(rel) != 0);
 
-	/* TODO: try to compress it in place first. Maybe just call toast_compress_datum? */
+	if (VARATT_IS_COMPRESSED(value))
+		toasted_datum = value;
+	else
+		toasted_datum = toast_compress_datum(value);
+	if (DatumGetPointer(toasted_datum) != NULL)
+	{
+		/*
+		 * If the compressed datum can be stored inline, return the datum
+		 * directly.
+		 */
+		if (VARSIZE_ANY(toasted_datum) <= MaxZedStoreDatumSize)
+		{
+			return toasted_datum;
+		}
 
-	/*
-	 * If that doesn't reduce it enough, allocate a toast page
-	 * for it.
-	 */
-	ptr = VARDATA_ANY(value);
-	total_size = VARSIZE_ANY_EXHDR(value);
+		is_compressed     = true;
+		decompressed_size = TOAST_COMPRESS_RAWSIZE(toasted_datum);
+		ptr               = TOAST_COMPRESS_RAWDATA(toasted_datum);
+		total_size = VARSIZE_ANY(toasted_datum) - TOAST_COMPRESS_HDRSZ;
+	}
+	else
+	{
+		/*
+		 * If the compression doesn't reduce the size enough, allocate a
+		 * toast page for it.
+		 */
+		is_compressed     = false;
+		ptr = VARDATA_ANY(value);
+		total_size = VARSIZE_ANY_EXHDR(value);
+	}
+
+
 	offset = 0;
 	is_first = true;
 	while (total_size - offset > 0)
@@ -80,6 +108,8 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid)
 		opaque->zs_tid = tid;
 		opaque->zs_attno = attno;
 		opaque->zs_total_size = total_size;
+		opaque->zs_decompressed_size = decompressed_size;
+		opaque->zs_is_compressed = is_compressed;
 		opaque->zs_slice_offset = offset;
 		opaque->zs_prev = is_first ? InvalidBlockNumber : BufferGetBlockNumber(prevbuf);
 		opaque->zs_next = InvalidBlockNumber;
@@ -157,9 +187,20 @@ zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted)
 
 			total_size = opaque->zs_total_size;
 
-			result = palloc(total_size + VARHDRSZ);
-			SET_VARSIZE(result, total_size + VARHDRSZ);
-			ptr = result + VARHDRSZ;
+			if(opaque->zs_is_compressed)
+			{
+				result = palloc(total_size + TOAST_COMPRESS_HDRSZ);
+
+				TOAST_COMPRESS_SET_RAWSIZE(result, opaque->zs_decompressed_size);
+				SET_VARSIZE_COMPRESSED(result, total_size + TOAST_COMPRESS_HDRSZ);
+				ptr = result + TOAST_COMPRESS_HDRSZ;
+			}
+			else
+			{
+				result = palloc(total_size + VARHDRSZ);
+				SET_VARSIZE(result, total_size + VARHDRSZ);
+				ptr = result + VARHDRSZ;
+			}
 		}
 
 		size = ((PageHeader) page)->pd_lower - SizeOfPageHeaderData;
@@ -171,7 +212,7 @@ zedstore_toast_flatten(Relation rel, AttrNumber attno, zstid tid, Datum toasted)
 		UnlockReleaseBuffer(buf);
 	}
 	Assert(total_size > 0);
-	Assert(ptr == result + total_size + VARHDRSZ);
+	Assert(ptr == result + VARSIZE_ANY(result));
 
 	return PointerGetDatum(result);
 }

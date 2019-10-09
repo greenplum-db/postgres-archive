@@ -61,10 +61,24 @@ vacuum t_zedstore;
 select * from t_zedstore;
 
 --
--- Test toasting
+-- Test in-line toasting
 --
 create table t_zedtoast(c1 int, t text) USING zedstore;
 insert into t_zedtoast select i, repeat('x', 10000) from generate_series(1, 10) i;
+
+select c1, length(t) from t_zedtoast;
+
+-- TODO: this test won't actually work when we start using the UNDO framework
+-- because we will not have control over when the undo record will be removed
+delete from t_zedtoast;
+select count(*) > 0 as has_toast_pages from pg_zs_toast_pages('t_zedtoast');
+vacuum t_zedtoast;
+select count(*) > 0 as has_toast_pages from pg_zs_toast_pages('t_zedtoast');
+
+--
+-- Test out-of-line toasting
+--
+insert into t_zedtoast select i, repeat('x', 1000000) from generate_series(1, 10) i;
 
 select c1, length(t) from t_zedtoast;
 

@@ -288,6 +288,8 @@ pg_zs_undo_pages(PG_FUNCTION_ARGS)
  *  total_size int8
  *  prev int8
  *  next int8
+ *  decompressed_size uint32
+ *  is_compressed bool
  */
 Datum
 pg_zs_toast_pages(PG_FUNCTION_ARGS)
@@ -350,8 +352,8 @@ pg_zs_toast_pages(PG_FUNCTION_ARGS)
 	/* scan all blocks in physical order */
 	for (blkno = 1; blkno < nblocks; blkno++)
 	{
-		Datum		values[6];
-		bool		nulls[6];
+		Datum		values[8];
+		bool		nulls[8];
 		Buffer		buf;
 		Page		page;
 		ZSToastPageOpaque *opaque;
@@ -390,6 +392,8 @@ pg_zs_toast_pages(PG_FUNCTION_ARGS)
 		values[3] = Int64GetDatum(opaque->zs_slice_offset);
 		values[4] = Int64GetDatum(opaque->zs_prev);
 		values[5] = Int64GetDatum(opaque->zs_next);
+		values[6] = Int32GetDatum(opaque->zs_decompressed_size);
+		values[7] = BoolGetDatum(opaque->zs_is_compressed);
 
 		UnlockReleaseBuffer(buf);
 
@@ -563,6 +567,10 @@ pg_zs_btree_pages(PG_FUNCTION_ARGS)
 					ZSAttStream *stream = streams[i];
 
 					totalsz += stream->t_size;
+					/*
+					 *  FIXME: this is wrong. We currently don't calculate the
+					 *  number of items in the stream
+					 */
 					nitems++;
 					if ((stream->t_flags & ATTSTREAM_COMPRESSED) != 0)
 					{

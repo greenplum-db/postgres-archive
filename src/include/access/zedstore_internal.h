@@ -440,6 +440,8 @@ typedef struct ZSToastPageOpaque
 	/* these are only set on the first page. */
 	zstid		zs_tid;
 	uint32		zs_total_size;
+	uint32      zs_decompressed_size;
+	bool        zs_is_compressed;
 
 	uint32		zs_slice_offset;
 	BlockNumber	zs_prev;
