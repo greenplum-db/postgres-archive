@@ -3,7 +3,7 @@ Zedstore - Column Store for PostgreSQL
 
 Zedstore is a column store for PostgreSQL. It is under development. The development happens here, you are in the right place.
 
-This is a fork of the PostgreSQL repository. All the interesting Zedstore stuff is in the src/backend/access/zedstore/ subdirectory. There are only few modifications to the rest of PostgreSQL, outside that subdirectory. Eventually, any modifications needed to accommodate Zedstore needs to be submitted as separate patches and committed to PostgreSQL itself.
+This is a fork of the PostgreSQL repository. All the interesting Zedstore stuff is in the subdirectory [src/backend/access/zedstore/](src/backend/access/zedstore/) subdirectory. There are only few modifications to the rest of PostgreSQL, outside that subdirectory. Eventually, any modifications needed to accommodate Zedstore needs to be submitted as separate patches and committed to PostgreSQL itself.
 
 Join the discussion on pgsql-hackers:
 
