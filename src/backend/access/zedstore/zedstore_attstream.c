@@ -1935,12 +1935,13 @@ decode_chunk_varlen(zstid *lasttid, char *chunk,
 			else
 			{
 				zs_toast_header_external hdr;
+				BlockNumber	toastblkno;
+				varatt_zs_toastptr *toastptr;
 
 				memcpy(&hdr, p, sizeof(zs_toast_header_external));
 				p += sizeof(zs_toast_header_external);
 
-				BlockNumber toastblkno = hdr.toast_blkno;
-				varatt_zs_toastptr *toastptr;
+				toastblkno = hdr.toast_blkno;
 
 				toastptr = palloc0(sizeof(varatt_zs_toastptr));
 				SET_VARTAG_1B_E(toastptr, VARTAG_ZEDSTORE);

@@ -513,7 +513,7 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 			 * modify the existing data. The new combined stream might even be smaller
 			 * than the old stream, if the last codewords are packed more tighthly.
 			 * But at the moment, append_attstreams_inplace() doesn't do anything
-			 * that smart. So we asume that the existing data didn't change, and we
+			 * that smart. So we assume that the existing data didn't change, and we
 			 * only need to WAL log the new data at the end of the stream.
 			 */
 			((PageHeader) origpage)->pd_lower = new_pd_lower;

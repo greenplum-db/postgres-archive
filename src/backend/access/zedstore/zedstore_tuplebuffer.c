@@ -361,7 +361,7 @@ zsbt_attbuffer_flush(Relation rel, AttrNumber attno, attbuffer *attbuffer, bool 
 	while ((all && chunks->len - chunks->cursor > 0) ||
 		   chunks->len - chunks->cursor > ATTBUFFER_SIZE)
 	{
-		zsbt_attr_add(rel, attno, &attbuffer->chunks);
+		zsbt_attr_add(rel, attno, chunks);
 	}
 }
 
