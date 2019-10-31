@@ -29,7 +29,7 @@ endif
 
 OBJS=	fe-auth.o fe-auth-scram.o fe-connect.o fe-exec.o fe-misc.o fe-print.o fe-lobj.o \
 	fe-protocol2.o fe-protocol3.o pqexpbuffer.o fe-secure.o \
-	libpq-events.o
+	legacy-pqsignal.o libpq-events.o
 
 # src/backend/utils/mb
 OBJS += encnames.o wchar.o
@@ -94,14 +94,10 @@ encnames.c wchar.c: % : $(backend_src)/utils/mb/%
 	rm -f $@ && $(LN_S) $< .
 
 
-distprep: libpq-dist.rc
-
-libpq.rc libpq-dist.rc: libpq.rc.in
+libpq.rc: libpq.rc.in
 	sed -e 's/\(VERSION.*\),0 *$$/\1,'`date '+%y%j' | sed 's/^0*//'`'/' $< >$@
 
 # Depend on Makefile.global to force rebuild on re-run of configure.
-# (But libpq-dist.rc is shipped in the distribution for shell-less
-# installations and is only updated by distprep.)
 libpq.rc: $(top_builddir)/src/Makefile.global
 
 # Make dependencies on pg_config_paths.h visible, too.
@@ -139,6 +135,5 @@ clean distclean: clean-lib
 # Remove files we (may have) symlinked in from other places
 	rm -f encnames.c wchar.c
 
-maintainer-clean: distclean maintainer-clean-lib
+maintainer-clean: distclean
 	$(MAKE) -C test $@
-	rm -f libpq-dist.rc

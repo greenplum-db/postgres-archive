@@ -14,11 +14,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "pg_rewind.h"
-#include "fetch.h"
-#include "file_ops.h"
-#include "filemap.h"
-
 #include "access/timeline.h"
 #include "access/xlog_internal.h"
 #include "catalog/catversion.h"
@@ -28,7 +23,11 @@
 #include "common/file_utils.h"
 #include "common/restricted_token.h"
 #include "fe_utils/recovery_gen.h"
+#include "fetch.h"
+#include "file_ops.h"
+#include "filemap.h"
 #include "getopt_long.h"
+#include "pg_rewind.h"
 #include "storage/bufpage.h"
 
 static void usage(const char *progname);
@@ -270,11 +269,12 @@ main(int argc, char **argv)
 	pg_free(buffer);
 
 	/*
-	 * If the target instance was not cleanly shut down, run a single-user
-	 * postgres session really quickly and reload the control file to get the
-	 * new state. Note if no_ensure_shutdown is specified, pg_rewind won't do
-	 * that automatically. That means users need to do themselves in advance,
-	 * else pg_rewind will soon quit, see sanityChecks().
+	 * If the target instance was not cleanly shut down, start and stop the
+	 * target cluster once in single-user mode to enforce recovery to finish,
+	 * ensuring that the cluster can be used by pg_rewind.  Note that if
+	 * no_ensure_shutdown is specified, pg_rewind ignores this step, and users
+	 * need to make sure by themselves that the target cluster is in a clean
+	 * state.
 	 */
 	if (!no_ensure_shutdown &&
 		ControlFile_target.state != DB_SHUTDOWNED &&
@@ -847,8 +847,12 @@ ensureCleanShutdown(const char *argv0)
 	if (dry_run)
 		return;
 
-	/* finally run postgres in single-user mode */
-	snprintf(cmd, MAXCMDLEN, "\"%s\" --single -D \"%s\" template1 < \"%s\"",
+	/*
+	 * Finally run postgres in single-user mode.  There is no need to use
+	 * fsync here.  This makes the recovery faster, and the target data folder
+	 * is synced at the end anyway.
+	 */
+	snprintf(cmd, MAXCMDLEN, "\"%s\" --single -F -D \"%s\" template1 < \"%s\"",
 			 exec_path, datadir_target, DEVNULL);
 
 	if (system(cmd) != 0)
