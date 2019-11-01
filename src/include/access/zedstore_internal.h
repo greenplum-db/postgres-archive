@@ -886,6 +886,7 @@ extern TM_Result zsbt_tid_lock(Relation rel, zstid tid,
 							   zstid *next_tid, bool *this_xact_has_lock,
 							   ZSUndoSlotVisibility *visi_info);
 extern void zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr, ZSUndoRecPtr recent_oldest_undo);
+extern zstid zsbt_get_first_tid(Relation rel);
 extern zstid zsbt_get_last_tid(Relation rel);
 extern void zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot);
 

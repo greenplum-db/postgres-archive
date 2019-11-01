@@ -68,6 +68,7 @@ typedef struct ZedStoreDescData
 	int			bmscan_nexttuple;
 
 	/* These fields are use for TABLESAMPLE scans */
+	zstid       min_tid_to_scan;
 	zstid       max_tid_to_scan;
 	zstid       next_tid_to_scan;
 
@@ -1295,6 +1296,14 @@ zedstoream_tuple_tid_valid(TableScanDesc sscan, ItemPointer tid)
 	scan = (ZedStoreDesc) sscan;
 	ztid = ZSTidFromItemPointer(*tid);
 
+	if (scan->min_tid_to_scan == InvalidZSTid)
+	{
+		/*
+		 * get the min tid once and store it
+		 */
+		scan->min_tid_to_scan = zsbt_get_first_tid(sscan->rs_rd);
+	}
+
 	if (scan->max_tid_to_scan == InvalidZSTid)
 	{
 		/*
@@ -1303,10 +1312,7 @@ zedstoream_tuple_tid_valid(TableScanDesc sscan, ItemPointer tid)
 		scan->max_tid_to_scan = zsbt_get_last_tid(sscan->rs_rd);
 	}
 
-	/*
-	 * FIXME: should we get lowest TID as well to further optimize the check.
-	 */
-	if (ztid <= scan->max_tid_to_scan)
+	if ( ztid >= scan->min_tid_to_scan && ztid < scan->max_tid_to_scan)
 		return true;
 	else
 		return false;
@@ -2780,6 +2786,12 @@ zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstat
 	TsmRoutine *tsm = scanstate->tsmroutine;
 	BlockNumber blockno;
 
+	if (scan->next_tid_to_scan == InvalidZSTid)
+	{
+		/* initialize next tid with the first tid */
+		scan->next_tid_to_scan = zsbt_get_first_tid(scan->rs_scan.rs_rd);
+	}
+
 	if (scan->max_tid_to_scan == InvalidZSTid)
 	{
 		/*
@@ -2787,10 +2799,6 @@ zedstoream_scan_sample_next_block(TableScanDesc sscan, SampleScanState *scanstat
 		 * scan either for SYSTEM or BERNOULLI sampling.
 		 */
 		scan->max_tid_to_scan = zsbt_get_last_tid(scan->rs_scan.rs_rd);
-		/*
-		 * TODO: should get lowest tid instead of starting from 0
-		 */
-		scan->next_tid_to_scan = ZSTidFromBlkOff(0, 1);
 	}
 
 	if (tsm->NextSampleBlock)
