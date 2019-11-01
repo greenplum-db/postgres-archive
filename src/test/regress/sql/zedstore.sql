@@ -10,6 +10,8 @@ select * from t_zedstore;
 select c1, c3 from t_zedstore;
 -- only few columns in output and where clause work
 select c3 from t_zedstore where c2 > 5;
+-- where clause with invalid ctid works
+select * from t_zedstore where ctid = '(0,0)';
 
 -- Test abort works
 begin;

@@ -1286,8 +1286,14 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction,
 static bool
 zedstoream_tuple_tid_valid(TableScanDesc sscan, ItemPointer tid)
 {
-	ZedStoreDesc scan = (ZedStoreDesc) sscan;
-	zstid		ztid = ZSTidFromItemPointer(*tid);
+	ZedStoreDesc scan;
+	zstid ztid;
+
+	if (!ItemPointerIsValid(tid))
+		return false;
+
+	scan = (ZedStoreDesc) sscan;
+	ztid = ZSTidFromItemPointer(*tid);
 
 	if (scan->max_tid_to_scan == InvalidZSTid)
 	{

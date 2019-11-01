@@ -48,6 +48,12 @@ select c3 from t_zedstore where c2 > 5;
  12
 (6 rows)
 
+-- where clause with invalid ctid works
+select * from t_zedstore where ctid = '(0,0)';
+ c1 | c2 | c3 
+----+----+----
+(0 rows)
+
 -- Test abort works
 begin;
 insert into t_zedstore select i,i+1,i+2 from generate_series(21, 25)i;
