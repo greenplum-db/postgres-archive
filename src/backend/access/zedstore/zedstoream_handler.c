@@ -2966,12 +2966,24 @@ zedstore_tableam_handler(PG_FUNCTION_ARGS)
  * Routines for dividing up the TID range for parallel seq scans
  */
 
+/*
+ * Number of TIDs to assign to a parallel worker in a parallel Seq Scan in
+ * one batch.
+ *
+ * Not sure what the optimimum would be. If the chunk size is too small,
+ * the parallel workers will waste effort, when two parallel workers both
+ * need to decompress and process the pages at the boundary. But on the
+ * other hand, if the chunk size is too large, we might not be able to make
+ * good use of all the parallel workers.
+ */
+#define ZS_PARALLEL_CHUNK_SIZE	((uint64) 0x100000)
+
 typedef struct ParallelZSScanDescData
 {
 	ParallelTableScanDescData base;
 
 	zstid		pzs_endtid;		/* last tid + 1 in relation at start of scan */
-	pg_atomic_uint64 pzs_allocatedtid_blk;	/* TID space allocated to workers so far. (in 65536 increments) */
+	pg_atomic_uint64 pzs_allocatedtids;	/* TID space allocated to workers so far. */
 } ParallelZSScanDescData;
 typedef struct ParallelZSScanDescData *ParallelZSScanDesc;
 
@@ -2988,7 +3000,7 @@ zs_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
 
 	zpscan->base.phs_relid = RelationGetRelid(rel);
 	zpscan->pzs_endtid = zsbt_get_last_tid(rel);
-	pg_atomic_init_u64(&zpscan->pzs_allocatedtid_blk, 0);
+	pg_atomic_init_u64(&zpscan->pzs_allocatedtids, 1);
 
 	return sizeof(ParallelZSScanDescData);
 }
@@ -2998,7 +3010,7 @@ zs_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
 {
 	ParallelZSScanDesc bpscan = (ParallelZSScanDesc) pscan;
 
-	pg_atomic_write_u64(&bpscan->pzs_allocatedtid_blk, 0);
+	pg_atomic_write_u64(&bpscan->pzs_allocatedtids, 1);
 }
 
 /*
@@ -3015,7 +3027,7 @@ static bool
 zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
 						  zstid *start, zstid *end)
 {
-	uint64		allocatedtid_blk;
+	uint64		allocatedtids;
 
 	/*
 	 * zhs_allocatedtid tracks how much has been allocated to workers
@@ -3029,15 +3041,10 @@ zs_parallelscan_nextrange(Relation rel, ParallelZSScanDesc pzscan,
 	 * wide because of that, to avoid wrapping around when rs_lasttid is close
 	 * to 2^32.  That's also one reason we do this at granularity of 2^16 TIDs,
 	 * even though zedstore isn't block-oriented.
-	 *
-	 * TODO: we divide the TID space into chunks of 2^16 TIDs each. That's
-	 * pretty inefficient, there's a fair amount of overhead in re-starting
-	 * the B-tree scans between each range. We probably should use much larger
-	 * ranges. But this is good for testing.
 	 */
-	allocatedtid_blk = pg_atomic_fetch_add_u64(&pzscan->pzs_allocatedtid_blk, 1);
-	*start = ZSTidFromBlkOff(allocatedtid_blk, 1);
-	*end = ZSTidFromBlkOff(allocatedtid_blk + 1, 1);
+	allocatedtids = pg_atomic_fetch_add_u64(&pzscan->pzs_allocatedtids, ZS_PARALLEL_CHUNK_SIZE);
+	*start = (zstid) allocatedtids;
+	*end = (zstid) (allocatedtids + ZS_PARALLEL_CHUNK_SIZE);
 
 	return *start < pzscan->pzs_endtid;
 }
