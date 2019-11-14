@@ -430,12 +430,14 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 	Form_pg_attribute attr = &rel->rd_att->attrs[attno - 1];
 	Buffer		origbuf;
 	Page		origpage;
+	ZSBtreePageOpaque *origpageopaque;
 	ZSAttStream *lowerstream;
 	ZSAttStream *upperstream;
 	int			lowerstreamsz;
 	uint16		orig_pd_lower;
 	uint16		new_pd_lower;
 	zstid		firstnewtid;
+	zstid 		splittid;
 	zsbt_attr_repack_context cxt;
 
 	Assert (attbuf->len - attbuf->cursor > 0);
@@ -445,6 +447,10 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 	 */
 	origbuf = zsbt_descend(rel, attno, attbuf->firsttid, 0, false);
 	origpage = BufferGetPage(origbuf);
+	origpageopaque = ZSBtreePageGetOpaque(origpage);
+	splittid = origpageopaque->zs_hikey - 1;
+
+	Assert (attbuf->firsttid <= splittid);
 
 	lowerstream = get_page_lowerstream(origpage);
 	upperstream = get_page_upperstream(origpage);
@@ -462,13 +468,22 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 		if (SizeOfZSAttStreamHeader + (attbuf->len - attbuf->cursor) <= PageGetExactFreeSpace(origpage))
 		{
 			ZSAttStream newhdr;
+			attstream_buffer newattbuf;
+			bool		splitted = false;
 
-			newhdr.t_size = SizeOfZSAttStreamHeader + (attbuf->len - attbuf->cursor);
 			newhdr.t_flags = 0;
 			newhdr.t_decompressed_size = 0;
 			newhdr.t_decompressed_bufsize = 0;
-			newhdr.t_lasttid = attbuf->lasttid;
 
+			if (attbuf->lasttid > splittid)
+			{
+				elog(DEBUG2, "zsbt_attr_add - splitting attbuf attno: %d, firsttid: %lu lasttid: %lu splittid: %lu", attno, attbuf->firsttid, attbuf->lasttid, splittid);
+				chop_attstream_at_splittid(attbuf, &newattbuf, splittid);
+				splitted = true;
+			}
+
+			newhdr.t_size = SizeOfZSAttStreamHeader + (attbuf->len - attbuf->cursor);
+			newhdr.t_lasttid = attbuf->lasttid;
 			new_pd_lower = SizeOfPageHeaderData + newhdr.t_size;
 
 			START_CRIT_SECTION();
@@ -488,7 +503,13 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 			END_CRIT_SECTION();
 
 			UnlockReleaseBuffer(origbuf);
-			attbuf->cursor = attbuf->len;
+			if (splitted)
+			{
+				pfree(attbuf->data);
+				memcpy(attbuf, &newattbuf, sizeof(attstream_buffer));
+			}
+			else
+				attbuf->cursor = attbuf->len;
 			return;
 		}
 	}
@@ -499,7 +520,8 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 		 */
 		START_CRIT_SECTION();
 
-		if (append_attstream_inplace(attr, lowerstream,
+		if (attbuf->lasttid <= splittid &&
+			append_attstream_inplace(attr, lowerstream,
 									 PageGetExactFreeSpace(origpage),
 									 attbuf))
 		{
@@ -536,10 +558,14 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 	 * leave the old data untouched and create a new page. This avoids repeatedly
 	 * recompressing pages when inserting rows one by one. Somewhat arbitrarily,
 	 * we put the threshold at 2.5%.
+	 *
+	 * TODO: skipping allocating new page here if attbuf->lasttid > splittid,
+	 * because we don't know how to handle that without calling merge_attstream()
 	 */
 	firstnewtid = attbuf->firsttid;
 	lowerstreamsz = lowerstream ? lowerstream->t_size : 0;
-	if (PageGetExactFreeSpace(origpage) + lowerstreamsz < (int) (BLCKSZ * 0.025) &&
+	if (attbuf->lasttid <= splittid &&
+		PageGetExactFreeSpace(origpage) + lowerstreamsz < (int) (BLCKSZ * 0.025) &&
 		(lowerstream == NULL || firstnewtid > lowerstream->t_lasttid) &&
 		upperstream &&  firstnewtid > upperstream->t_lasttid)
 	{
@@ -609,12 +635,30 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 		 * written out (otherwise, we'd momentarily remove existing data!)
 		 */
 		zsbt_attr_repack_init(&cxt, attno, origbuf, false);
+
+		attstream_buffer rightattbuf;
+		bool split = false;
+		if (attbuf->lasttid > splittid)
+		{
+			elog(DEBUG2, "zsbt_attr_add - splitting attbuf attno: %d, firsttid: %lu lasttid: %lu splittid: %lu", attno, attbuf->firsttid, attbuf->lasttid, splittid);
+			chop_attstream_at_splittid(attbuf, &rightattbuf, splittid);
+			split= true;
+		}
+
 		zsbt_attr_pack_attstream(attr, attbuf, cxt.currpage);
 
-		while (attbuf->cursor < attbuf->len && attbuf->firsttid <= mintid)
+		while (attbuf->cursor < attbuf->len && (split || attbuf->firsttid <= mintid))
 		{
 			zsbt_attr_repack_newpage(&cxt, attbuf->firsttid);
 			zsbt_attr_pack_attstream(attr, attbuf, cxt.currpage);
+		}
+
+		if (split)
+		{
+			Assert(attbuf->cursor == attbuf->len);
+
+			pfree(attbuf->data);
+			memcpy(attbuf, &rightattbuf, sizeof(attstream_buffer));
 		}
 	}
 	zsbt_attr_repack_writeback_pages(&cxt, rel, attno, origbuf);

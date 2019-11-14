@@ -406,6 +406,121 @@ append_attstream(attstream_buffer *buf, bool all, int nelems,
 	return nelems - elems_remain;
 }
 
+void
+chop_attstream_at_splittid(attstream_buffer *oldattbuf, attstream_buffer *newattbuf, zstid splittid)
+{
+	zstid lasttid_prev_chunk;
+	zstid lasttid_split_chunk;
+	int split_chunk_pos;
+	int split_chunk_len;
+	int right_chunk_len = 0;
+	int split_chunk_num_elems = 0;
+	int left_chunk_num_elems = 0;
+	int right_chunk_num_elems = 0;
+	int right_stream_len_to_append;
+	MemoryContext attstream_memory_context = GetMemoryChunkContext(oldattbuf->data);
+	MemoryContext oldcontext;
+
+
+#define ZS_ARRAY_SIZE 60
+	zstid left_chunk_tids[ZS_ARRAY_SIZE];
+	Datum left_chunk_datums[ZS_ARRAY_SIZE];
+	bool left_chunk_isnulls[ZS_ARRAY_SIZE];
+
+	zstid right_chunk_tids[ZS_ARRAY_SIZE];
+	Datum right_chunk_datums[ZS_ARRAY_SIZE];
+	bool right_chunk_isnulls[ZS_ARRAY_SIZE];
+
+	Assert(oldattbuf->lasttid > splittid);
+
+	split_chunk_pos = find_attstream_chop_pos_with_tid(oldattbuf, splittid, &lasttid_prev_chunk);
+	lasttid_split_chunk = lasttid_prev_chunk;
+	split_chunk_len = decode_chunk(oldattbuf->attbyval, oldattbuf->attlen, &lasttid_split_chunk,
+							   oldattbuf->data + oldattbuf->cursor + split_chunk_pos,
+							   &split_chunk_num_elems,
+							   left_chunk_tids,
+							   left_chunk_datums,
+							   left_chunk_isnulls);
+
+	left_chunk_num_elems = split_chunk_num_elems;
+	for (int i = 0; i < split_chunk_num_elems; i++)
+	{
+		if (left_chunk_tids[i] > splittid)
+		{
+			left_chunk_num_elems = i;
+			right_chunk_num_elems = split_chunk_num_elems - left_chunk_num_elems;
+
+			memmove(right_chunk_tids, &left_chunk_tids[i], sizeof(zstid) * right_chunk_num_elems);
+			memmove(right_chunk_datums, &left_chunk_datums[i], sizeof(Datum) * right_chunk_num_elems);
+			memmove(right_chunk_isnulls, &left_chunk_isnulls[i], sizeof(bool) * right_chunk_num_elems);
+			break;
+		}
+	}
+	right_chunk_num_elems = split_chunk_num_elems - left_chunk_num_elems;
+
+	oldcontext  = MemoryContextSwitchTo(attstream_memory_context);
+
+	if (right_chunk_num_elems == 0)
+	{
+		/*
+		 * Use the chunk after the split chunk to populate the right chunk
+		 */
+		right_chunk_len = decode_chunk(oldattbuf->attbyval, oldattbuf->attlen, &lasttid_split_chunk,
+									   oldattbuf->data + oldattbuf->cursor + split_chunk_pos + split_chunk_len,
+									   &right_chunk_num_elems,
+									   right_chunk_tids,
+									   right_chunk_datums,
+									   right_chunk_isnulls);
+	}
+
+	/* Create the right stream with the right chunk */
+	create_attstream(newattbuf, oldattbuf->attbyval, oldattbuf->attlen,
+					 right_chunk_num_elems,
+					 right_chunk_tids,
+					 right_chunk_datums,
+					 right_chunk_isnulls);
+	MemoryContextSwitchTo(oldcontext);
+
+	/* memcpy to append the rest to the right stream */
+	right_stream_len_to_append = oldattbuf->len - (oldattbuf->cursor + split_chunk_pos + split_chunk_len + right_chunk_len);
+	enlarge_attstream_buffer(newattbuf, right_stream_len_to_append);
+	memcpy(newattbuf->data + newattbuf->len,
+		oldattbuf->data + oldattbuf->cursor + split_chunk_pos + split_chunk_len + right_chunk_len,
+		   right_stream_len_to_append);
+	newattbuf->len += right_stream_len_to_append;
+	newattbuf->lasttid = oldattbuf->lasttid;
+
+	/* chop old stream from beginning of the split chunk -> partial left stream */
+	oldattbuf->len = oldattbuf->cursor + split_chunk_pos;
+	oldattbuf->lasttid = lasttid_prev_chunk;
+
+	/* append to the left stream with the left chunk */
+	if (left_chunk_num_elems > 0)
+		append_attstream(oldattbuf, true, left_chunk_num_elems, left_chunk_tids, left_chunk_datums, left_chunk_isnulls);
+
+	elog(DEBUG2, "chop_attstream_at_splittid - split_chunk_pos: %d, lasttid_prev_chunk: %lu, left_chunk_num_elems: %d, "
+		   "right_chunk_num_elems: %d, split_chunk_num_elems %d, oldattbuf->firsttid: %lu, "
+	 "oldattbuf->lasttid: %lu, newattbuf->firsttid: %lu, newattbuf->lasttid: %lu, splittid: %lu,"
+  "right_chunk_len: %d, split_chunk_len: %d",
+		   split_chunk_pos,
+		   lasttid_prev_chunk,
+		   left_chunk_num_elems,
+		   right_chunk_num_elems,
+		   split_chunk_num_elems,
+		   oldattbuf->firsttid,
+		   oldattbuf->lasttid,
+		   newattbuf->firsttid,
+		   newattbuf->lasttid,
+		   splittid,
+		   right_chunk_len,
+		   split_chunk_len);
+
+#ifdef USE_ASSERT_CHECKING
+	verify_attstream(oldattbuf);
+	verify_attstream(newattbuf);
+#endif
+}
+
 /*
  * Split 'chunk' at 'pos'. 'lasttid' is the TID of the item,
  * 'pos'
@@ -485,6 +600,36 @@ chop_attstream(attstream_buffer *buf, int pos, zstid lasttid)
 #ifdef USE_ASSERT_CHECKING
 	verify_attstream(buf);
 #endif
+}
+
+/*
+ * Find the beginning offset of last chunk that covers splittid.
+ *
+ * Returns -1 if there are no full chunks. (FIXME: no it doesn't currently)
+ */
+int
+find_attstream_chop_pos_with_tid(attstream_buffer *attbuf, zstid splittid, zstid *lasttid)
+{
+	zstid			prev_lasttid;
+	char			*prev_chunk_p;
+	char			*pstart;
+	char			*p;
+
+	pstart = p = prev_chunk_p = &attbuf->data[attbuf->cursor];
+	prev_lasttid = *lasttid = 0;
+
+	while (*lasttid < splittid)
+	{
+		prev_lasttid = *lasttid;
+		prev_chunk_p = p;
+
+		p += skip_chunk(attbuf->attlen, p, lasttid);
+	}
+
+	*lasttid = prev_lasttid;
+
+	/* 'prev_chunk_p' points to the beginning of the chunk that covers splittid */
+	return prev_chunk_p - (char *) pstart;
 }
 
 /*
@@ -759,6 +904,7 @@ merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buf, char *chunks
 	 *
 	 * FIXME: we don't actually pay attention to the compression anymore.
 	 * We never repack.
+	 * FIXME: this is backwords, the normal fast path is if (firsttid1 > lasttid2)
 	 */
 	if (firsttid2 > lasttid1)
 	{
@@ -781,6 +927,7 @@ merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buf, char *chunks
 
 	/*
 	 * naive implementation: decode everything, merge arrays, and re-encode.
+	 * FIXME: becuase this is naive, this could be costly when we have a large number of tids in the attbuffer
 	 */
 	init_attstream_decoder(&decoder1, attr->attbyval, attr->attlen);
 	decode_chunks_begin(&decoder1, buf->data + buf->cursor, buf->len - buf->cursor, buf->lasttid);
