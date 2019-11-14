@@ -927,7 +927,9 @@ extern void merge_attstream_buffer(Form_pg_attribute attr, attstream_buffer *buf
 extern bool append_attstream_inplace(Form_pg_attribute att, ZSAttStream *oldstream, int freespace, attstream_buffer *newstream);
 
 extern int find_attstream_chop_pos(Form_pg_attribute att, char *chunks, int len, zstid *lasttid);
+extern int find_attstream_chop_pos_with_tid(attstream_buffer *attbuf, zstid splittid, zstid *lasttid);
 extern void chop_attstream(attstream_buffer *buffer, int pos, zstid lasttid);
+extern void chop_attstream_at_splittid(attstream_buffer *oldattbuf, attstream_buffer *newattbuf, zstid splittid);
 
 extern void print_attstream(int attlen, char *chunk, int len);
 
