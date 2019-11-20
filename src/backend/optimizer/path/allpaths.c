@@ -23,6 +23,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_statistic.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -47,6 +48,7 @@
 #include "partitioning/partbounds.h"
 #include "partitioning/partprune.h"
 #include "rewrite/rewriteManip.h"
+#include "utils/syscache.h"
 #include "utils/lsyscache.h"
 
 
@@ -79,7 +81,11 @@ static void set_rel_size(PlannerInfo *root, RelOptInfo *rel,
 static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 							 Index rti, RangeTblEntry *rte);
 static void set_plain_rel_size(PlannerInfo *root, RelOptInfo *rel,
-							   RangeTblEntry *rte);
+							   Index rti, RangeTblEntry *rte);
+static void set_plain_rel_page_estimates(PlannerInfo *root,
+										 RelOptInfo *rel,
+										 Index rti,
+										 RangeTblEntry *rte);
 static void create_plain_partial_paths(PlannerInfo *root, RelOptInfo *rel);
 static void set_rel_consider_parallel(PlannerInfo *root, RelOptInfo *rel,
 									  RangeTblEntry *rte);
@@ -409,7 +415,7 @@ set_rel_size(PlannerInfo *root, RelOptInfo *rel,
 				else
 				{
 					/* Plain relation */
-					set_plain_rel_size(root, rel, rte);
+					set_plain_rel_size(root, rel, rti, rte);
 				}
 				break;
 			case RTE_SUBQUERY:
@@ -571,7 +577,7 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
  *	  Set size estimates for a plain relation (no subquery, no inheritance)
  */
 static void
-set_plain_rel_size(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+set_plain_rel_size(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTblEntry *rte)
 {
 	/*
 	 * Test any partial indexes of rel for applicability.  We must do this
@@ -581,6 +587,81 @@ set_plain_rel_size(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 
 	/* Mark rel with estimated output rows, width, etc */
 	set_baserel_size_estimates(root, rel);
+
+	/* Estimate the pages based on the selected columns */
+	set_plain_rel_page_estimates(root, rel, rti, rte);
+}
+
+static void
+set_plain_rel_page_estimates(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTblEntry *rte)
+{
+	Var			*var;
+	List		*vars;
+	double		pages;
+	ListCell	*lc;
+	ListCell	*lc1;
+	Bitmapset	*cols = NULL;
+	HeapTuple	tp;
+	AttrNumber	attno;
+	Selectivity sel = 0;
+
+	Assert(rel->rtekind == RTE_RELATION);
+
+	foreach(lc, rel->reltarget->exprs)
+	{
+		Node *node;
+		node = lfirst(lc);
+		vars = pull_var_clause(node,
+							   PVC_RECURSE_AGGREGATES |
+							   PVC_RECURSE_WINDOWFUNCS |
+							   PVC_RECURSE_PLACEHOLDERS);
+		foreach(lc1, vars)
+		{
+			var = lfirst(lc1);
+			if (var->varno == rti && var->varattno >= 0)
+				cols = bms_add_member(cols, var->varattno);
+		}
+	}
+
+	foreach(lc, rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+		vars = pull_var_clause((Node *)rinfo->clause,
+									 PVC_RECURSE_AGGREGATES |
+									 PVC_RECURSE_WINDOWFUNCS |
+									 PVC_RECURSE_PLACEHOLDERS);
+		foreach(lc1, vars)
+		{
+			var = lfirst(lc1);
+			if (var->varno == rti && var->varattno >= 0)
+				cols = bms_add_member(cols, var->varattno);
+		}
+	}
+
+	attno = -1;
+	while ((attno = bms_next_member(cols, attno)) >= 0)
+	{
+		tp = SearchSysCache3(STATRELATTINH,
+							 ObjectIdGetDatum(rte->relid),
+							 Int16GetDatum(attno),
+							 BoolGetDatum(rte->inh));
+
+		if (HeapTupleIsValid(tp))
+		{
+			sel += ((Form_pg_statistic) GETSTRUCT(tp))->stadiskfrac;
+			ReleaseSysCache(tp);
+		}
+	}
+
+	if (sel > 0)
+	{
+		pages = rel->pages * sel;
+
+		if (pages <= 1.0)
+			rel->pages = 1;
+		else
+			rel->pages = rint(pages);
+	}
 }
 
 /*

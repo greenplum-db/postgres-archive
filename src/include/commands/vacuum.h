@@ -114,6 +114,12 @@ typedef struct VacAttrStats
 	Datum	   *stavalues[STATISTIC_NUM_SLOTS];
 
 	/*
+	 * These fields are to be filled in compute_disk_stats
+	 */
+	float4		stadiskfrac;	/* fraction of the physical size */
+	float8		disksize;		/* value of the physical size */
+
+	/*
 	 * These fields describe the stavalues[n] element types. They will be
 	 * initialized to match attrtypid, but a custom typanalyze function might
 	 * want to store an array of something other than the analyzed column's
