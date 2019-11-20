@@ -35,6 +35,7 @@
 #include "miscadmin.h"
 #include "optimizer/plancat.h"
 #include "pgstat.h"
+#include "parser/parse_relation.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "storage/procarray.h"
@@ -2420,32 +2421,108 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	zsbt_tuplebuffer_flush(NewHeap);
 }
 
+static void 
+zedstoream_scan_analyze_beginscan(Relation onerel, AnalyzeSampleContext *context)
+{
+	zstid 	tid;
+	List	*va_cols = context->anl_cols;		
+	Bitmapset	*project_columns = NULL;	
+
+	/* zedstore can sample rows on specified columns only */
+	if (!va_cols)
+		context->scan = table_beginscan_analyze(onerel);
+	else
+	{
+		ListCell	*le;
+
+		foreach(le, va_cols)
+		{
+			char	   *col = strVal(lfirst(le));
+
+			project_columns =
+				bms_add_member(project_columns, attnameAttNum(onerel, col, false));
+		}
+
+		context->scan = 
+			zedstoream_beginscan_with_column_projection(onerel, NULL, 0, NULL,
+														NULL, SO_TYPE_ANALYZE,
+														project_columns);
+	}
+
+	/* zedstore use a logical block number to acquire sample rows */
+	tid = zsbt_get_last_tid(onerel);
+	context->totalblocks = ZSTidGetBlockNumber(tid) + 1;
+}
+
 /*
- * FIXME: The ANALYZE API is problematic for us. acquire_sample_rows() calls
- * RelationGetNumberOfBlocks() directly on the relation, and chooses the
- * block numbers to sample based on that. But the logical block numbers
- * have little to do with physical ones in zedstore.
+ * Get next logical block.
  */
 static bool
-zedstoream_scan_analyze_next_block(TableScanDesc sscan, BlockNumber blockno,
-								   BufferAccessStrategy bstrategy)
+zedstoream_scan_analyze_next_block(BlockNumber blockno,
+								   AnalyzeSampleContext *context)
 {
-	return zs_blkscan_next_block(sscan, blockno, NULL, -1, false);
+	return zs_blkscan_next_block(context->scan, blockno, NULL, -1, false);
 }
 
 static bool
-zedstoream_scan_analyze_next_tuple(TableScanDesc sscan, TransactionId OldestXmin,
-								   double *liverows, double *deadrows,
-								   TupleTableSlot *slot)
+zedstoream_scan_analyze_next_tuple(TransactionId OldestXmin, AnalyzeSampleContext *context)
 {
-	bool		result;
+	int		i;
+	bool	result;
+	AttrNumber		attno;
+	TableScanDesc	scan = context->scan;
+	ZedStoreDesc	sscan = (ZedStoreDesc) scan;
+	ZSAttrTreeScan	*attr_scan;
+	TupleTableSlot	*slot = AnalyzeGetSampleSlot(context, scan->rs_rd, ANALYZE_SAMPLE_DATA);
 
-	result = zs_blkscan_next_tuple(sscan, slot);
+	result = zs_blkscan_next_tuple(scan, slot);
 
 	if (result)
-		(*liverows)++;
+	{
+		/* provide extra disk info when analyzing on full columns */
+		if (!context->anl_cols)
+		{
+			slot = AnalyzeGetSampleSlot(context, scan->rs_rd, ANALYZE_SAMPLE_DISKSIZE);
+
+			for (i = 1; i < sscan->proj_data.num_proj_atts; i++)
+			{
+				attr_scan = &sscan->proj_data.attr_scans[i - 1];	
+				attno = sscan->proj_data.proj_atts[i];
+
+				slot->tts_values[attno - 1] =
+					Float8GetDatum(attr_scan->decoder.avg_elements_size); 
+				slot->tts_isnull[attno - 1] = false;
+				slot->tts_flags &= ~TTS_FLAG_EMPTY;
+			}
+		}
+
+		context->liverows++;
+	}
 
 	return result;
+}
+
+static void
+zedstoream_scan_analyze_sample_tuple(int pos, bool replace, AnalyzeSampleContext *context)
+{
+	TupleTableSlot *slot;
+	Relation onerel = context->scan->rs_rd;
+
+	slot = AnalyzeGetSampleSlot(context, onerel, ANALYZE_SAMPLE_DATA);
+	AnalyzeRecordSampleRow(context, slot, NULL, ANALYZE_SAMPLE_DATA, pos, replace, false);
+
+	/* only record */
+	if (!context->anl_cols)
+	{
+		slot = AnalyzeGetSampleSlot(context, onerel, ANALYZE_SAMPLE_DISKSIZE);
+		AnalyzeRecordSampleRow(context, slot, NULL, ANALYZE_SAMPLE_DISKSIZE, pos, replace, false);
+	}
+}
+
+static void
+zedstoream_scan_analyze_endscan(AnalyzeSampleContext *context)
+{
+	table_endscan(context->scan);
 }
 
 /* ------------------------------------------------------------------------
@@ -2713,6 +2790,18 @@ zs_blkscan_next_tuple(TableScanDesc sscan, TupleTableSlot *slot)
 
 	if (scan->bmscan_nexttuple >= scan->bmscan_ntuples)
 		return false;
+
+	/*
+	 * Initialize the slot.
+	 *
+	 * We initialize all columns to NULL. The values for columns that are projected
+	 * will be set to the actual values below, but it's important that non-projected
+	 * columns are NULL.
+	 */
+	ExecClearTuple(slot);
+	for (int i = 0; i < sscan->rs_rd->rd_att->natts; i++)
+		slot->tts_isnull[i] = true;
+
 	/*
 	 * projection attributes were created based on Relation tuple descriptor
 	 * it better match TupleTableSlot.
@@ -2935,8 +3024,11 @@ static const TableAmRoutine zedstoream_methods = {
 	.relation_copy_data = zedstoream_relation_copy_data,
 	.relation_copy_for_cluster = zedstoream_relation_copy_for_cluster,
 	.relation_vacuum = zedstoream_vacuum_rel,
+	.scan_analyze_beginscan = zedstoream_scan_analyze_beginscan,
 	.scan_analyze_next_block = zedstoream_scan_analyze_next_block,
 	.scan_analyze_next_tuple = zedstoream_scan_analyze_next_tuple,
+	.scan_analyze_sample_tuple = zedstoream_scan_analyze_sample_tuple,
+	.scan_analyze_endscan = zedstoream_scan_analyze_endscan,
 
 	.index_build_range_scan = zedstoream_index_build_range_scan,
 	.index_validate_scan = zedstoream_index_validate_scan,

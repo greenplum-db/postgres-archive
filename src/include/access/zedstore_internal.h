@@ -78,6 +78,9 @@ typedef struct
 	char	   *chunks_buf;
 	int			chunks_buf_size;
 
+	/* attstream compression ratio */
+	float8		compression_ratio;
+
 	/* information about the current attstream in the buffer */
 	int			chunks_len;
 	zstid		firsttid;
@@ -96,6 +99,7 @@ typedef struct
 	Datum		datums[DECODER_MAX_ELEMS];
 	bool		isnulls[DECODER_MAX_ELEMS];
 	int			num_elements;
+	float8		avg_elements_size; /* avg physical size of elements */
 } attstream_decoder;
 
 /*
