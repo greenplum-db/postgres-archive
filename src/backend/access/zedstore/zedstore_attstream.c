@@ -167,6 +167,7 @@ decode_attstream_begin(attstream_decoder *decoder, ZSAttStream *attstream)
 					  attstream->t_size - SizeOfZSAttStreamHeader,
 					  attstream->t_decompressed_bufsize);
 		decoder->chunks_len = attstream->t_decompressed_size;
+		decoder->compression_ratio = ((float8) buf_size_needed) / attstream->t_size;
 	}
 	else
 	{
@@ -174,6 +175,7 @@ decode_attstream_begin(attstream_decoder *decoder, ZSAttStream *attstream)
 			   ((char *) attstream) + SizeOfZSAttStreamHeader,
 			   attstream->t_size - SizeOfZSAttStreamHeader);
 		decoder->chunks_len = attstream->t_size - SizeOfZSAttStreamHeader;
+		decoder->compression_ratio = 1.0;
 	}
 	decoder->firsttid = get_chunk_first_tid(decoder->attlen, decoder->chunks_buf);
 	decoder->lasttid = attstream->t_lasttid;
@@ -182,6 +184,7 @@ decode_attstream_begin(attstream_decoder *decoder, ZSAttStream *attstream)
 	decoder->prevtid = 0;
 
 	decoder->num_elements = 0;
+	decoder->avg_elements_size = 0;
 }
 
 /*
@@ -227,6 +230,7 @@ decode_attstream_cont(attstream_decoder *decoder)
 	zstid		lasttid;
 	int			total_decoded;
 	char	   *p;
+	char	   *lastp;
 	char	   *pend;
 	MemoryContext oldcxt;
 
@@ -237,7 +241,7 @@ decode_attstream_cont(attstream_decoder *decoder)
 		MemoryContextSwitchTo(decoder->tmpcxt);
 	}
 
-	p = decoder->chunks_buf + decoder->pos;
+	lastp = p = decoder->chunks_buf + decoder->pos;
 	pend = decoder->chunks_buf + decoder->chunks_len;
 
 	total_decoded = 0;
@@ -262,6 +266,7 @@ decode_attstream_cont(attstream_decoder *decoder)
 
 	Assert(p <= pend);
 	decoder->num_elements = total_decoded;
+	decoder->avg_elements_size = ((p - lastp) / total_decoded) / decoder->compression_ratio;
 	decoder->pos = p - decoder->chunks_buf;
 	if (total_decoded > 0)
 	{
