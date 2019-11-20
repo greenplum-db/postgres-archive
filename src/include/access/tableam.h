@@ -37,6 +37,66 @@ struct SampleScanState;
 struct TBMIterateResult;
 struct VacuumParams;
 struct ValidateIndexState;
+struct TupleConversionMap;
+
+typedef enum AnalyzeSampleType 
+{
+	ANALYZE_SAMPLE_DATA = 0,	/* real data per column */
+	ANALYZE_SAMPLE_DISKSIZE,	/* physical size per column */
+	MAX_ANALYZE_SAMPLE			/* must be last */
+} AnalyzeSampleType;
+
+typedef struct AnalyzeSampleContext
+{
+	/* Filled when context is created */
+	int		totaltargrows;
+	List	*anl_cols;
+	Relation parent;
+	BufferAccessStrategy bstrategy;
+
+	/* Filled by table AM analyze routines */
+	BlockNumber	totalblocks;
+	TableScanDesc scan;
+
+	/* 
+	 * Acquiring sample rows from a inherited table will invoke
+	 * multiple sampling iterations for each child relation, so
+	 * bellow filed is the statistic for each iteration.
+	 */
+	int		targrows;	/* target number of sample rows */
+	double 	liverows;
+	double 	deadrows;
+	bool	ordered;	/* are sample rows ordered physically */
+
+	/*
+	 * Statistics filed by all sampling iterations.
+	 */
+	int		totalsampledrows; /* total number of sample rows stored */
+	double	totalrows;
+	double	totaldeadrows;
+
+	/* 
+	 * If childrel has different rowtype with parent, we
+	 * need to convert sample tuple to the same rowtype
+	 * with parent
+	 */
+	struct TupleConversionMap *tup_convert_map;
+
+	/*
+	 * Used by table AM analyze routines to store
+	 * the temporary tuple for different types of
+	 * sample rows, the tuple is finally stored to
+	 * sample_rows[] if the tuple is
+	 * randomly selected.
+	 */
+	TupleTableSlot* sample_slots[MAX_ANALYZE_SAMPLE];
+
+	/* 
+	 * stores the final sample rows which will be
+	 * used to compute statistics.
+	 */
+	HeapTuple* sample_rows[MAX_ANALYZE_SAMPLE];
+} AnalyzeSampleContext;
 
 /*
  * Bitmask values for the flags argument to the scan_begin callback.
@@ -532,9 +592,10 @@ typedef struct TableAmRoutine
 	 * clear what a good interface for non block based AMs would be, so there
 	 * isn't one yet.
 	 */
-	bool		(*scan_analyze_next_block) (TableScanDesc scan,
-											BlockNumber blockno,
-											BufferAccessStrategy bstrategy);
+	void		(*scan_analyze_beginscan) (Relation onerel, AnalyzeSampleContext *context);
+
+	bool		(*scan_analyze_next_block) (BlockNumber blockno,
+											AnalyzeSampleContext *context);
 
 	/*
 	 * See table_scan_analyze_next_tuple().
@@ -544,11 +605,13 @@ typedef struct TableAmRoutine
 	 * influence autovacuum scheduling (see comment for relation_vacuum
 	 * callback).
 	 */
-	bool		(*scan_analyze_next_tuple) (TableScanDesc scan,
-											TransactionId OldestXmin,
-											double *liverows,
-											double *deadrows,
-											TupleTableSlot *slot);
+	bool		(*scan_analyze_next_tuple) (TransactionId OldestXmin,
+											AnalyzeSampleContext *context);
+
+	void		(*scan_analyze_sample_tuple) (int pos, bool replace,
+											  AnalyzeSampleContext *context);
+
+	void		(*scan_analyze_endscan) (AnalyzeSampleContext *context);
 
 	/* see table_index_build_range_scan for reference about parameters */
 	double		(*index_build_range_scan) (Relation table_rel,
@@ -1474,6 +1537,12 @@ table_relation_vacuum(Relation rel, struct VacuumParams *params,
 	rel->rd_tableam->relation_vacuum(rel, params, bstrategy);
 }
 
+static inline void
+table_scan_analyze_beginscan(Relation rel, struct AnalyzeSampleContext *context)
+{
+	rel->rd_tableam->scan_analyze_beginscan(rel, context);
+}
+
 /*
  * Prepare to analyze block `blockno` of `scan`. The scan needs to have been
  * started with table_beginscan_analyze().  Note that this routine might
@@ -1483,11 +1552,10 @@ table_relation_vacuum(Relation rel, struct VacuumParams *params,
  * Returns false if block is unsuitable for sampling, true otherwise.
  */
 static inline bool
-table_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
-							  BufferAccessStrategy bstrategy)
+table_scan_analyze_next_block(BlockNumber blockno,
+							  struct AnalyzeSampleContext *context)
 {
-	return scan->rs_rd->rd_tableam->scan_analyze_next_block(scan, blockno,
-															bstrategy);
+	return context->scan->rs_rd->rd_tableam->scan_analyze_next_block(blockno, context);
 }
 
 /*
@@ -1501,13 +1569,21 @@ table_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
  * tuples.
  */
 static inline bool
-table_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
-							  double *liverows, double *deadrows,
-							  TupleTableSlot *slot)
+table_scan_analyze_next_tuple(TransactionId OldestXmin, AnalyzeSampleContext *context)
 {
-	return scan->rs_rd->rd_tableam->scan_analyze_next_tuple(scan, OldestXmin,
-															liverows, deadrows,
-															slot);
+	return context->scan->rs_rd->rd_tableam->scan_analyze_next_tuple(OldestXmin, context);
+}
+
+static inline void 
+table_scan_analyze_sample_tuple(Index sample, bool replace, AnalyzeSampleContext *context)
+{
+	context->scan->rs_rd->rd_tableam->scan_analyze_sample_tuple(sample, replace, context);
+}
+
+static inline void
+table_scan_analyze_endscan(AnalyzeSampleContext *context)
+{
+	context->scan->rs_rd->rd_tableam->scan_analyze_endscan(context);
 }
 
 /*
@@ -1781,6 +1857,32 @@ extern void table_block_relation_estimate_size(Relation rel,
 											   double *allvisfrac,
 											   Size overhead_bytes_per_tuple,
 											   Size usable_bytes_per_page);
+
+/* ----------------------------------------------------------------------------
+ * Helper functions to implement analyze scan. 
+j* ----------------------------------------------------------------------------
+ */
+extern AnalyzeSampleContext *
+CreateAnalyzeSampleContext(Relation onerel, List *cols, int targrows,
+						   BufferAccessStrategy strategy);
+extern void DestroyAnalyzeSampleContext(AnalyzeSampleContext *context);
+extern TupleTableSlot * AnalyzeGetSampleSlot(AnalyzeSampleContext *context,
+											 Relation onerel, AnalyzeSampleType type);
+extern void AnalyzeRecordSampleRow(AnalyzeSampleContext *context,
+								   TupleTableSlot *sample_slot,
+								   HeapTuple sample_tuple,
+								   AnalyzeSampleType type, int pos,
+								   bool replace, bool withtid);
+extern void InitAnalyzeSampleContextForChild(AnalyzeSampleContext *context,
+											 Relation child,
+											 int childtargrows);
+extern void AnalyzeGetSampleStats(AnalyzeSampleContext *context,
+								  int *totalsampledrows,
+								  double *totalrows,
+								  double *totaldeadrows);
+extern HeapTuple *
+AnalyzeGetSampleRows(AnalyzeSampleContext *context, AnalyzeSampleType type, int offset);
+extern bool AnalyzeSampleIsValid(AnalyzeSampleContext *context, AnalyzeSampleType type);
 
 /* ----------------------------------------------------------------------------
  * Functions in tableamapi.c
