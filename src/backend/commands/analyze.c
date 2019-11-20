@@ -83,7 +83,6 @@ int			default_statistics_target = 100;
 static MemoryContext anl_context = NULL;
 static BufferAccessStrategy vac_strategy;
 
-
 static void do_analyze_rel(Relation onerel,
 						   VacuumParams *params, List *va_cols,
 						   AcquireSampleRowsFunc acquirefunc, BlockNumber relpages,
@@ -94,13 +93,10 @@ static void compute_index_stats(Relation onerel, double totalrows,
 								MemoryContext col_context);
 static VacAttrStats *examine_attribute(Relation onerel, int attnum,
 									   Node *index_expr);
-static int	acquire_sample_rows(Relation onerel, int elevel,
-								HeapTuple *rows, int targrows,
-								double *totalrows, double *totaldeadrows);
-static int	compare_rows(const void *a, const void *b);
-static int	acquire_inherited_sample_rows(Relation onerel, int elevel,
-										  HeapTuple *rows, int targrows,
-										  double *totalrows, double *totaldeadrows);
+static void	acquire_sample_rows(Relation onerel, int elevel,
+								AnalyzeSampleContext *context);
+static void	acquire_inherited_sample_rows(Relation onerel, int elevel,
+										  AnalyzeSampleContext *context);
 static void update_attstats(Oid relid, bool inh,
 							int natts, VacAttrStats **vacattrstats);
 static Datum std_fetch_func(VacAttrStatsP stats, int rownum, bool *isNull);
@@ -318,6 +314,7 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
+	AnalyzeSampleContext *sample_context;
 
 	if (inh)
 		ereport(elevel,
@@ -502,18 +499,21 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 	if (targrows < minrows)
 		targrows = minrows;
 
+	/* create context for acquiring sample rows */
+	sample_context = CreateAnalyzeSampleContext(onerel, va_cols, targrows,
+												vac_strategy);
+
 	/*
 	 * Acquire the sample rows
 	 */
-	rows = (HeapTuple *) palloc(targrows * sizeof(HeapTuple));
 	if (inh)
-		numrows = acquire_inherited_sample_rows(onerel, elevel,
-												rows, targrows,
-												&totalrows, &totaldeadrows);
+		acquire_inherited_sample_rows(onerel, elevel, sample_context);
 	else
-		numrows = (*acquirefunc) (onerel, elevel,
-								  rows, targrows,
-								  &totalrows, &totaldeadrows);
+		(*acquirefunc) (onerel, elevel, sample_context); 
+
+	/* Get the sample statistics */
+	AnalyzeGetSampleStats(sample_context, &numrows, &totalrows, &totaldeadrows);
+	rows = AnalyzeGetSampleRows(sample_context, ANALYZE_SAMPLE_DATA, 0);
 
 	/*
 	 * Compute the statistics.  Temporary results during the calculations for
@@ -592,7 +592,8 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 		 * not for relations representing inheritance trees.
 		 */
 		if (!inh)
-			BuildRelationExtStatistics(onerel, totalrows, numrows, rows,
+			BuildRelationExtStatistics(onerel, totalrows, numrows,
+									   rows,
 									   attr_cnt, vacattrstats);
 	}
 
@@ -689,6 +690,8 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 							RelationGetRelationName(onerel),
 							pg_rusage_show(&ru0))));
 	}
+
+	DestroyAnalyzeSampleContext(sample_context);
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
@@ -1018,26 +1021,26 @@ examine_attribute(Relation onerel, int attnum, Node *index_expr)
  * block.  The previous sampling method put too much credence in the row
  * density near the start of the table.
  */
-static int
+static void 
 acquire_sample_rows(Relation onerel, int elevel,
-					HeapTuple *rows, int targrows,
-					double *totalrows, double *totaldeadrows)
+					AnalyzeSampleContext *context)
 {
 	int			numrows = 0;	/* # rows now in reservoir */
+	int			targrows = context->targrows;
 	double		samplerows = 0; /* total # rows collected */
-	double		liverows = 0;	/* # live rows seen */
-	double		deadrows = 0;	/* # dead rows seen */
 	double		rowstoskip = -1;	/* -1 means not set yet */
+	double		totalrows = 0;
+	double		totaldeadrows = 0;
 	BlockNumber totalblocks;
 	TransactionId OldestXmin;
 	BlockSamplerData bs;
 	ReservoirStateData rstate;
-	TupleTableSlot *slot;
-	TableScanDesc scan;
 
 	Assert(targrows > 0);
 
-	totalblocks = RelationGetNumberOfBlocks(onerel);
+	table_scan_analyze_beginscan(onerel, context);
+
+	totalblocks = context->totalblocks;
 
 	/* Need a cutoff xmin for HeapTupleSatisfiesVacuum */
 	OldestXmin = GetOldestXmin(onerel, PROCARRAY_FLAGS_VACUUM);
@@ -1047,9 +1050,6 @@ acquire_sample_rows(Relation onerel, int elevel,
 	/* Prepare for sampling rows */
 	reservoir_init_selection_state(&rstate, targrows);
 
-	scan = table_beginscan_analyze(onerel);
-	slot = table_slot_create(onerel, NULL);
-
 	/* Outer loop over blocks to sample */
 	while (BlockSampler_HasMore(&bs))
 	{
@@ -1057,10 +1057,10 @@ acquire_sample_rows(Relation onerel, int elevel,
 
 		vacuum_delay_point();
 
-		if (!table_scan_analyze_next_block(scan, targblock, vac_strategy))
+		if (!table_scan_analyze_next_block(targblock, context))
 			continue;
 
-		while (table_scan_analyze_next_tuple(scan, OldestXmin, &liverows, &deadrows, slot))
+		while (table_scan_analyze_next_tuple(OldestXmin, context))
 		{
 			/*
 			 * The first targrows sample rows are simply copied into the
@@ -1076,8 +1076,8 @@ acquire_sample_rows(Relation onerel, int elevel,
 			 */
 			if (numrows < targrows)
 			{
-				rows[numrows] = ExecCopySlotHeapTuple(slot);
-				rows[numrows]->t_self = slot->tts_tid;
+				table_scan_analyze_sample_tuple(numrows, false, context);
+
 				numrows++;
 			}
 			else
@@ -1099,9 +1099,8 @@ acquire_sample_rows(Relation onerel, int elevel,
 					int			k = (int) (targrows * sampler_random_fract(rstate.randstate));
 
 					Assert(k >= 0 && k < targrows);
-					heap_freetuple(rows[k]);
-					rows[k] = ExecCopySlotHeapTuple(slot);
-					rows[k]->t_self = slot->tts_tid;
+
+					table_scan_analyze_sample_tuple(k, true, context);
 				}
 
 				rowstoskip -= 1;
@@ -1111,19 +1110,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 		}
 	}
 
-	ExecDropSingleTupleTableSlot(slot);
-	table_endscan(scan);
-
-	/*
-	 * If we didn't find as many tuples as we wanted then we're done. No sort
-	 * is needed, since they're already in order.
-	 *
-	 * Otherwise we need to sort the collected tuples by position
-	 * (itempointer). It's not worth worrying about corner cases where the
-	 * tuples are already sorted.
-	 */
-	if (numrows == targrows)
-		qsort((void *) rows, numrows, sizeof(HeapTuple), compare_rows);
+	table_scan_analyze_endscan(context);
 
 	/*
 	 * Estimate total numbers of live and dead rows in relation, extrapolating
@@ -1134,13 +1121,13 @@ acquire_sample_rows(Relation onerel, int elevel,
 	 */
 	if (bs.m > 0)
 	{
-		*totalrows = floor((liverows / bs.m) * totalblocks + 0.5);
-		*totaldeadrows = floor((deadrows / bs.m) * totalblocks + 0.5);
+		totalrows = floor((context->liverows / bs.m) * totalblocks + 0.5);
+		totaldeadrows = floor((context->deadrows / bs.m) * totalblocks + 0.5);
 	}
 	else
 	{
-		*totalrows = 0.0;
-		*totaldeadrows = 0.0;
+		totalrows = 0.0;
+		totaldeadrows = 0.0;
 	}
 
 	/*
@@ -1152,34 +1139,13 @@ acquire_sample_rows(Relation onerel, int elevel,
 					"%d rows in sample, %.0f estimated total rows",
 					RelationGetRelationName(onerel),
 					bs.m, totalblocks,
-					liverows, deadrows,
-					numrows, *totalrows)));
+					context->liverows,
+					context->deadrows,
+					numrows, totalrows)));
 
-	return numrows;
-}
-
-/*
- * qsort comparator for sorting rows[] array
- */
-static int
-compare_rows(const void *a, const void *b)
-{
-	HeapTuple	ha = *(const HeapTuple *) a;
-	HeapTuple	hb = *(const HeapTuple *) b;
-	BlockNumber ba = ItemPointerGetBlockNumber(&ha->t_self);
-	OffsetNumber oa = ItemPointerGetOffsetNumber(&ha->t_self);
-	BlockNumber bb = ItemPointerGetBlockNumber(&hb->t_self);
-	OffsetNumber ob = ItemPointerGetOffsetNumber(&hb->t_self);
-
-	if (ba < bb)
-		return -1;
-	if (ba > bb)
-		return 1;
-	if (oa < ob)
-		return -1;
-	if (oa > ob)
-		return 1;
-	return 0;
+	context->totalrows += totalrows;
+	context->totaldeadrows += totaldeadrows;
+	context->totalsampledrows += numrows;
 }
 
 
@@ -1191,18 +1157,16 @@ compare_rows(const void *a, const void *b)
  * We fail and return zero if there are no inheritance children, or if all
  * children are foreign tables that don't support ANALYZE.
  */
-static int
+static void
 acquire_inherited_sample_rows(Relation onerel, int elevel,
-							  HeapTuple *rows, int targrows,
-							  double *totalrows, double *totaldeadrows)
+							  AnalyzeSampleContext *context)
 {
 	List	   *tableOIDs;
 	Relation   *rels;
 	AcquireSampleRowsFunc *acquirefuncs;
 	double	   *relblocks;
 	double		totalblocks;
-	int			numrows,
-				nrels,
+	int			nrels,
 				i;
 	ListCell   *lc;
 	bool		has_child;
@@ -1230,7 +1194,7 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 				(errmsg("skipping analyze of \"%s.%s\" inheritance tree --- this inheritance tree contains no child tables",
 						get_namespace_name(RelationGetNamespace(onerel)),
 						RelationGetRelationName(onerel))));
-		return 0;
+		return;
 	}
 
 	/*
@@ -1328,7 +1292,7 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 				(errmsg("skipping analyze of \"%s.%s\" inheritance tree --- this inheritance tree contains no analyzable child tables",
 						get_namespace_name(RelationGetNamespace(onerel)),
 						RelationGetRelationName(onerel))));
-		return 0;
+		return;
 	}
 
 	/*
@@ -1337,9 +1301,6 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 	 * rels have radically different free-space percentages, but it's not
 	 * clear that it's worth working harder.)
 	 */
-	numrows = 0;
-	*totalrows = 0;
-	*totaldeadrows = 0;
 	for (i = 0; i < nrels; i++)
 	{
 		Relation	childrel = rels[i];
@@ -1350,49 +1311,15 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 		{
 			int			childtargrows;
 
-			childtargrows = (int) rint(targrows * childblocks / totalblocks);
+			childtargrows = (int) rint(context->totaltargrows * childblocks / totalblocks);
 			/* Make sure we don't overrun due to roundoff error */
-			childtargrows = Min(childtargrows, targrows - numrows);
+			childtargrows = Min(childtargrows, context->totaltargrows - context->totalsampledrows);
 			if (childtargrows > 0)
 			{
-				int			childrows;
-				double		trows,
-							tdrows;
+				InitAnalyzeSampleContextForChild(context, childrel, childtargrows);
 
 				/* Fetch a random sample of the child's rows */
-				childrows = (*acquirefunc) (childrel, elevel,
-											rows + numrows, childtargrows,
-											&trows, &tdrows);
-
-				/* We may need to convert from child's rowtype to parent's */
-				if (childrows > 0 &&
-					!equalTupleDescs(RelationGetDescr(childrel),
-									 RelationGetDescr(onerel)))
-				{
-					TupleConversionMap *map;
-
-					map = convert_tuples_by_name(RelationGetDescr(childrel),
-												 RelationGetDescr(onerel));
-					if (map != NULL)
-					{
-						int			j;
-
-						for (j = 0; j < childrows; j++)
-						{
-							HeapTuple	newtup;
-
-							newtup = execute_attr_map_tuple(rows[numrows + j], map);
-							heap_freetuple(rows[numrows + j]);
-							rows[numrows + j] = newtup;
-						}
-						free_conversion_map(map);
-					}
-				}
-
-				/* And add to counts */
-				numrows += childrows;
-				*totalrows += trows;
-				*totaldeadrows += tdrows;
+				(*acquirefunc) (childrel, elevel, context);
 			}
 		}
 
@@ -1402,8 +1329,6 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 		 */
 		table_close(childrel, NoLock);
 	}
-
-	return numrows;
 }
 
 

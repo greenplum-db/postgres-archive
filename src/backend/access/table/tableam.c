@@ -23,7 +23,9 @@
 
 #include "access/heapam.h"		/* for ss_* */
 #include "access/tableam.h"
+#include "access/tupconvert.h"
 #include "access/xact.h"
+#include "catalog/pg_type.h"
 #include "optimizer/plancat.h"
 #include "storage/bufmgr.h"
 #include "storage/shmem.h"
@@ -649,4 +651,211 @@ table_block_relation_estimate_size(Relation rel, int32 *attr_widths,
 		*allvisfrac = 1;
 	else
 		*allvisfrac = (double) relallvisible / curpages;
+}
+
+/* Create the analyze sample context to acquire sample rows */
+AnalyzeSampleContext *
+CreateAnalyzeSampleContext(Relation onerel,
+						   List *anl_cols,
+						   int totaltargrows,
+						   BufferAccessStrategy strategy)
+{
+	AnalyzeSampleContext *context;
+	
+	context = (AnalyzeSampleContext *) palloc(sizeof(AnalyzeSampleContext));
+	context->parent = onerel;
+	context->anl_cols = anl_cols;
+	context->bstrategy = strategy;
+	context->totaltargrows = totaltargrows;
+	context->targrows = totaltargrows;
+	context->scan = NULL;
+	context->totalblocks = 0;
+	context->totalrows = 0;
+	context->totaldeadrows = 0;
+	context->totalsampledrows = 0;
+	context->liverows = 0;
+	context->deadrows = 0;
+	context->ordered = false;
+	context->tup_convert_map = NULL;
+
+	/* empty all sample type */
+	memset(context->sample_slots, 0, MAX_ANALYZE_SAMPLE * sizeof(TupleTableSlot *));
+	memset(context->sample_rows, 0, MAX_ANALYZE_SAMPLE * sizeof(HeapTuple *));
+
+	return context;
+}
+
+/* Destroy analyze sample context */
+void
+DestroyAnalyzeSampleContext(AnalyzeSampleContext *context)
+{
+	for (int i = 0; i < MAX_ANALYZE_SAMPLE; i++)
+	{
+		TupleTableSlot *slot = context->sample_slots[i];
+		if (slot)
+			ExecDropSingleTupleTableSlot(slot);
+	}
+}
+
+/* 
+ * To acquire sample rows from an inherited table, all child
+ * relations use the same analyze sample context, this function
+ * must be called before starting analyze a new child relation.
+ */
+void
+InitAnalyzeSampleContextForChild(AnalyzeSampleContext *context,
+								 Relation child,
+								 int childtargrows)
+{
+	/* Set targrows to childtargrows */
+	context->targrows = childtargrows;
+
+	/* We may need to convert from child's rowtype to parent's */
+	if (!equalTupleDescs(RelationGetDescr(child),
+						 RelationGetDescr(context->parent)))
+	{
+		if (context->tup_convert_map)
+			free_conversion_map(context->tup_convert_map);
+		/* Create a convert map so it can be used when recording sample rows */
+		context->tup_convert_map =
+			convert_tuples_by_name(RelationGetDescr(child),
+								   RelationGetDescr(context->parent));
+
+		/* We also cannot use previous sample slot anymore */
+		if (context->sample_slots[ANALYZE_SAMPLE_DATA])
+		{
+			ExecDropSingleTupleTableSlot(context->sample_slots[ANALYZE_SAMPLE_DATA]);
+			context->sample_slots[ANALYZE_SAMPLE_DATA] = NULL;
+		}
+	}
+}
+
+void
+AnalyzeGetSampleStats(AnalyzeSampleContext *context,
+					  int *totalsampledrows,
+					  double *totalrows,
+					  double *totaldeadrows)
+{
+	if (totalsampledrows)
+		*totalsampledrows = context->totalsampledrows;
+	if (totalrows)
+		*totalrows = context->totalrows;
+	if (*totaldeadrows)
+		*totaldeadrows = context->totaldeadrows;
+}
+
+
+/* 
+ * Get or initialize a sample slot to hold sample tuple, normally
+ * the tuple in the slot will be copied to the sample_rows[type]
+ * by AnalyzeRecordSampleRow().
+ */
+TupleTableSlot *
+AnalyzeGetSampleSlot(AnalyzeSampleContext *context,
+					 Relation onerel,
+					 AnalyzeSampleType type)
+{
+	TupleDesc tupdesc;
+	int attr_cnt = onerel->rd_att->natts;
+
+	if (context->sample_slots[type])
+		return context->sample_slots[type]; 
+
+	switch (type)
+	{
+		case ANALYZE_SAMPLE_DATA:
+			tupdesc = RelationGetDescr(onerel);
+			break;
+		case ANALYZE_SAMPLE_DISKSIZE:
+			tupdesc = CreateTemplateTupleDesc(attr_cnt);
+			for (int i = 1; i <= attr_cnt; i++)
+				TupleDescInitEntry(tupdesc, i, "", FLOAT8OID, -1, 0);
+			break;
+		default:
+			elog(ERROR, "unknown analyze sample type");
+	}
+
+	context->sample_slots[type] =
+		MakeSingleTupleTableSlot(tupdesc, table_slot_callbacks(onerel));
+	return context->sample_slots[type];
+}
+
+HeapTuple *
+AnalyzeGetSampleRows(AnalyzeSampleContext *context,
+					 AnalyzeSampleType type,
+					 int offset)
+{
+	Assert(offset < context->totaltargrows);
+	if (!context->sample_rows[type])
+		context->sample_rows[type] =
+			(HeapTuple *) palloc(context->totaltargrows * sizeof(HeapTuple));
+
+	return context->sample_rows[type] + offset;
+}
+
+/*
+ * Record a sample tuple into sample_rows[type].
+ * 
+ * sample_tuple:
+ * 		Input sample tuple. Sometimes, callers has already
+ * 		formed sample tuple in its memory context, we can
+ * 		record it directly. 
+ * sample_slot: 
+ * 		Slot which contains the sample tuple. We need to copy
+ * 		the sample tuple and then record it.
+ * pos:
+ * 		The postion in the sample_rows[type].
+ * replace:
+ * 		Replace the old sample tuple in the specified position.
+ * withtid:
+ * 		Set the tid of sample tuple, this is only valid when
+ * 		sample_slot is set.
+ *
+ * We prefer to use sample_slot if both sample_tuple and
+ * sample_slot are set, sample_slot is the most common case. 
+ */
+void
+AnalyzeRecordSampleRow(AnalyzeSampleContext *context,
+					   TupleTableSlot *sample_slot,
+					   HeapTuple sample_tuple,
+					   AnalyzeSampleType type,
+					   int pos,
+					   bool replace,
+					   bool withtid)
+{
+	HeapTuple tuple;
+	HeapTuple *rows;
+
+	rows = AnalyzeGetSampleRows(context, type, context->totalsampledrows);
+
+	/* We need to free the old tuple if replace is true */
+	if (replace)
+		heap_freetuple(rows[pos]);
+
+	Assert(sample_slot || sample_tuple);
+	if (sample_slot)
+		tuple = ExecCopySlotHeapTuple(sample_slot);
+	else
+		tuple = sample_tuple;
+
+	/* We may need to convert from child's rowtype to parent's */
+	if (context->tup_convert_map != NULL)
+	{
+		HeapTuple	newtup;
+		newtup = execute_attr_map_tuple(tuple, context->tup_convert_map);
+		heap_freetuple(tuple);
+		tuple = newtup;
+	}
+
+	if (withtid && sample_slot)
+		tuple->t_self = sample_slot->tts_tid;
+
+	/* store the tuple to right position */
+	rows[pos] = tuple;
+}
+
+bool
+AnalyzeSampleIsValid(AnalyzeSampleContext *context, AnalyzeSampleType type)
+{
+	return context->sample_rows[type] != NULL;
 }

@@ -19,6 +19,7 @@
 #include "access/reloptions.h"
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "access/tableam.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_foreign_table.h"
 #include "commands/copy.h"
@@ -157,10 +158,8 @@ static void estimate_size(PlannerInfo *root, RelOptInfo *baserel,
 static void estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
 						   FileFdwPlanState *fdw_private,
 						   Cost *startup_cost, Cost *total_cost);
-static int	file_acquire_sample_rows(Relation onerel, int elevel,
-									 HeapTuple *rows, int targrows,
-									 double *totalrows, double *totaldeadrows);
-
+static void file_acquire_sample_rows(Relation onerel, int elevel,
+									 AnalyzeSampleContext *context);
 
 /*
  * Foreign-data wrapper handler function: return a struct with pointers
@@ -1091,14 +1090,16 @@ estimate_costs(PlannerInfo *root, RelOptInfo *baserel,
  * may be meaningless, but it's OK because we don't use the estimates
  * currently (the planner only pays attention to correlation for indexscans).
  */
-static int
+static void
 file_acquire_sample_rows(Relation onerel, int elevel,
-						 HeapTuple *rows, int targrows,
-						 double *totalrows, double *totaldeadrows)
+						 AnalyzeSampleContext *context)
 {
 	int			numrows = 0;
+	int			targrows = 0;
+	double		totalrows = 0;
 	double		rowstoskip = -1;	/* -1 means not set yet */
 	ReservoirStateData rstate;
+	HeapTuple	tuple;
 	TupleDesc	tupDesc;
 	Datum	   *values;
 	bool	   *nulls;
@@ -1110,6 +1111,8 @@ file_acquire_sample_rows(Relation onerel, int elevel,
 	ErrorContextCallback errcallback;
 	MemoryContext oldcontext = CurrentMemoryContext;
 	MemoryContext tupcontext;
+
+	targrows = context->targrows;
 
 	Assert(onerel);
 	Assert(targrows > 0);
@@ -1144,8 +1147,6 @@ file_acquire_sample_rows(Relation onerel, int elevel,
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
 
-	*totalrows = 0;
-	*totaldeadrows = 0;
 	for (;;)
 	{
 		/* Check for user-requested abort or sleep */
@@ -1170,7 +1171,8 @@ file_acquire_sample_rows(Relation onerel, int elevel,
 		 */
 		if (numrows < targrows)
 		{
-			rows[numrows++] = heap_form_tuple(tupDesc, values, nulls);
+			tuple = heap_form_tuple(tupDesc, values, nulls);
+			AnalyzeRecordSampleRow(context, NULL, tuple, ANALYZE_SAMPLE_DATA, numrows++, false /* replace */, false);
 		}
 		else
 		{
@@ -1180,7 +1182,7 @@ file_acquire_sample_rows(Relation onerel, int elevel,
 			 * not-yet-incremented value of totalrows as t.
 			 */
 			if (rowstoskip < 0)
-				rowstoskip = reservoir_get_next_S(&rstate, *totalrows, targrows);
+				rowstoskip = reservoir_get_next_S(&rstate, totalrows, targrows);
 
 			if (rowstoskip <= 0)
 			{
@@ -1191,14 +1193,14 @@ file_acquire_sample_rows(Relation onerel, int elevel,
 				int			k = (int) (targrows * sampler_random_fract(rstate.randstate));
 
 				Assert(k >= 0 && k < targrows);
-				heap_freetuple(rows[k]);
-				rows[k] = heap_form_tuple(tupDesc, values, nulls);
+				tuple = heap_form_tuple(tupDesc, values, nulls);
+				AnalyzeRecordSampleRow(context, NULL, tuple, ANALYZE_SAMPLE_DATA, k, true /* replace */, false);
 			}
 
 			rowstoskip -= 1;
 		}
 
-		*totalrows += 1;
+		totalrows += 1;
 	}
 
 	/* Remove error callback. */
@@ -1219,7 +1221,8 @@ file_acquire_sample_rows(Relation onerel, int elevel,
 			(errmsg("\"%s\": file contains %.0f rows; "
 					"%d rows in sample",
 					RelationGetRelationName(onerel),
-					*totalrows, numrows)));
+					totalrows, numrows)));
 
-	return numrows;
+	context->totalrows += totalrows;
+	context->totalsampledrows += numrows;
 }

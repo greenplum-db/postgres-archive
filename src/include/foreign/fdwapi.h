@@ -18,6 +18,7 @@
 
 /* To avoid including explain.h here, reference ExplainState thus: */
 struct ExplainState;
+struct AnalyzeSampleContext;
 
 
 /*
@@ -139,10 +140,8 @@ typedef void (*ExplainForeignModify_function) (ModifyTableState *mtstate,
 typedef void (*ExplainDirectModify_function) (ForeignScanState *node,
 											  struct ExplainState *es);
 
-typedef int (*AcquireSampleRowsFunc) (Relation relation, int elevel,
-									  HeapTuple *rows, int targrows,
-									  double *totalrows,
-									  double *totaldeadrows);
+typedef void (*AcquireSampleRowsFunc) (Relation relation, int elevel,
+									   struct AnalyzeSampleContext *context);
 
 typedef bool (*AnalyzeForeignTable_function) (Relation relation,
 											  AcquireSampleRowsFunc *func,
