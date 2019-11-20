@@ -36,6 +36,9 @@ CATALOG(pg_statistic,2619,StatisticRelationId)
 	/* the fraction of the column's entries that are NULL: */
 	float4		stanullfrac;
 
+	/* the fraction of the column's disksize of all columns */
+	float4		stadiskfrac;
+
 	/*
 	 * stawidth is the average width in bytes of non-null entries.  For
 	 * fixed-width datatypes this is of course the same as the typlen, but for

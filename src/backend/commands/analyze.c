@@ -87,6 +87,9 @@ static void do_analyze_rel(Relation onerel,
 						   VacuumParams *params, List *va_cols,
 						   AcquireSampleRowsFunc acquirefunc, BlockNumber relpages,
 						   bool inh, bool in_outer_xact, int elevel);
+static void compute_disk_stats(VacAttrStats **stats, int natts,
+							   TupleDesc desc, HeapTuple *rows,
+							   int numrows);
 static void compute_index_stats(Relation onerel, double totalrows,
 								AnlIndexData *indexdata, int nindexes,
 								HeapTuple *rows, int numrows,
@@ -560,6 +563,19 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 			MemoryContextResetAndDeleteChildren(col_context);
 		}
 
+		/* compute disksize ratio stats if any */
+		if (AnalyzeSampleIsValid(sample_context, ANALYZE_SAMPLE_DISKSIZE))
+		{
+			TupleTableSlot *slot =
+				AnalyzeGetSampleSlot(sample_context, onerel, ANALYZE_SAMPLE_DISKSIZE);
+			HeapTuple *rows =
+				AnalyzeGetSampleRows(sample_context, ANALYZE_SAMPLE_DISKSIZE, 0);
+
+			compute_disk_stats(vacattrstats, attr_cnt,
+							   slot->tts_tupleDescriptor,
+							   rows, numrows);
+		}
+
 		if (hasindex)
 			compute_index_stats(onerel, totalrows,
 								indexdata, nindexes,
@@ -703,6 +719,41 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 	MemoryContextSwitchTo(caller_context);
 	MemoryContextDelete(anl_context);
 	anl_context = NULL;
+}
+
+static void
+compute_disk_stats(VacAttrStats **stats, int natts,
+				   TupleDesc desc, HeapTuple *rows,
+				   int numrows)
+{
+	int		i, j;
+	float8	attr_size = 0;
+	float8	total = 0;
+	bool	isNull;
+
+	for (i = 0; i < numrows; i++)
+	{
+		HeapTuple tup = rows[i];
+
+		for (j = 0; j < natts; j++)
+		{
+			VacAttrStats *vac = stats[j];
+			Datum dat = heap_getattr(tup, j + 1, desc, &isNull);
+
+			if (!isNull)
+			{
+				attr_size = DatumGetFloat8(dat);
+				vac->disksize += attr_size;
+				total += attr_size;
+			}
+		}
+	}
+
+	for (j = 0; j < natts; j++)
+	{
+		VacAttrStats *vac = stats[j];
+		vac->stadiskfrac = vac->disksize / total;
+	}
 }
 
 /*
@@ -1394,6 +1445,7 @@ update_attstats(Oid relid, bool inh, int natts, VacAttrStats **vacattrstats)
 		values[Anum_pg_statistic_staattnum - 1] = Int16GetDatum(stats->attr->attnum);
 		values[Anum_pg_statistic_stainherit - 1] = BoolGetDatum(inh);
 		values[Anum_pg_statistic_stanullfrac - 1] = Float4GetDatum(stats->stanullfrac);
+		values[Anum_pg_statistic_stadiskfrac - 1] = Float4GetDatum(stats->stadiskfrac);
 		values[Anum_pg_statistic_stawidth - 1] = Int32GetDatum(stats->stawidth);
 		values[Anum_pg_statistic_stadistinct - 1] = Float4GetDatum(stats->stadistinct);
 		i = Anum_pg_statistic_stakind1 - 1;
