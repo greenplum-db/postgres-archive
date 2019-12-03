@@ -218,7 +218,7 @@ typedef struct XLogRecordDataHeaderLong
  * need a handful of block references, but there are a few exceptions that
  * need more.
  */
-#define XLR_MAX_BLOCK_ID			32
+#define XLR_MAX_BLOCK_ID			199
 
 #define XLR_BLOCK_ID_DATA_SHORT		255
 #define XLR_BLOCK_ID_DATA_LONG		254

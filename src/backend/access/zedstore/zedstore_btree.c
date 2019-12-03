@@ -788,7 +788,7 @@ zs_new_split_stack_entry(Buffer buf, Page page)
 	return stack;
 }
 
-#define MAX_BLOCKS_IN_REWRITE		100
+#define MAX_BLOCKS_IN_REWRITE		199
 
 /*
  * Apply all the changes represented by a list of zs_split_stack
