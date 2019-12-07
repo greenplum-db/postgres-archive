@@ -1881,7 +1881,6 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 	 */
 	while (zedstoream_getnextslot(scan, ForwardScanDirection, slot))
 	{
-		HeapTuple	heapTuple;
 		ZSUndoSlotVisibility *visi_info;
 
 		if (numblocks != InvalidBlockNumber &&
@@ -1933,11 +1932,8 @@ zedstoream_index_build_range_scan(Relation baseRelation,
 					   isnull);
 
 		/* Call the AM's callback routine to process the tuple */
-		heapTuple = ExecCopySlotHeapTuple(slot);
-		heapTuple->t_self = slot->tts_tid;
-		callback(indexRelation, heapTuple, values, isnull, tupleIsAlive,
+		callback(indexRelation, &slot->tts_tid, values, isnull, tupleIsAlive,
 				 callback_state);
-		pfree(heapTuple);
 	}
 
 	table_endscan(scan);
