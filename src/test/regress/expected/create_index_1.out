@@ -1479,6 +1479,19 @@ primary key, btree, for table "public.cwi_test"
 DROP INDEX cwi_replaced_pkey;	-- Should fail; a constraint depends on it
 ERROR:  cannot drop index cwi_replaced_pkey because constraint cwi_replaced_pkey on table cwi_test requires it
 HINT:  You can drop constraint cwi_replaced_pkey on table cwi_test instead.
+-- Check that non-default index options are rejected
+CREATE UNIQUE INDEX cwi_uniq3_idx ON cwi_test(a desc);
+ALTER TABLE cwi_test ADD UNIQUE USING INDEX cwi_uniq3_idx;  -- fail
+ERROR:  index "cwi_uniq3_idx" column number 1 does not have default sorting behavior
+LINE 1: ALTER TABLE cwi_test ADD UNIQUE USING INDEX cwi_uniq3_idx;
+                                 ^
+DETAIL:  Cannot create a primary key or unique constraint using such an index.
+CREATE UNIQUE INDEX cwi_uniq4_idx ON cwi_test(b collate "POSIX");
+ALTER TABLE cwi_test ADD UNIQUE USING INDEX cwi_uniq4_idx;  -- fail
+ERROR:  index "cwi_uniq4_idx" column number 1 does not have default sorting behavior
+LINE 1: ALTER TABLE cwi_test ADD UNIQUE USING INDEX cwi_uniq4_idx;
+                                 ^
+DETAIL:  Cannot create a primary key or unique constraint using such an index.
 DROP TABLE cwi_test;
 -- ADD CONSTRAINT USING INDEX is forbidden on partitioned tables
 CREATE TABLE cwi_test(a int) PARTITION BY hash (a);
@@ -2439,8 +2452,17 @@ CREATE ROLE regress_reindexuser NOLOGIN;
 SET SESSION ROLE regress_reindexuser;
 REINDEX SCHEMA schema_to_reindex;
 ERROR:  must be owner of schema schema_to_reindex
+-- Permission failures with toast tables and indexes (pg_authid here)
+RESET ROLE;
+GRANT USAGE ON SCHEMA pg_toast TO regress_reindexuser;
+SET SESSION ROLE regress_reindexuser;
+REINDEX TABLE pg_toast.pg_toast_1260;
+ERROR:  must be owner of table pg_toast_1260
+REINDEX INDEX pg_toast.pg_toast_1260_index;
+ERROR:  must be owner of index pg_toast_1260_index
 -- Clean up
 RESET ROLE;
+REVOKE USAGE ON SCHEMA pg_toast FROM regress_reindexuser;
 DROP ROLE regress_reindexuser;
 DROP SCHEMA schema_to_reindex CASCADE;
 NOTICE:  drop cascades to 6 other objects
