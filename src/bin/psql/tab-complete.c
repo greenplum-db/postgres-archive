@@ -33,8 +33,9 @@
  */
 
 #include "postgres_fe.h"
-#include "tab-complete.h"
+
 #include "input.h"
+#include "tab-complete.h"
 
 /* If we don't have this, we might as well forget about the whole thing: */
 #ifdef USE_READLINE
@@ -43,10 +44,9 @@
 
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_class_d.h"
-
+#include "common.h"
 #include "libpq-fe.h"
 #include "pqexpbuffer.h"
-#include "common.h"
 #include "settings.h"
 #include "stringutils.h"
 
@@ -1797,13 +1797,38 @@ psql_completion(const char *text, int start, int end)
 		COMPLETE_WITH("TO");
 	/* ALTER VIEW <name> */
 	else if (Matches("ALTER", "VIEW", MatchAny))
-		COMPLETE_WITH("ALTER COLUMN", "OWNER TO", "RENAME TO",
+		COMPLETE_WITH("ALTER COLUMN", "OWNER TO", "RENAME",
 					  "SET SCHEMA");
+	/* ALTER VIEW xxx RENAME */
+	else if (Matches("ALTER", "VIEW", MatchAny, "RENAME"))
+		COMPLETE_WITH_ATTR(prev2_wd, " UNION SELECT 'COLUMN' UNION SELECT 'TO'");
+	else if (Matches("ALTER", "VIEW", MatchAny, "ALTER|RENAME", "COLUMN"))
+		COMPLETE_WITH_ATTR(prev3_wd, "");
+	/* ALTER VIEW xxx RENAME yyy */
+	else if (Matches("ALTER", "VIEW", MatchAny, "RENAME", MatchAnyExcept("TO")))
+		COMPLETE_WITH("TO");
+	/* ALTER VIEW xxx RENAME COLUMN yyy */
+	else if (Matches("ALTER", "VIEW", MatchAny, "RENAME", "COLUMN", MatchAnyExcept("TO")))
+		COMPLETE_WITH("TO");
+
 	/* ALTER MATERIALIZED VIEW <name> */
 	else if (Matches("ALTER", "MATERIALIZED", "VIEW", MatchAny))
-		COMPLETE_WITH("ALTER COLUMN", "OWNER TO", "RENAME TO",
-					  "SET SCHEMA");
-
+		COMPLETE_WITH("ALTER COLUMN", "CLUSTER ON", "DEPENDS ON EXTENSION",
+					  "OWNER TO", "RENAME", "RESET (", "SET");
+	/* ALTER MATERIALIZED VIEW xxx RENAME */
+	else if (Matches("ALTER", "MATERIALIZED", "VIEW", MatchAny, "RENAME"))
+		COMPLETE_WITH_ATTR(prev2_wd, " UNION SELECT 'COLUMN' UNION SELECT 'TO'");
+	else if (Matches("ALTER", "MATERIALIZED", "VIEW", MatchAny, "ALTER|RENAME", "COLUMN"))
+		COMPLETE_WITH_ATTR(prev3_wd, "");
+	/* ALTER MATERIALIZED VIEW xxx RENAME yyy */
+	else if (Matches("ALTER", "MATERIALIZED", "VIEW", MatchAny, "RENAME", MatchAnyExcept("TO")))
+		COMPLETE_WITH("TO");
+	/* ALTER MATERIALIZED VIEW xxx RENAME COLUMN yyy */
+	else if (Matches("ALTER", "MATERIALIZED", "VIEW", MatchAny, "RENAME", "COLUMN", MatchAnyExcept("TO")))
+		COMPLETE_WITH("TO");
+	/* ALTER MATERIALIZED VIEW xxx SET */
+	else if (Matches("ALTER", "MATERIALIZED", "VIEW", MatchAny, "SET"))
+		COMPLETE_WITH("(", "SCHEMA", "TABLESPACE", "WITHOUT CLUSTER");
 	/* ALTER POLICY <name> */
 	else if (Matches("ALTER", "POLICY"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_policies);
@@ -2844,6 +2869,10 @@ psql_completion(const char *text, int start, int end)
 		COMPLETE_WITH_FUNCTION_ARG(prev2_wd);
 	else if (Matches("DROP", "FOREIGN"))
 		COMPLETE_WITH("DATA WRAPPER", "TABLE");
+	else if (Matches("DROP", "DATABASE", MatchAny))
+		COMPLETE_WITH("WITH (");
+	else if (HeadMatches("DROP", "DATABASE") && (ends_with(prev_wd, '(')))
+		COMPLETE_WITH("FORCE");
 
 	/* DROP INDEX */
 	else if (Matches("DROP", "INDEX"))

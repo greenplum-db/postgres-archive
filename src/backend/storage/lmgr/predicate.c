@@ -2547,8 +2547,6 @@ PredicateLockPage(Relation relation, BlockNumber blkno, Snapshot snapshot)
 void
 PredicateLockTuple(Relation relation, HeapTuple tuple, Snapshot snapshot)
 {
-	TransactionId targetxmin;
-
 	if (!SerializationNeededForRead(relation, snapshot))
 		return;
 
@@ -2557,24 +2555,9 @@ PredicateLockTuple(Relation relation, HeapTuple tuple, Snapshot snapshot)
 	 */
 	if (relation->rd_index == NULL)
 	{
-		TransactionId myxid;
-
-		targetxmin = HeapTupleHeaderGetXmin(tuple->t_data);
-
-		myxid = GetTopTransactionIdIfAny();
-		if (TransactionIdIsValid(myxid))
-		{
-			if (TransactionIdFollowsOrEquals(targetxmin, TransactionXmin))
-			{
-				TransactionId xid = SubTransGetTopmostTransaction(targetxmin);
-
-				if (TransactionIdEquals(xid, myxid))
-				{
-					/* We wrote it; we already have a write lock. */
-					return;
-				}
-			}
-		}
+		/* If we wrote it; we already have a write lock. */
+		if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(tuple->t_data)))
+			return;
 	}
 
 	PredicateLockTID(relation, &(tuple->t_self), snapshot);

@@ -1143,6 +1143,8 @@ AC_SEARCH_LIBS(sched_yield, rt)
 AC_SEARCH_LIBS(gethostbyname_r, nsl)
 # Cygwin:
 AC_SEARCH_LIBS(shmget, cygipc)
+# *BSD:
+AC_SEARCH_LIBS(backtrace_symbols, execinfo)
 
 if test "$with_readline" = yes; then
   PGAC_CHECK_READLINE
@@ -1198,7 +1200,8 @@ if test "$with_openssl" = yes ; then
      AC_SEARCH_LIBS(CRYPTO_new_ex_data, [eay32 crypto], [], [AC_MSG_ERROR([library 'eay32' or 'crypto' is required for OpenSSL])])
      AC_SEARCH_LIBS(SSL_new, [ssleay32 ssl], [], [AC_MSG_ERROR([library 'ssleay32' or 'ssl' is required for OpenSSL])])
   fi
-  AC_CHECK_FUNCS([SSL_clear_options SSL_get_current_compression X509_get_signature_nid])
+  # Function introduced in OpenSSL 1.0.2.
+  AC_CHECK_FUNCS([X509_get_signature_nid])
   # Functions introduced in OpenSSL 1.1.0. We used to check for
   # OPENSSL_VERSION_NUMBER, but that didn't work with 1.1.0, because LibreSSL
   # defines OPENSSL_VERSION_NUMBER to claim version 2.0.0, even though it
@@ -1289,6 +1292,7 @@ AC_HEADER_STDBOOL
 AC_CHECK_HEADERS(m4_normalize([
 	atomic.h
 	copyfile.h
+	execinfo.h
 	fp_class.h
 	getopt.h
 	ieeefp.h
@@ -1492,7 +1496,6 @@ PGAC_STRUCT_SOCKADDR_STORAGE_MEMBERS
 PGAC_STRUCT_ADDRINFO
 AC_TYPE_INTPTR_T
 AC_TYPE_UINTPTR_T
-AC_TYPE_LONG_LONG_INT
 
 PGAC_TYPE_LOCALE_T
 
@@ -1610,6 +1613,13 @@ AC_CHECK_SIZEOF([bool], [],
 #include <stdbool.h>
 #endif])
 
+dnl We use <stdbool.h> if we have it and it declares type bool as having
+dnl size 1.  Otherwise, c.h will fall back to declaring bool as unsigned char.
+if test "$ac_cv_header_stdbool_h" = yes -a "$ac_cv_sizeof_bool" = 1; then
+  AC_DEFINE([PG_USE_STDBOOL], 1,
+            [Define to 1 to use <stdbool.h> to define type bool.])
+fi
+
 
 ##
 ## Functions, global variables
@@ -1628,6 +1638,7 @@ LIBS_including_readline="$LIBS"
 LIBS=`echo "$LIBS" | sed -e 's/-ledit//g' -e 's/-lreadline//g'`
 
 AC_CHECK_FUNCS(m4_normalize([
+	backtrace_symbols
 	cbrt
 	clock_gettime
 	copyfile
@@ -1949,39 +1960,6 @@ PGAC_C_BUILTIN_OP_OVERFLOW
 AC_CHECK_SIZEOF([void *])
 AC_CHECK_SIZEOF([size_t])
 AC_CHECK_SIZEOF([long])
-
-# Decide whether float4 is passed by value: user-selectable, enabled by default
-AC_MSG_CHECKING([whether to build with float4 passed by value])
-PGAC_ARG_BOOL(enable, float4-byval, yes, [disable float4 passed by value],
-              [AC_DEFINE([USE_FLOAT4_BYVAL], 1,
-                         [Define to 1 if you want float4 values to be passed by value. (--enable-float4-byval)])
-               float4passbyval=true],
-              [float4passbyval=false])
-AC_MSG_RESULT([$enable_float4_byval])
-AC_DEFINE_UNQUOTED([FLOAT4PASSBYVAL], [$float4passbyval], [float4 values are passed by value if 'true', by reference if 'false'])
-
-# Decide whether float8 is passed by value.
-# Note: this setting also controls int8 and related types such as timestamp.
-# If sizeof(Datum) >= 8, this is user-selectable, enabled by default.
-# If not, trying to select it is an error.
-AC_MSG_CHECKING([whether to build with float8 passed by value])
-if test $ac_cv_sizeof_void_p -ge 8 ; then
-  PGAC_ARG_BOOL(enable, float8-byval, yes, [disable float8 passed by value])
-else
-  PGAC_ARG_BOOL(enable, float8-byval, no, [disable float8 passed by value])
-  if test "$enable_float8_byval" = yes ; then
-    AC_MSG_ERROR([--enable-float8-byval is not supported on 32-bit platforms.])
-  fi
-fi
-if test "$enable_float8_byval" = yes ; then
-  AC_DEFINE([USE_FLOAT8_BYVAL], 1,
-            [Define to 1 if you want float8, int8, etc values to be passed by value. (--enable-float8-byval)])
-  float8passbyval=true
-else
-  float8passbyval=false
-fi
-AC_MSG_RESULT([$enable_float8_byval])
-AC_DEFINE_UNQUOTED([FLOAT8PASSBYVAL], [$float8passbyval], [float8, int8, and related values are passed by value if 'true', by reference if 'false'])
 
 # Determine memory alignment requirements for the basic C data types.
 

@@ -18,6 +18,7 @@
 #include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
 #include "libpq/pqformat.h"
+#include "mb/pg_wchar.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/supportnodes.h"
 #include "utils/array.h"
@@ -26,8 +27,6 @@
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
 #include "utils/varlena.h"
-#include "mb/pg_wchar.h"
-
 
 /* common code for bpchartypmodin and varchartypmodin */
 static int32
@@ -784,6 +783,8 @@ bpcharne(PG_FUNCTION_ARGS)
 				len2;
 	bool		result;
 	Oid			collid = PG_GET_COLLATION();
+
+	check_collation_set(collid);
 
 	len1 = bcTruelen(arg1);
 	len2 = bcTruelen(arg2);

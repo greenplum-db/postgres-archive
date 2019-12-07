@@ -112,7 +112,7 @@
     <itemizedlist spacing="compact">
      <listitem>
       <para>
-       <literal>user</literal> and <literal>password</literal> (specify these
+       <literal>user</literal>, <literal>password</literal> and <literal>sslpassword</literal> (specify these
        in a user mapping, instead)
       </para>
      </listitem>
@@ -482,6 +482,12 @@
    isolation level, but it might be surprising for a <literal>READ
    COMMITTED</literal> local transaction.  A future
    <productname>PostgreSQL</productname> release might modify these rules.
+  </para>
+
+  <para>
+   Note that it is currently not supported by
+   <filename>postgres_fdw</filename> to prepare the remote transaction for
+   two-phase commit.
   </para>
  </sect2>
 

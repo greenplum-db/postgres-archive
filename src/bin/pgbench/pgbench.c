@@ -59,6 +59,7 @@
 
 #include "common/int.h"
 #include "common/logging.h"
+#include "fe_utils/cancel.h"
 #include "fe_utils/conditional.h"
 #include "getopt_long.h"
 #include "libpq-fe.h"
@@ -132,6 +133,7 @@ static int	pthread_join(pthread_t th, void **thread_return);
  * some configurable parameters */
 
 #define DEFAULT_INIT_STEPS "dtgvp"	/* default -I setting */
+#define ALL_INIT_STEPS "dtgGvpf"	/* all possible steps */
 
 #define LOG_STEP_SECONDS	5	/* seconds between log messages */
 #define DEFAULT_NXACTS	10		/* default nxacts */
@@ -627,7 +629,7 @@ usage(void)
 		   "  %s [OPTION]... [DBNAME]\n"
 		   "\nInitialization options:\n"
 		   "  -i, --initialize         invokes initialization mode\n"
-		   "  -I, --init-steps=[dtgvpf]+ (default \"dtgvp\")\n"
+		   "  -I, --init-steps=[" ALL_INIT_STEPS "]+ (default \"" DEFAULT_INIT_STEPS "\")\n"
 		   "                           run selected initialization steps\n"
 		   "  -F, --fillfactor=NUM     set fill factor\n"
 		   "  -n, --no-vacuum          do not run VACUUM during initialization\n"
@@ -1674,9 +1676,9 @@ coerceToInt(PgBenchValue *pval, int64 *ival)
 	}
 	else if (pval->type == PGBT_DOUBLE)
 	{
-		double		dval = pval->u.dval;
+		double		dval = rint(pval->u.dval);
 
-		if (dval < PG_INT64_MIN || PG_INT64_MAX < dval)
+		if (isnan(dval) || !FLOAT8_FITS_IN_INT64(dval))
 		{
 			fprintf(stderr, "double to int overflow for %f\n", dval);
 			return false;
@@ -3803,10 +3805,23 @@ append_fillfactor(char *opts, int len)
 }
 
 /*
- * Fill the standard tables with some data
+ * Truncate away any old data, in one command in case there are foreign keys
  */
 static void
-initGenerateData(PGconn *con)
+initTruncateTables(PGconn *con)
+{
+	executeStatement(con, "truncate table "
+					 "pgbench_accounts, "
+					 "pgbench_branches, "
+					 "pgbench_history, "
+					 "pgbench_tellers");
+}
+
+/*
+ * Fill the standard tables with some data generated and sent from the client
+ */
+static void
+initGenerateDataClientSide(PGconn *con)
 {
 	char		sql[256];
 	PGresult   *res;
@@ -3820,7 +3835,10 @@ initGenerateData(PGconn *con)
 				remaining_sec;
 	int			log_interval = 1;
 
-	fprintf(stderr, "generating data...\n");
+	/* Stay on the same line if reporting to a terminal */
+	char		eol = isatty(fileno(stderr)) ? '\r' : '\n';
+
+	fprintf(stderr, "generating data (client-side)...\n");
 
 	/*
 	 * we do all of this in one transaction to enable the backend's
@@ -3828,15 +3846,8 @@ initGenerateData(PGconn *con)
 	 */
 	executeStatement(con, "begin");
 
-	/*
-	 * truncate away any old data, in one command in case there are foreign
-	 * keys
-	 */
-	executeStatement(con, "truncate table "
-					 "pgbench_accounts, "
-					 "pgbench_branches, "
-					 "pgbench_history, "
-					 "pgbench_tellers");
+	/* truncate away any old data */
+	initTruncateTables(con);
 
 	/*
 	 * fill branches, tellers, accounts in that order in case foreign keys
@@ -3887,6 +3898,9 @@ initGenerateData(PGconn *con)
 			exit(1);
 		}
 
+		if (CancelRequested)
+			break;
+
 		/*
 		 * If we want to stick with the original logging, print a message each
 		 * 100k inserted rows.
@@ -3899,10 +3913,10 @@ initGenerateData(PGconn *con)
 			elapsed_sec = INSTR_TIME_GET_DOUBLE(diff);
 			remaining_sec = ((double) scale * naccounts - j) * elapsed_sec / j;
 
-			fprintf(stderr, INT64_FORMAT " of " INT64_FORMAT " tuples (%d%%) done (elapsed %.2f s, remaining %.2f s)\n",
+			fprintf(stderr, INT64_FORMAT " of " INT64_FORMAT " tuples (%d%%) done (elapsed %.2f s, remaining %.2f s)%c",
 					j, (int64) naccounts * scale,
 					(int) (((int64) j * 100) / (naccounts * (int64) scale)),
-					elapsed_sec, remaining_sec);
+					elapsed_sec, remaining_sec, eol);
 		}
 		/* let's not call the timing for each row, but only each 100 rows */
 		else if (use_quiet && (j % 100 == 0))
@@ -3916,16 +3930,19 @@ initGenerateData(PGconn *con)
 			/* have we reached the next interval (or end)? */
 			if ((j == scale * naccounts) || (elapsed_sec >= log_interval * LOG_STEP_SECONDS))
 			{
-				fprintf(stderr, INT64_FORMAT " of " INT64_FORMAT " tuples (%d%%) done (elapsed %.2f s, remaining %.2f s)\n",
+				fprintf(stderr, INT64_FORMAT " of " INT64_FORMAT " tuples (%d%%) done (elapsed %.2f s, remaining %.2f s)%c",
 						j, (int64) naccounts * scale,
-						(int) (((int64) j * 100) / (naccounts * (int64) scale)), elapsed_sec, remaining_sec);
+						(int) (((int64) j * 100) / (naccounts * (int64) scale)), elapsed_sec, remaining_sec, eol);
 
 				/* skip to the next interval */
 				log_interval = (int) ceil(elapsed_sec / LOG_STEP_SECONDS);
 			}
 		}
-
 	}
+
+	if (eol != '\n')
+		fputc('\n', stderr);	/* Need to move to next line */
+
 	if (PQputline(con, "\\.\n"))
 	{
 		fprintf(stderr, "very last PQputline failed\n");
@@ -3936,6 +3953,51 @@ initGenerateData(PGconn *con)
 		fprintf(stderr, "PQendcopy failed\n");
 		exit(1);
 	}
+
+	executeStatement(con, "commit");
+}
+
+/*
+ * Fill the standard tables with some data generated on the server
+ *
+ * As already the case with the client-side data generation, the filler
+ * column defaults to NULL in pgbench_branches and pgbench_tellers,
+ * and is a blank-padded string in pgbench_accounts.
+ */
+static void
+initGenerateDataServerSide(PGconn *con)
+{
+	char		sql[256];
+
+	fprintf(stderr, "generating data (server-side)...\n");
+
+	/*
+	 * we do all of this in one transaction to enable the backend's
+	 * data-loading optimizations
+	 */
+	executeStatement(con, "begin");
+
+	/* truncate away any old data */
+	initTruncateTables(con);
+
+	snprintf(sql, sizeof(sql),
+			 "insert into pgbench_branches(bid,bbalance) "
+			 "select bid, 0 "
+			 "from generate_series(1, %d) as bid", nbranches * scale);
+	executeStatement(con, sql);
+
+	snprintf(sql, sizeof(sql),
+			 "insert into pgbench_tellers(tid,bid,tbalance) "
+			 "select tid, (tid - 1) / %d + 1, 0 "
+			 "from generate_series(1, %d) as tid", ntellers, ntellers * scale);
+	executeStatement(con, sql);
+
+	snprintf(sql, sizeof(sql),
+			 "insert into pgbench_accounts(aid,bid,abalance,filler) "
+			 "select aid, (aid - 1) / %d + 1, 0, '' "
+			 "from generate_series(1, "INT64_FORMAT") as aid",
+			 naccounts, (int64) naccounts * scale);
+	executeStatement(con, sql);
 
 	executeStatement(con, "commit");
 }
@@ -4020,21 +4082,21 @@ initCreateFKeys(PGconn *con)
 static void
 checkInitSteps(const char *initialize_steps)
 {
-	const char *step;
-
 	if (initialize_steps[0] == '\0')
 	{
 		fprintf(stderr, "no initialization steps specified\n");
 		exit(1);
 	}
 
-	for (step = initialize_steps; *step != '\0'; step++)
+	for (const char *step = initialize_steps; *step != '\0'; step++)
 	{
-		if (strchr("dtgvpf ", *step) == NULL)
+		if (strchr(ALL_INIT_STEPS " ", *step) == NULL)
 		{
-			fprintf(stderr, "unrecognized initialization step \"%c\"\n",
+			fprintf(stderr,
+					"unrecognized initialization step \"%c\"\n",
 					*step);
-			fprintf(stderr, "allowed steps are: \"d\", \"t\", \"g\", \"v\", \"p\", \"f\"\n");
+			fprintf(stderr,
+					"Allowed step characters are: \"" ALL_INIT_STEPS "\".\n");
 			exit(1);
 		}
 	}
@@ -4057,6 +4119,9 @@ runInitSteps(const char *initialize_steps)
 	if ((con = doConnect()) == NULL)
 		exit(1);
 
+	setup_cancel_handler(NULL);
+	SetCancelConn(con);
+
 	for (step = initialize_steps; *step != '\0'; step++)
 	{
 		instr_time	start;
@@ -4075,8 +4140,12 @@ runInitSteps(const char *initialize_steps)
 				initCreateTables(con);
 				break;
 			case 'g':
-				op = "generate";
-				initGenerateData(con);
+				op = "client-side generate";
+				initGenerateDataClientSide(con);
+				break;
+			case 'G':
+				op = "server-side generate";
+				initGenerateDataServerSide(con);
 				break;
 			case 'v':
 				op = "vacuum";
@@ -4120,6 +4189,7 @@ runInitSteps(const char *initialize_steps)
 	}
 
 	fprintf(stderr, "done in %.2f s (%s).\n", run_time, stats.data);
+	ResetCancelConn();
 	PQfinish(con);
 	termPQExpBuffer(&stats);
 }

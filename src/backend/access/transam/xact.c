@@ -41,6 +41,7 @@
 #include "libpq/be-fsstubs.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
+#include "pg_trace.h"
 #include "pgstat.h"
 #include "replication/logical.h"
 #include "replication/logicallauncher.h"
@@ -66,8 +67,6 @@
 #include "utils/snapmgr.h"
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
-#include "pg_trace.h"
-
 
 /*
  *	User-tweakable parameters
@@ -871,6 +870,9 @@ TransactionIdIsCurrentTransactionId(TransactionId xid)
 	 */
 	if (!TransactionIdIsNormal(xid))
 		return false;
+
+	if (TransactionIdEquals(xid, GetTopTransactionIdIfAny()))
+		return true;
 
 	/*
 	 * In parallel workers, the XIDs we must consider as current are stored in
@@ -2119,6 +2121,14 @@ CommitTransaction(void)
 	AtEOXact_LargeObject(true);
 
 	/*
+	 * Insert notifications sent by NOTIFY commands into the queue.  This
+	 * should be late in the pre-commit sequence to minimize time spent
+	 * holding the notify-insertion lock.  However, this could result in
+	 * creating a snapshot, so we must do it before serializable cleanup.
+	 */
+	PreCommit_Notify();
+
+	/*
 	 * Mark serializable transaction as complete for predicate locking
 	 * purposes.  This should be done as late as we can put it and still allow
 	 * errors to be raised for failure patterns found at commit.  This is not
@@ -2127,13 +2137,6 @@ CommitTransaction(void)
 	 */
 	if (!is_parallel_worker)
 		PreCommit_CheckForSerializationFailure();
-
-	/*
-	 * Insert notifications sent by NOTIFY commands into the queue.  This
-	 * should be late in the pre-commit sequence to minimize time spent
-	 * holding the notify-insertion lock.
-	 */
-	PreCommit_Notify();
 
 	/* Prevent cancel/die interrupt while cleaning up */
 	HOLD_INTERRUPTS();
@@ -2357,14 +2360,14 @@ PrepareTransaction(void)
 	/* close large objects before lower-level cleanup */
 	AtEOXact_LargeObject(true);
 
+	/* NOTIFY requires no work at this point */
+
 	/*
 	 * Mark serializable transaction as complete for predicate locking
 	 * purposes.  This should be done as late as we can put it and still allow
 	 * errors to be raised for failure patterns found at commit.
 	 */
 	PreCommit_CheckForSerializationFailure();
-
-	/* NOTIFY will be handled below */
 
 	/*
 	 * Don't allow PREPARE TRANSACTION if we've accessed a temporary table in
@@ -3441,7 +3444,6 @@ CheckTransactionBlock(bool isTopLevel, bool throwError, const char *stmtType)
 	/* translator: %s represents an SQL statement name */
 			 errmsg("%s can only be used in transaction blocks",
 					stmtType)));
-	return;
 }
 
 /*

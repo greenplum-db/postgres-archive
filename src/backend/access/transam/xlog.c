@@ -42,15 +42,16 @@
 #include "commands/tablespace.h"
 #include "common/controldata_utils.h"
 #include "miscadmin.h"
+#include "pg_trace.h"
 #include "pgstat.h"
 #include "port/atomics.h"
 #include "postmaster/bgwriter.h"
-#include "postmaster/walwriter.h"
 #include "postmaster/startup.h"
+#include "postmaster/walwriter.h"
 #include "replication/basebackup.h"
 #include "replication/logical.h"
-#include "replication/slot.h"
 #include "replication/origin.h"
+#include "replication/slot.h"
 #include "replication/snapbuild.h"
 #include "replication/walreceiver.h"
 #include "replication/walsender.h"
@@ -74,7 +75,6 @@
 #include "utils/relmapper.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
-#include "pg_trace.h"
 
 extern uint32 bootstrap_data_checksum_version;
 
@@ -2499,14 +2499,21 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 				pgstat_report_wait_end();
 				if (written <= 0)
 				{
+					char		xlogfname[MAXFNAMELEN];
+					int			save_errno;
+
 					if (errno == EINTR)
 						continue;
+
+					save_errno = errno;
+					XLogFileName(xlogfname, ThisTimeLineID, openLogSegNo,
+								 wal_segment_size);
+					errno = save_errno;
 					ereport(PANIC,
 							(errcode_for_file_access(),
 							 errmsg("could not write to log file %s "
 									"at offset %u, length %zu: %m",
-									XLogFileNameP(ThisTimeLineID, openLogSegNo),
-									startoffset, nleft)));
+									xlogfname, startoffset, nleft)));
 				}
 				nleft -= written;
 				from += written;
@@ -3792,10 +3799,17 @@ XLogFileClose(void)
 #endif
 
 	if (close(openLogFile) != 0)
+	{
+		char		xlogfname[MAXFNAMELEN];
+		int			save_errno = errno;
+
+		XLogFileName(xlogfname, ThisTimeLineID, openLogSegNo, wal_segment_size);
+		errno = save_errno;
 		ereport(PANIC,
 				(errcode_for_file_access(),
-				 errmsg("could not close file \"%s\": %m",
-						XLogFileNameP(ThisTimeLineID, openLogSegNo))));
+				 errmsg("could not close file \"%s\": %m", xlogfname)));
+	}
+
 	openLogFile = -1;
 }
 
@@ -4516,7 +4530,6 @@ WriteControlFile(void)
 	ControlFile->toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
 	ControlFile->loblksize = LOBLKSIZE;
 
-	ControlFile->float4ByVal = FLOAT4PASSBYVAL;
 	ControlFile->float8ByVal = FLOAT8PASSBYVAL;
 
 	/* Contents are protected with a CRC */
@@ -4719,22 +4732,6 @@ ReadControlFile(void)
 						   " but the server was compiled with LOBLKSIZE %d.",
 						   ControlFile->loblksize, (int) LOBLKSIZE),
 				 errhint("It looks like you need to recompile or initdb.")));
-
-#ifdef USE_FLOAT4_BYVAL
-	if (ControlFile->float4ByVal != true)
-		ereport(FATAL,
-				(errmsg("database files are incompatible with server"),
-				 errdetail("The database cluster was initialized without USE_FLOAT4_BYVAL"
-						   " but the server was compiled with USE_FLOAT4_BYVAL."),
-				 errhint("It looks like you need to recompile or initdb.")));
-#else
-	if (ControlFile->float4ByVal != false)
-		ereport(FATAL,
-				(errmsg("database files are incompatible with server"),
-				 errdetail("The database cluster was initialized with USE_FLOAT4_BYVAL"
-						   " but the server was compiled without USE_FLOAT4_BYVAL."),
-				 errhint("It looks like you need to recompile or initdb.")));
-#endif
 
 #ifdef USE_FLOAT8_BYVAL
 	if (ControlFile->float8ByVal != true)
@@ -5527,10 +5524,17 @@ exitArchiveRecovery(TimeLineID endTLI, XLogRecPtr endOfLog)
 		fd = XLogFileInit(startLogSegNo, &use_existent, true);
 
 		if (close(fd) != 0)
+		{
+			char		xlogfname[MAXFNAMELEN];
+			int			save_errno = errno;
+
+			XLogFileName(xlogfname, ThisTimeLineID, startLogSegNo,
+						 wal_segment_size);
+			errno = save_errno;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not close file \"%s\": %m",
-							XLogFileNameP(ThisTimeLineID, startLogSegNo))));
+					 errmsg("could not close file \"%s\": %m", xlogfname)));
+		}
 	}
 
 	/*
@@ -6231,45 +6235,59 @@ StartupXLOG(void)
 	CurrentResourceOwner = AuxProcessResourceOwner;
 
 	/*
-	 * Verify XLOG status looks valid.
+	 * Check that contents look valid.
 	 */
-	if (ControlFile->state < DB_SHUTDOWNED ||
-		ControlFile->state > DB_IN_PRODUCTION ||
-		!XRecOffIsValid(ControlFile->checkPoint))
+	if (!XRecOffIsValid(ControlFile->checkPoint))
 		ereport(FATAL,
-				(errmsg("control file contains invalid data")));
+				(errmsg("control file contains invalid checkpoint location")));
 
-	if (ControlFile->state == DB_SHUTDOWNED)
+	switch (ControlFile->state)
 	{
-		/* This is the expected case, so don't be chatty in standalone mode */
-		ereport(IsPostmasterEnvironment ? LOG : NOTICE,
-				(errmsg("database system was shut down at %s",
-						str_time(ControlFile->time))));
+		case DB_SHUTDOWNED:
+			/* This is the expected case, so don't be chatty in standalone mode */
+			ereport(IsPostmasterEnvironment ? LOG : NOTICE,
+					(errmsg("database system was shut down at %s",
+							str_time(ControlFile->time))));
+			break;
+
+		case DB_SHUTDOWNED_IN_RECOVERY:
+			ereport(LOG,
+					(errmsg("database system was shut down in recovery at %s",
+							str_time(ControlFile->time))));
+			break;
+
+		case DB_SHUTDOWNING:
+			ereport(LOG,
+					(errmsg("database system shutdown was interrupted; last known up at %s",
+							str_time(ControlFile->time))));
+			break;
+
+		case DB_IN_CRASH_RECOVERY:
+			ereport(LOG,
+					(errmsg("database system was interrupted while in recovery at %s",
+							str_time(ControlFile->time)),
+					 errhint("This probably means that some data is corrupted and"
+							 " you will have to use the last backup for recovery.")));
+			break;
+
+		case DB_IN_ARCHIVE_RECOVERY:
+			ereport(LOG,
+					(errmsg("database system was interrupted while in recovery at log time %s",
+							str_time(ControlFile->checkPointCopy.time)),
+					 errhint("If this has occurred more than once some data might be corrupted"
+							 " and you might need to choose an earlier recovery target.")));
+			break;
+
+		case DB_IN_PRODUCTION:
+			ereport(LOG,
+					(errmsg("database system was interrupted; last known up at %s",
+							str_time(ControlFile->time))));
+			break;
+
+		default:
+			ereport(FATAL,
+					(errmsg("control file contains invalid database cluster state")));
 	}
-	else if (ControlFile->state == DB_SHUTDOWNED_IN_RECOVERY)
-		ereport(LOG,
-				(errmsg("database system was shut down in recovery at %s",
-						str_time(ControlFile->time))));
-	else if (ControlFile->state == DB_SHUTDOWNING)
-		ereport(LOG,
-				(errmsg("database system shutdown was interrupted; last known up at %s",
-						str_time(ControlFile->time))));
-	else if (ControlFile->state == DB_IN_CRASH_RECOVERY)
-		ereport(LOG,
-				(errmsg("database system was interrupted while in recovery at %s",
-						str_time(ControlFile->time)),
-				 errhint("This probably means that some data is corrupted and"
-						 " you will have to use the last backup for recovery.")));
-	else if (ControlFile->state == DB_IN_ARCHIVE_RECOVERY)
-		ereport(LOG,
-				(errmsg("database system was interrupted while in recovery at log time %s",
-						str_time(ControlFile->checkPointCopy.time)),
-				 errhint("If this has occurred more than once some data might be corrupted"
-						 " and you might need to choose an earlier recovery target.")));
-	else if (ControlFile->state == DB_IN_PRODUCTION)
-		ereport(LOG,
-				(errmsg("database system was interrupted; last known up at %s",
-						str_time(ControlFile->time))));
 
 	/* This is just to allow attaching to startup process with a debugger */
 #ifdef XLOG_REPLAY_DELAY
@@ -10082,10 +10100,19 @@ assign_xlog_sync_method(int new_sync_method, void *extra)
 		{
 			pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC_METHOD_ASSIGN);
 			if (pg_fsync(openLogFile) != 0)
+			{
+				char		xlogfname[MAXFNAMELEN];
+				int			save_errno;
+
+				save_errno = errno;
+				XLogFileName(xlogfname, ThisTimeLineID, openLogSegNo,
+							 wal_segment_size);
+				errno = save_errno;
 				ereport(PANIC,
 						(errcode_for_file_access(),
-						 errmsg("could not fsync file \"%s\": %m",
-								XLogFileNameP(ThisTimeLineID, openLogSegNo))));
+						 errmsg("could not fsync file \"%s\": %m", xlogfname)));
+			}
+
 			pgstat_report_wait_end();
 			if (get_sync_bit(sync_method) != get_sync_bit(new_sync_method))
 				XLogFileClose();
@@ -10103,32 +10130,25 @@ assign_xlog_sync_method(int new_sync_method, void *extra)
 void
 issue_xlog_fsync(int fd, XLogSegNo segno)
 {
+	char	   *msg = NULL;
+
 	pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
 	switch (sync_method)
 	{
 		case SYNC_METHOD_FSYNC:
 			if (pg_fsync_no_writethrough(fd) != 0)
-				ereport(PANIC,
-						(errcode_for_file_access(),
-						 errmsg("could not fsync file \"%s\": %m",
-								XLogFileNameP(ThisTimeLineID, segno))));
+				msg = _("could not fsync file \"%s\": %m");
 			break;
 #ifdef HAVE_FSYNC_WRITETHROUGH
 		case SYNC_METHOD_FSYNC_WRITETHROUGH:
 			if (pg_fsync_writethrough(fd) != 0)
-				ereport(PANIC,
-						(errcode_for_file_access(),
-						 errmsg("could not fsync write-through file \"%s\": %m",
-								XLogFileNameP(ThisTimeLineID, segno))));
+				msg = _("could not fsync write-through file \"%s\": %m");
 			break;
 #endif
 #ifdef HAVE_FDATASYNC
 		case SYNC_METHOD_FDATASYNC:
 			if (pg_fdatasync(fd) != 0)
-				ereport(PANIC,
-						(errcode_for_file_access(),
-						 errmsg("could not fdatasync file \"%s\": %m",
-								XLogFileNameP(ThisTimeLineID, segno))));
+				msg = _("could not fdatasync file \"%s\": %m");
 			break;
 #endif
 		case SYNC_METHOD_OPEN:
@@ -10139,19 +10159,22 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 			elog(PANIC, "unrecognized wal_sync_method: %d", sync_method);
 			break;
 	}
+
+	/* PANIC if failed to fsync */
+	if (msg)
+	{
+		char		xlogfname[MAXFNAMELEN];
+		int			save_errno = errno;
+
+		XLogFileName(xlogfname, ThisTimeLineID, segno,
+					 wal_segment_size);
+		errno = save_errno;
+		ereport(PANIC,
+				(errcode_for_file_access(),
+				 errmsg(msg, xlogfname)));
+	}
+
 	pgstat_report_wait_end();
-}
-
-/*
- * Return the filename of given log segment, as a palloc'd string.
- */
-char *
-XLogFileNameP(TimeLineID tli, XLogSegNo segno)
-{
-	char	   *result = palloc(MAXFNAMELEN);
-
-	XLogFileName(result, tli, segno, wal_segment_size);
-	return result;
 }
 
 /*

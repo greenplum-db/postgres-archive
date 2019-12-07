@@ -188,6 +188,20 @@ sepgsql_object_access(ObjectAccessType access,
 			}
 			break;
 
+		case OAT_TRUNCATE:
+			{
+				switch (classId)
+				{
+					case RelationRelationId:
+						sepgsql_relation_truncate(objectId);
+						break;
+					default:
+						/* Ignore unsupported object classes */
+						break;
+				}
+			}
+			break;
+
 		case OAT_POST_ALTER:
 			{
 				ObjectAccessPostAlter *pa_arg = arg;
@@ -372,13 +386,11 @@ sepgsql_utility_command(PlannedStmt *pstmt,
 									context, params, queryEnv,
 									dest, completionTag);
 	}
-	PG_CATCH();
+	PG_FINALLY();
 	{
 		sepgsql_context_info = saved_context_info;
-		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	sepgsql_context_info = saved_context_info;
 }
 
 /*

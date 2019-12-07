@@ -1015,6 +1015,17 @@ create rule r5 as on update to rules_src do instead UPDATE rules_log AS trgt SET
 \d+ rules_src
 
 --
+-- Also check multiassignment deparsing.
+--
+create table rule_t1(f1 int, f2 int);
+create table rule_dest(f1 int, f2 int[], tag text);
+create rule rr as on update to rule_t1 do instead UPDATE rule_dest trgt
+  SET (f2[1], f1, tag) = (SELECT new.f2, new.f1, 'updated'::varchar)
+  WHERE trgt.f1 = new.f1 RETURNING new.*;
+\d+ rule_t1
+drop table rule_t1, rule_dest;
+
+--
 -- check alter rename rule
 --
 CREATE TABLE rule_t1 (a INT);
@@ -1046,6 +1057,8 @@ DROP TABLE rule_t1;
 -- check display of VALUES in view definitions
 --
 create view rule_v1 as values(1,2);
+\d+ rule_v1
+alter table rule_v1 rename column column2 to q2;
 \d+ rule_v1
 drop view rule_v1;
 create view rule_v1(x) as values(1,2);

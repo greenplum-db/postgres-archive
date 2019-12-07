@@ -3,12 +3,12 @@
 #ifndef _ECPG_ECPGLIB_EXTERN_H
 #define _ECPG_ECPGLIB_EXTERN_H
 
-#include "libpq-fe.h"
-#include "sqlca.h"
-#include "sqlda-native.h"
-#include "sqlda-compat.h"
 #include "ecpg_config.h"
 #include "ecpgtype.h"
+#include "libpq-fe.h"
+#include "sqlca.h"
+#include "sqlda-compat.h"
+#include "sqlda-native.h"
 
 #ifndef CHAR_BIT
 #include <limits.h>
@@ -218,6 +218,12 @@ void		ecpg_set_native_sqlda(int, struct sqlda_struct **, const PGresult *, int, 
 unsigned	ecpg_hex_dec_len(unsigned srclen);
 unsigned	ecpg_hex_enc_len(unsigned srclen);
 unsigned	ecpg_hex_encode(const char *src, unsigned len, char *dst);
+
+#ifdef ENABLE_NLS
+extern char *ecpg_gettext(const char *msgid) pg_attribute_format_arg(1);
+#else
+#define ecpg_gettext(x) (x)
+#endif
 
 /* SQLSTATE values generated or processed by ecpglib (intentionally
  * not exported -- users should refer to the codes directly) */

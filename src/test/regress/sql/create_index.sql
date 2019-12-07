@@ -538,6 +538,12 @@ ALTER TABLE cwi_test DROP CONSTRAINT cwi_uniq_idx,
 
 DROP INDEX cwi_replaced_pkey;	-- Should fail; a constraint depends on it
 
+-- Check that non-default index options are rejected
+CREATE UNIQUE INDEX cwi_uniq3_idx ON cwi_test(a desc);
+ALTER TABLE cwi_test ADD UNIQUE USING INDEX cwi_uniq3_idx;  -- fail
+CREATE UNIQUE INDEX cwi_uniq4_idx ON cwi_test(b collate "POSIX");
+ALTER TABLE cwi_test ADD UNIQUE USING INDEX cwi_uniq4_idx;  -- fail
+
 DROP TABLE cwi_test;
 
 -- ADD CONSTRAINT USING INDEX is forbidden on partitioned tables
@@ -1008,8 +1014,15 @@ REINDEX SCHEMA CONCURRENTLY schema_to_reindex;
 CREATE ROLE regress_reindexuser NOLOGIN;
 SET SESSION ROLE regress_reindexuser;
 REINDEX SCHEMA schema_to_reindex;
+-- Permission failures with toast tables and indexes (pg_authid here)
+RESET ROLE;
+GRANT USAGE ON SCHEMA pg_toast TO regress_reindexuser;
+SET SESSION ROLE regress_reindexuser;
+REINDEX TABLE pg_toast.pg_toast_1260;
+REINDEX INDEX pg_toast.pg_toast_1260_index;
 
 -- Clean up
 RESET ROLE;
+REVOKE USAGE ON SCHEMA pg_toast FROM regress_reindexuser;
 DROP ROLE regress_reindexuser;
 DROP SCHEMA schema_to_reindex CASCADE;

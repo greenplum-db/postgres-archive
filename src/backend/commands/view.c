@@ -26,15 +26,14 @@
 #include "parser/analyze.h"
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteDefine.h"
-#include "rewrite/rewriteManip.h"
 #include "rewrite/rewriteHandler.h"
+#include "rewrite/rewriteManip.h"
 #include "rewrite/rewriteSupport.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
-
 
 static void checkViewTupleDesc(TupleDesc newdesc, TupleDesc olddesc);
 
@@ -277,7 +276,8 @@ checkViewTupleDesc(TupleDesc newdesc, TupleDesc olddesc)
 					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
 					 errmsg("cannot change name of view column \"%s\" to \"%s\"",
 							NameStr(oldattr->attname),
-							NameStr(newattr->attname))));
+							NameStr(newattr->attname)),
+					 errhint("Use ALTER VIEW ... RENAME COLUMN ... to change name of view column instead.")));
 		/* XXX would it be safe to allow atttypmod to change?  Not sure */
 		if (newattr->atttypid != oldattr->atttypid ||
 			newattr->atttypmod != oldattr->atttypmod)

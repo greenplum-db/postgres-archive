@@ -63,6 +63,7 @@
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
 #include "storage/procarray.h"
+#include "storage/procsignal.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/pg_lsn.h"
@@ -125,7 +126,6 @@ static void ProcessWalSndrMessage(XLogRecPtr walEnd, TimestampTz sendTime);
 
 /* Signal handlers */
 static void WalRcvSigHupHandler(SIGNAL_ARGS);
-static void WalRcvSigUsr1Handler(SIGNAL_ARGS);
 static void WalRcvShutdownHandler(SIGNAL_ARGS);
 static void WalRcvQuickDieHandler(SIGNAL_ARGS);
 
@@ -252,7 +252,7 @@ WalReceiverMain(void)
 	pqsignal(SIGQUIT, WalRcvQuickDieHandler);	/* hard crash time */
 	pqsignal(SIGALRM, SIG_IGN);
 	pqsignal(SIGPIPE, SIG_IGN);
-	pqsignal(SIGUSR1, WalRcvSigUsr1Handler);
+	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 	pqsignal(SIGUSR2, SIG_IGN);
 
 	/* Reset some signals that are accepted by postmaster but not here */
@@ -576,17 +576,17 @@ WalReceiverMain(void)
 			char		xlogfname[MAXFNAMELEN];
 
 			XLogWalRcvFlush(false);
+			XLogFileName(xlogfname, recvFileTLI, recvSegNo, wal_segment_size);
 			if (close(recvFile) != 0)
 				ereport(PANIC,
 						(errcode_for_file_access(),
 						 errmsg("could not close log segment %s: %m",
-								XLogFileNameP(recvFileTLI, recvSegNo))));
+								xlogfname)));
 
 			/*
 			 * Create .done file forcibly to prevent the streamed segment from
 			 * being archived later.
 			 */
-			XLogFileName(xlogfname, recvFileTLI, recvSegNo, wal_segment_size);
 			if (XLogArchiveMode != ARCHIVE_MODE_ALWAYS)
 				XLogArchiveForceDone(xlogfname);
 			else
@@ -766,17 +766,6 @@ WalRcvSigHupHandler(SIGNAL_ARGS)
 }
 
 
-/* SIGUSR1: used by latch mechanism */
-static void
-WalRcvSigUsr1Handler(SIGNAL_ARGS)
-{
-	int			save_errno = errno;
-
-	latch_sigusr1_handler();
-
-	errno = save_errno;
-}
-
 /* SIGTERM: set flag for ProcessWalRcvInterrupts */
 static void
 WalRcvShutdownHandler(SIGNAL_ARGS)
@@ -911,6 +900,8 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 
 				XLogWalRcvFlush(false);
 
+				XLogFileName(xlogfname, recvFileTLI, recvSegNo, wal_segment_size);
+
 				/*
 				 * XLOG segment files will be re-read by recovery in startup
 				 * process soon, so we don't advise the OS to release cache
@@ -920,13 +911,12 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 					ereport(PANIC,
 							(errcode_for_file_access(),
 							 errmsg("could not close log segment %s: %m",
-									XLogFileNameP(recvFileTLI, recvSegNo))));
+									xlogfname)));
 
 				/*
 				 * Create .done file forcibly to prevent the streamed segment
 				 * from being archived later.
 				 */
-				XLogFileName(xlogfname, recvFileTLI, recvSegNo, wal_segment_size);
 				if (XLogArchiveMode != ARCHIVE_MODE_ALWAYS)
 					XLogArchiveForceDone(xlogfname);
 				else
@@ -954,11 +944,18 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 		if (recvOff != startoff)
 		{
 			if (lseek(recvFile, (off_t) startoff, SEEK_SET) < 0)
+			{
+				char		xlogfname[MAXFNAMELEN];
+				int			save_errno = errno;
+
+				XLogFileName(xlogfname, recvFileTLI, recvSegNo, wal_segment_size);
+				errno = save_errno;
 				ereport(PANIC,
 						(errcode_for_file_access(),
 						 errmsg("could not seek in log segment %s to offset %u: %m",
-								XLogFileNameP(recvFileTLI, recvSegNo),
-								startoff)));
+								xlogfname, startoff)));
+			}
+
 			recvOff = startoff;
 		}
 
@@ -968,15 +965,21 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 		byteswritten = write(recvFile, buf, segbytes);
 		if (byteswritten <= 0)
 		{
+			char		xlogfname[MAXFNAMELEN];
+			int			save_errno;
+
 			/* if write didn't set errno, assume no disk space */
 			if (errno == 0)
 				errno = ENOSPC;
+
+			save_errno = errno;
+			XLogFileName(xlogfname, recvFileTLI, recvSegNo, wal_segment_size);
+			errno = save_errno;
 			ereport(PANIC,
 					(errcode_for_file_access(),
 					 errmsg("could not write to log segment %s "
 							"at offset %u, length %lu: %m",
-							XLogFileNameP(recvFileTLI, recvSegNo),
-							recvOff, (unsigned long) segbytes)));
+							xlogfname, recvOff, (unsigned long) segbytes)));
 		}
 
 		/* Update state for write */
