@@ -16,17 +16,6 @@
 #include "utils/fmgrprotos.h"
 #include "utils/int8.h"
 
-/* fmgr interface macros */
-#ifdef USE_FLOAT8_BYVAL
-#define ZSTidGetDatum(X) Int64GetDatum(X)
-#define DatumGetZSTid(X) ((zstid) (X))
-#else
-#define ZSTidGetDatum(X) PointerGetDatum(X)
-#define DatumGetZSTid(X) (* ((zstid*) DatumGetPointer(X)))
-#endif
-
-#define PG_GETARG_ZSTID(n) DatumGetZSTid(PG_GETARG_DATUM(n))
-#define PG_RETURN_ZSTID(x) return ZSTidGetDatum(x)
 
 Datum
 tidtozstid(PG_FUNCTION_ARGS)

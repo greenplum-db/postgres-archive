@@ -271,6 +271,52 @@ decode_attstream_cont(attstream_decoder *decoder)
 		return false;
 }
 
+bool
+get_attstream_chunk_cont(attstream_decoder *decoder, zstid *prevtid, zstid *firsttid, zstid *lasttid, bytea **chunk)
+{
+	char *p;
+	char *pend;
+	MemoryContext oldcxt;
+	int len;
+	bytea *attr_data = NULL;
+
+	oldcxt = CurrentMemoryContext;
+	if(decoder->tmpcxt)
+	{
+		MemoryContextReset(decoder->tmpcxt);
+		MemoryContextSwitchTo(decoder->tmpcxt);
+	}
+
+	p = decoder->chunks_buf + decoder->pos;
+	pend = decoder->chunks_buf + decoder->chunks_len;
+	*prevtid = decoder->prevtid;
+	*firsttid = get_chunk_first_tid(decoder->attlen, p) + decoder->prevtid;
+
+	if (p < pend)
+	{
+		len = skip_chunk(decoder->attlen, p, &decoder->prevtid);
+
+		attr_data = (bytea *) palloc(len + VARHDRSZ);
+		SET_VARSIZE(attr_data, len + VARHDRSZ);
+		memcpy(VARDATA(attr_data), p, len);
+
+		p += len;
+	}
+
+		MemoryContextSwitchTo(oldcxt);
+
+	Assert(p <= pend);
+	decoder->pos = p - decoder->chunks_buf;
+
+	if(attr_data != NULL) {
+		*lasttid = decoder->prevtid;
+		*chunk = attr_data;
+		return true;
+	}
+
+	return false;
+}
+
 /* ----------------------------------------------------------------------------
  * Functions for constructing and manipulating attribute streams.
  * ----------------------------------------------------------------------------

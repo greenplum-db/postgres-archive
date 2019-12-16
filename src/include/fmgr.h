@@ -324,7 +324,7 @@ extern struct varlena *pg_detoast_datum_packed(struct varlena *datum);
  */
 #define DatumGetByteaP(X)			((bytea *) PG_DETOAST_DATUM(X))
 #define DatumGetTextP(X)			((text *) PG_DETOAST_DATUM(X))
-#define DatumGetBpCharP(X)			((BpChar *) PG_DETOAST_DATUM(X))
+#define DatumGetBpharP(X)			((BpChar *) PG_DETOAST_DATUM(X))
 #define DatumGetVarCharP(X)			((VarChar *) PG_DETOAST_DATUM(X))
 #define PG_GETARG_BYTEA_P(n)		DatumGetByteaP(PG_GETARG_DATUM(n))
 #define PG_GETARG_TEXT_P(n)			DatumGetTextP(PG_GETARG_DATUM(n))

@@ -935,6 +935,7 @@ extern void init_attstream_decoder(attstream_decoder *decoder, bool attbyval, in
 extern void destroy_attstream_decoder(attstream_decoder *decoder);
 extern void decode_attstream_begin(attstream_decoder *decoder, ZSAttStream *attstream);
 extern bool decode_attstream_cont(attstream_decoder *decoder);
+extern bool get_attstream_chunk_cont(attstream_decoder *decoder, zstid *prevtid, zstid *firsttid, zstid *lasttid, bytea **chunk);
 
 /* prototypes for functions in zedstore_tuplebuffer.c */
 extern zstid zsbt_tuplebuffer_allocate_tid(Relation rel, TransactionId xid, CommandId cid);

@@ -406,6 +406,305 @@ pg_zs_toast_pages(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
+/*
+ * attno int4
+ * chunkno int4
+ * upperstream bool
+ * compressed bool
+ * attbyval bool
+ * attlen int4
+ *
+ * chunk_cursor int4
+ * chunk_len int4
+ * num_elems int4
+ *
+ * firsttid zstid
+ * lasttid zstid
+ *
+ * tids[] zstid
+ * datums[] bytea
+ * isnulls[] bool
+ */
+Datum
+pg_zs_dump_attstreams(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	BlockNumber blkno = PG_GETARG_INT64(1);
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Relation	rel;
+	TupleDesc	tupdesc;
+	Tuplestorestate *tupstore;
+	MemoryContext per_query_ctx;
+	MemoryContext oldcontext;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("must be superuser to use zedstore inspection functions"))));
+
+	/* check to see if caller supports us returning a tuplestore */
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in context that cannot accept a set")));
+	if (!(rsinfo->allowedModes & SFRM_Materialize))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("materialize mode required, but it is not " \
+						"allowed in this context")));
+
+	/* Switch into long-lived context to construct returned data structures */
+	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+	oldcontext = MemoryContextSwitchTo(per_query_ctx);
+
+	/* Build a tuple descriptor for our result type */
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = tupdesc;
+
+	MemoryContextSwitchTo(oldcontext);
+
+	rel = table_open(relid, AccessShareLock);
+
+	/*
+	 * Reject attempts to read non-local temporary relations; we would be
+	 * likely to get wrong data since we have no visibility into the owning
+	 * session's local buffers.
+	 */
+	if (RELATION_IS_OTHER_TEMP(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary tables of other sessions")));
+
+	Datum		values[14];
+	bool		nulls[14];
+
+	Buffer		buf;
+	Page		page;
+	ZSBtreePageOpaque *opaque;
+	int			chunkno;
+	bool		upperstream;
+	bool		attbyval;
+	int16		attlen;
+	int			chunk_start;
+	PageHeader	phdr;
+
+	attstream_decoder decoder;
+
+	memset(values, 0, sizeof(values));
+	memset(nulls, 0, sizeof(nulls));
+
+	CHECK_FOR_INTERRUPTS();
+
+	/* Read the page */
+	buf = ReadBuffer(rel, blkno);
+	page = BufferGetPage(buf);
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+	/*
+	 * we're only interested in B-tree pages. (Presumably, most of the pages
+	 * in the relation are b-tree pages, so it makes sense to scan the whole
+	 * relation in physical order)
+	 */
+	if (PageGetSpecialSize(page) != MAXALIGN(sizeof(ZSBtreePageOpaque)))
+	{
+		UnlockReleaseBuffer(buf);
+		table_close(rel, AccessShareLock);
+		PG_RETURN_NULL();
+	}
+
+	opaque = (ZSBtreePageOpaque *) PageGetSpecialPointer(page);
+	if (opaque->zs_page_id != ZS_BTREE_PAGE_ID ||
+		opaque->zs_attno == ZS_META_ATTRIBUTE_NUM ||
+		opaque->zs_level != 0)
+	{
+		UnlockReleaseBuffer(buf);
+		table_close(rel, AccessShareLock);
+		PG_RETURN_NULL();
+	}
+
+	attbyval = rel->rd_att->attrs[opaque->zs_attno - 1].attbyval;
+	attlen = rel->rd_att->attrs[opaque->zs_attno - 1].attlen;
+
+	phdr = (PageHeader) page;
+	ZSAttStream *streams[2];
+	int			nstreams = 0;
+
+	if (phdr->pd_lower - SizeOfPageHeaderData > SizeOfZSAttStreamHeader)
+	{
+		streams[nstreams++] = (ZSAttStream *) (((char *) page) + SizeOfPageHeaderData);
+	}
+
+	if (phdr->pd_special - phdr->pd_upper > SizeOfZSAttStreamHeader)
+	{
+		upperstream = nstreams;
+		streams[nstreams++] = (ZSAttStream *) (((char *) page) + phdr->pd_upper);
+	}
+
+	for (int i = 0; i < nstreams; i++)
+	{
+		ZSAttStream *stream = streams[i];
+		bytea	   *chunk;
+		zstid		prevtid;
+		zstid		firsttid;
+		zstid		lasttid;
+
+		init_attstream_decoder(&decoder, attbyval, attlen);
+		decode_attstream_begin(&decoder, stream);
+
+		chunkno = 0;
+		chunk_start = decoder.pos;
+
+		while (get_attstream_chunk_cont(&decoder, &prevtid, &firsttid, &lasttid, &chunk))
+		{
+			values[0] = Int16GetDatum(opaque->zs_attno);
+			values[1] = Int32GetDatum(chunkno);
+			chunkno++;
+
+			values[2] = BoolGetDatum(upperstream == i);
+			values[3] = BoolGetDatum((stream->t_flags & ATTSTREAM_COMPRESSED) != 0);
+			values[4] = BoolGetDatum(attbyval);
+			values[5] = Int16GetDatum(attlen);
+
+			values[6] = Int32GetDatum(chunk_start);
+			values[7] = Int32GetDatum(decoder.pos - chunk_start);
+			chunk_start = decoder.pos;
+
+			values[8] = ZSTidGetDatum(prevtid);
+			values[9] = ZSTidGetDatum(firsttid);
+			values[10] = ZSTidGetDatum(lasttid);
+			values[11] = PointerGetDatum(chunk);
+
+			tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+		}
+	}
+
+	UnlockReleaseBuffer(buf);
+	table_close(rel, AccessShareLock);
+
+	destroy_attstream_decoder(&decoder);
+
+	return (Datum) 0;
+}
+
+Datum
+pg_zs_decode_chunk(PG_FUNCTION_ARGS)
+{
+	bool		attbyval = PG_GETARG_BOOL(0);
+	int			attlen = PG_GETARG_INT16(1);
+	zstid		prevtid = PG_GETARG_ZSTID(2);
+	zstid		lasttid = PG_GETARG_ZSTID(3);
+	bytea	   *chunk = PG_GETARG_BYTEA_P(4);
+	attstream_decoder decoder;
+	Datum		values[4];
+	bool		nulls[4];
+	ZSAttStream *attstream = palloc(SizeOfZSAttStreamHeader + VARSIZE_ANY_EXHDR(chunk));
+	TupleDesc	tupdesc;
+	HeapTuple	tuple;
+
+	memset(values, 0, sizeof(values));
+	memset(nulls, 0, sizeof(nulls));
+
+	/* Build a tuple descriptor for our result type */
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	attstream->t_decompressed_size = VARSIZE_ANY_EXHDR(chunk);
+	attstream->t_decompressed_bufsize = VARSIZE_ANY_EXHDR(chunk);
+	attstream->t_size = SizeOfZSAttStreamHeader + VARSIZE_ANY_EXHDR(chunk);
+	attstream->t_flags = 0;
+	attstream->t_lasttid = lasttid;
+	memcpy(attstream->t_payload, VARDATA_ANY(chunk), VARSIZE_ANY_EXHDR(chunk));
+
+	init_attstream_decoder(&decoder, attbyval, attlen);
+	decode_attstream_begin(&decoder, attstream);
+	decoder.prevtid = prevtid;
+
+	if (!decode_attstream_cont(&decoder))
+		PG_RETURN_NULL();
+	else
+	{
+		ArrayBuildState *astate_tids = NULL;
+		ArrayBuildState *astate_datums = NULL;
+		ArrayBuildState *astate_isnulls = NULL;
+
+		for (int i = 0; i < decoder.num_elements; i++)
+		{
+
+			bytea	   *attr_data;
+
+			astate_tids = accumArrayResult(astate_tids,
+										   ZSTidGetDatum(decoder.tids[i]),
+										   false,
+										   ZSTIDOID,
+										   CurrentMemoryContext);
+			if (decoder.isnulls[i])
+			{
+				astate_datums = accumArrayResult(astate_datums,
+												 (Datum) 0,
+												 true,
+												 BYTEAOID,
+												 CurrentMemoryContext);
+			}
+			else
+			{
+				/*
+				 * Fixed length, attribute by value
+				 */
+				if (attbyval && attlen > 0)
+				{
+					attr_data = (bytea *) palloc(attlen + VARHDRSZ);
+					SET_VARSIZE(attr_data, attlen + VARHDRSZ);
+					memcpy(VARDATA(attr_data), &decoder.datums[i], attlen);
+				}
+				else if (!attbyval && attlen > 0)
+				{
+					attr_data = (bytea *) palloc(attlen + VARHDRSZ);
+					SET_VARSIZE(attr_data, attlen + VARHDRSZ);
+					memcpy(VARDATA(attr_data),
+						   DatumGetPointer(decoder.datums[i]),
+						   attlen);
+				}
+				else if (attlen < 0)
+				{
+					int			len;
+
+					len =
+						VARSIZE_ANY_EXHDR(DatumGetPointer(decoder.datums[i]));
+					attr_data = (bytea *) palloc(len + VARHDRSZ);
+					SET_VARSIZE(attr_data, len + VARHDRSZ);
+					memcpy(VARDATA(attr_data),
+						   VARDATA_ANY(DatumGetPointer(decoder.datums[i])),
+						   len);
+				}
+				astate_datums = accumArrayResult(astate_datums,
+												 PointerGetDatum(attr_data),
+												 false,
+												 BYTEAOID,
+												 CurrentMemoryContext);
+			}
+			astate_isnulls = accumArrayResult(astate_isnulls,
+											  BoolGetDatum(decoder.isnulls[i]),
+											  false,
+											  BOOLOID,
+											  CurrentMemoryContext);
+		}
+
+		values[0] = Int32GetDatum(decoder.num_elements);
+		values[1] = PointerGetDatum(makeArrayResult(astate_tids, CurrentMemoryContext));
+		values[2] = PointerGetDatum(makeArrayResult(astate_datums, CurrentMemoryContext));
+		values[3] = PointerGetDatum(makeArrayResult(astate_isnulls, CurrentMemoryContext));
+	}
+
+	destroy_attstream_decoder(&decoder);
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
 
 /*
  *  blkno int8
