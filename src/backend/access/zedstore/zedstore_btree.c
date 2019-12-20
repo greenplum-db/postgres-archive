@@ -315,6 +315,8 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level, List *downlinks)
 	ListCell   *lc;
 	int			i;
 
+	Assert(downlinks->length == 2);
+
 	newrootbuf = zspage_getnewbuf(rel);
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
@@ -427,7 +429,7 @@ zsbt_insert_downlinks(Relation rel, AttrNumber attno,
 	if (itemno < 0 || items[itemno].tid != leftlokey ||
 		items[itemno].childblk != leftblkno)
 	{
-		elog(PANIC, "could not find downlink for block %u TID (%u, %u)",
+		elog(ERROR, "could not find downlink for block %u TID (%u, %u)",
 			 leftblkno, ZSTidGetBlockNumber(leftlokey),
 			 ZSTidGetOffsetNumber(leftlokey));
 	}
