@@ -439,6 +439,7 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 	zstid		firstnewtid;
 	zstid 		splittid;
 	zsbt_attr_repack_context cxt;
+	bool		split = false;
 
 	Assert (attbuf->len - attbuf->cursor > 0);
 
@@ -461,7 +462,8 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 	if (lowerstream == NULL)
 	{
 		/*
-		 * No existing uncompressed data on page, see if the new data fits as is.
+		 * No existing uncompressed data on page, see if the new data can fit
+		 * into the uncompressed area.
 		 */
 		Assert(orig_pd_lower == SizeOfPageHeaderData);
 
@@ -469,7 +471,6 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 		{
 			ZSAttStream newhdr;
 			attstream_buffer newattbuf;
-			bool		splitted = false;
 
 			newhdr.t_flags = 0;
 			newhdr.t_decompressed_size = 0;
@@ -477,9 +478,15 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 
 			if (attbuf->lasttid > splittid)
 			{
-				elog(DEBUG2, "zsbt_attr_add - splitting attbuf attno: %d, firsttid: %lu lasttid: %lu splittid: %lu", attno, attbuf->firsttid, attbuf->lasttid, splittid);
-				chop_attstream_at_splittid(attbuf, &newattbuf, splittid);
-				splitted = true;
+				/*
+				 * We should not accommodate items with tids greater than the
+				 * hikey of the target leaf page. So if our attbuf does have such
+				 * items, we split the attbuf into two buffers at tid: hikey - 1.
+				 * This will ensure that we only insert the tids that fit into
+				 * the page's range.
+				 */
+				split_attstream_buffer(attbuf, &newattbuf, splittid);
+				split = true;
 			}
 
 			newhdr.t_size = SizeOfZSAttStreamHeader + (attbuf->len - attbuf->cursor);
@@ -503,8 +510,12 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 			END_CRIT_SECTION();
 
 			UnlockReleaseBuffer(origbuf);
-			if (splitted)
+			if (split)
 			{
+				/*
+				 * Make attbuf represent the chunks that were on the right hand
+				 * side of the split. These are the chunks that are left over.
+				 */
 				pfree(attbuf->data);
 				memcpy(attbuf, &newattbuf, sizeof(attstream_buffer));
 			}
@@ -516,7 +527,7 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 	else
 	{
 		/*
-		 * Try to append the new data to the old data
+		 * Try to append the new data to the existing uncompressed data first
 		 */
 		START_CRIT_SECTION();
 
@@ -588,6 +599,7 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 		 * without making any progress.
 		 */
 		zstid		mintid = attbuf->firsttid;
+		attstream_buffer rightattbuf;
 
 #if 0
 		if (upperstream && lowerstream)
@@ -636,13 +648,17 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 		 */
 		zsbt_attr_repack_init(&cxt, attno, origbuf, false);
 
-		attstream_buffer rightattbuf;
-		bool split = false;
 		if (attbuf->lasttid > splittid)
 		{
-			elog(DEBUG2, "zsbt_attr_add - splitting attbuf attno: %d, firsttid: %lu lasttid: %lu splittid: %lu", attno, attbuf->firsttid, attbuf->lasttid, splittid);
-			chop_attstream_at_splittid(attbuf, &rightattbuf, splittid);
-			split= true;
+			/*
+			 * We should not accommodate items with tids greater than the
+			 * hikey of the target leaf page. So if our attbuf does have such
+			 * items, we split the attbuf into two buffers at tid: hikey - 1.
+			 * This will ensure that we only insert the tids that fit into
+			 * the page's range.
+			 */
+			split_attstream_buffer(attbuf, &rightattbuf, splittid);
+			split = true;
 		}
 
 		zsbt_attr_pack_attstream(attr, attbuf, cxt.currpage);
@@ -655,8 +671,11 @@ zsbt_attr_add(Relation rel, AttrNumber attno, attstream_buffer *attbuf)
 
 		if (split)
 		{
+			/*
+			 * Make attbuf represent the chunks that were on the right hand
+			 * side of the split. These are the chunks that are left over.
+			 */
 			Assert(attbuf->cursor == attbuf->len);
-
 			pfree(attbuf->data);
 			memcpy(attbuf, &rightattbuf, sizeof(attstream_buffer));
 		}
@@ -806,7 +825,8 @@ zsbt_attr_pack_attstream(Form_pg_attribute attr, attstream_buffer *attbuf,
 			lasttid = attbuf->lasttid;
 		}
 		else
-			complete_chunks_len = find_attstream_chop_pos(attr, pstart, bytes_compressed, &lasttid);
+			complete_chunks_len =
+				find_chunk_for_offset(attbuf, bytes_compressed, &lasttid);
 
 		if (complete_chunks_len == 0)
 			elog(ERROR, "could not fit any chunks on page");
@@ -836,7 +856,8 @@ zsbt_attr_pack_attstream(Form_pg_attribute attr, attstream_buffer *attbuf,
 			lasttid = attbuf->lasttid;
 		}
 		else
-			complete_chunks_len = find_attstream_chop_pos(attr, pstart, freespc, &lasttid);
+			complete_chunks_len =
+				find_chunk_for_offset(attbuf, freespc, &lasttid);
 
 		if (complete_chunks_len == 0)
 			elog(ERROR, "could not fit any chunks on page");
@@ -857,7 +878,7 @@ zsbt_attr_pack_attstream(Form_pg_attribute attr, attstream_buffer *attbuf,
 	/*
 	 * Chop off the part of the chunk stream in 'attbuf' that we wrote out.
 	 */
-	chop_attstream(attbuf, complete_chunks_len, lasttid);
+	trim_attstream_upto_offset(attbuf, complete_chunks_len, lasttid);
 }
 static void
 zsbt_attr_repack_writeback_pages(zsbt_attr_repack_context *cxt,
