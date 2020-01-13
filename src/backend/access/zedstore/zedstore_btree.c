@@ -292,7 +292,7 @@ zsbt_page_is_expected(Relation rel, AttrNumber attno, zstid key, int level, Buff
 }
 
 /*
- * Create a new btree root page, containing two downlinks.
+ * Create a new btree root page, containing supplied downlinks.
  *
  * NOTE: the very first root page of a btree, which is also the leaf, is created
  * in zsmeta_get_root_for_attribute(), not here.
@@ -314,8 +314,6 @@ zsbt_newroot(Relation rel, AttrNumber attno, int level, List *downlinks)
 	zs_split_stack *stack2;
 	ListCell   *lc;
 	int			i;
-
-	Assert(downlinks->length == 2);
 
 	newrootbuf = zspage_getnewbuf(rel);
 

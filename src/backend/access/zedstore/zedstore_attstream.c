@@ -426,7 +426,7 @@ append_attstream(attstream_buffer *buf, bool all, int nelems,
 	}
 
 	Assert(nelems > 0);
-	Assert(tids[0] > buf->lasttid);
+	Assert((tids[0] > buf->lasttid) || buf->cursor == buf->len);
 
 	if (buf->len - buf->cursor == 0)
 	{
