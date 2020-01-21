@@ -416,7 +416,6 @@ pg_zs_toast_pages(PG_FUNCTION_ARGS)
  *
  * chunk_cursor int4
  * chunk_len int4
- * num_elems int4
  *
  * firsttid zstid
  * lasttid zstid
@@ -424,6 +423,7 @@ pg_zs_toast_pages(PG_FUNCTION_ARGS)
  * tids[] zstid
  * datums[] bytea
  * isnulls[] bool
+ * num_elems int4
  */
 Datum
 pg_zs_dump_attstreams(PG_FUNCTION_ARGS)
@@ -578,6 +578,7 @@ pg_zs_dump_attstreams(PG_FUNCTION_ARGS)
 			values[9] = ZSTidGetDatum(firsttid);
 			values[10] = ZSTidGetDatum(lasttid);
 			values[11] = PointerGetDatum(chunk);
+			values[12] = PointerGetDatum(decoder.num_elements);
 
 			tuplestore_putvalues(tupstore, tupdesc, values, nulls);
 		}

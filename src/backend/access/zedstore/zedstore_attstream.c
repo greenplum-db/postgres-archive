@@ -83,6 +83,7 @@ static int decode_chunk(bool attbyval, int attlen, zstid *lasttid, char *chunk,
 						int *num_elems, zstid *tids, Datum *datums, bool *isnulls);
 static int encode_chunk(attstream_buffer *dst, zstid prevtid, int ntids,
 						zstid *tids, Datum *datums, bool *isnulls);
+static int chunk_num_elements(char *chunk, int attlen);
 
 /* Other internal functions. */
 static void merge_attstream_guts(Form_pg_attribute attr, attstream_buffer *buffer, char *chunks2, int chunks2len, zstid lasttid2);
@@ -299,6 +300,8 @@ get_attstream_chunk_cont(attstream_decoder *decoder, zstid *prevtid, zstid *firs
 		attr_data = (bytea *) palloc(len + VARHDRSZ);
 		SET_VARSIZE(attr_data, len + VARHDRSZ);
 		memcpy(VARDATA(attr_data), p, len);
+
+		decoder->num_elements = chunk_num_elements(p, decoder->attlen);
 
 		p += len;
 	}
@@ -2110,6 +2113,19 @@ skip_chunk_varlen(char *chunk, zstid *lasttid)
 		*lasttid = tid;
 		return sizeof(uint64) + total_len;
 	 }
+}
+
+static int
+chunk_num_elements(char *chunk, int attlen)
+{
+	char	   *p = chunk;
+	uint64		codeword;
+
+	memcpy(&codeword, p, sizeof(uint64));
+	p += sizeof(uint64);
+
+	int			selector = (codeword >> 60);
+	return attlen > 0 ? fixed_width_modes[selector].num_ints : varlen_modes[selector].num_ints;
 }
 
 static int
