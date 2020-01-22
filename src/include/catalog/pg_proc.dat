@@ -10780,6 +10780,13 @@
   proargmodes => '{i,i,i,i,i,o,o,o,o}',
   proargnames => '{attbyval,attlen,prevtid,lasttid,chunk,num_elements,tids,datums,isnulls}',
   prosrc => 'pg_zs_decode_chunk' },
+{ oid => '7007', descr => 'calculate the number of adjacent blocks per attribute',
+  proname => 'pg_zs_calculate_adjacent_block', prorettype => 'record',
+  proargtypes => 'regclass', prorows => '1000', proretset => 't',
+  proallargtypes => '{regclass,int4,int4,int4}',
+  proargmodes => '{i,o,o,o}',
+  proargnames => '{relid,attnum,num_runs,total_runs}',
+  prosrc => 'pg_zs_calculate_adjacent_block' },
 
 # zedstore
 { oid => '7020', descr => 'input zstid',

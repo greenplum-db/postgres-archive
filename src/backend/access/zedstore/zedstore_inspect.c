@@ -71,6 +71,7 @@ Datum		pg_zs_undo_pages(PG_FUNCTION_ARGS);
 Datum		pg_zs_btree_pages(PG_FUNCTION_ARGS);
 Datum		pg_zs_toast_pages(PG_FUNCTION_ARGS);
 Datum		pg_zs_meta_page(PG_FUNCTION_ARGS);
+Datum		pg_zs_calculate_adjacent_block(PG_FUNCTION_ARGS);
 
 Datum
 pg_zs_page_type(PG_FUNCTION_ARGS)
@@ -1022,4 +1023,119 @@ pg_zs_meta_page(PG_FUNCTION_ARGS)
 	result = HeapTupleGetDatum(tuple);
 
 	PG_RETURN_DATUM(result);
+}
+
+/*
+ * Function to check whether blocks are adjacent in relfile.
+ *
+ * Returns the number of runs of consecutive blocks per attribute and the total
+ * number of blocks per attribute.
+ */
+Datum
+pg_zs_calculate_adjacent_block(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+
+	Buffer buf;
+	Relation	rel;
+	Page		page;
+	ZSBtreePageOpaque *opaque;
+	MemoryContext per_query_ctx;
+	MemoryContext oldcontext;
+
+	Tuplestorestate *tupstore;
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TupleDesc	tupdesc;
+
+	int *total_blocks;
+	int *num_runs;
+
+	Datum		values[3];
+	bool		nulls[3];
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("must be superuser to use zedstore inspection functions"))));
+
+	rel = table_open(relid, AccessShareLock);
+
+	/*
+	 * Reject attempts to read non-local temporary relations; we would be
+	 * likely to get wrong data since we have no visibility into the owning
+	 * session's local buffers.
+	 */
+	if (RELATION_IS_OTHER_TEMP(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot access temporary tables of other sessions")));
+
+	/* Switch into long-lived context to construct returned data structures */
+	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+	oldcontext = MemoryContextSwitchTo(per_query_ctx);
+
+	/* Build a tuple descriptor for our result type */
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = tupdesc;
+
+	MemoryContextSwitchTo(oldcontext);
+
+	total_blocks = (int *)palloc0((rel->rd_att->natts + 1) * sizeof(int));
+	num_runs = (int *)palloc0((rel->rd_att->natts + 1) * sizeof(int));
+
+	for (int attnum=0; attnum <= rel->rd_att->natts; attnum++)
+	{
+		BlockNumber blkno;
+		buf = zsbt_descend(rel, attnum, MinZSTid, 0, true);
+
+		if (buf == InvalidBuffer)
+			continue;
+
+		blkno = BufferGetBlockNumber(buf);
+
+		page = BufferGetPage(buf);
+		opaque = ZSBtreePageGetOpaque(page);
+
+		num_runs[attnum] = 1;
+		total_blocks[attnum] = 1;
+
+		while (opaque->zs_next != InvalidBlockNumber)
+		{
+			if (opaque->zs_next != blkno + 1)
+			{
+				num_runs[attnum]++;
+			}
+			total_blocks[attnum]++;
+
+			UnlockReleaseBuffer(buf);
+
+			buf = ReadBuffer(rel, opaque->zs_next);
+			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+			blkno = BufferGetBlockNumber(buf);
+
+			page = BufferGetPage(buf);
+			opaque = ZSBtreePageGetOpaque(page);
+		}
+
+		UnlockReleaseBuffer(buf);
+
+		values[0] = Int32GetDatum(attnum);
+		values[1] = Int32GetDatum(num_runs[attnum]);
+		values[2] = Int32GetDatum(total_blocks[attnum]);
+		nulls[0] = false;
+		nulls[1] = false;
+		nulls[2] = false;
+
+		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+	}
+	tuplestore_donestoring(tupstore);
+
+	table_close(rel, AccessShareLock);
+
+	return (Datum) 0;
 }
