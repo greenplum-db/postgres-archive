@@ -940,7 +940,7 @@ extern bool decode_attstream_cont(attstream_decoder *decoder);
 extern bool get_attstream_chunk_cont(attstream_decoder *decoder, zstid *prevtid, zstid *firsttid, zstid *lasttid, bytea **chunk);
 
 /* prototypes for functions in zedstore_tuplebuffer.c */
-extern zstid zsbt_tuplebuffer_allocate_tid(Relation rel, TransactionId xid, CommandId cid);
+extern zstid zsbt_tuplebuffer_allocate_tids(Relation rel, TransactionId xid, CommandId cid, int ntids);
 extern void zsbt_tuplebuffer_flush(Relation rel);
 extern void zsbt_tuplebuffer_spool_tuple(Relation rel, zstid tid, Datum *datums, bool *isnulls);
 extern void zsbt_tuplebuffer_spool_slots(Relation rel, zstid *tids, TupleTableSlot **slots, int ntuples);
