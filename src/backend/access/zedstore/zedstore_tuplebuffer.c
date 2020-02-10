@@ -19,17 +19,29 @@
 #include "utils/datum.h"
 #include "utils/hashutils.h"
 
-#define TID_RESERVATION_SIZE		100
-
 /*
- * If we see more than TID_RESERVATION_THRESHOLD insertions with the
+ * Single inserts:
+ * If we see more than SINGLE_INSERT_TID_RESERVATION_THRESHOLD insertions with the
  * same XID and CID, with no "flush" calls in between, we start reserving
- * TIDs in batches. The downside of reserving TIDs in batches is that if we
- * are left with any unused TIDs at end of transaction (or when a "flush"
- * call comes), we need to go and kill the unused TIDs. So only do batching
- * when it seems like we're inserting a lot of rows.
+ * TIDs in batches of size SINGLE_INSERT_TID_RESERVATION_SIZE. The downside of
+ * reserving TIDs in batches is that if we are left with any unused TIDs at end
+ * of transaction (or when a "flush" call comes), we need to go and kill the
+ * unused TIDs. So only do batching when it seems like we're inserting a lot of rows.
+ *
+ * Multi inserts:
+ * Whenever we see a multi-insert, we allocate MULTI_INSERT_TID_RESERVATION_FACTOR
+ * times more tids than the number requested. This is to ensure that we don't
+ * end up with inefficient page splits from out-of-tid-order inserts into full-ish
+ * btree pages. Such inserts are typically observed under highly concurrent workloads.
+ * See https://www.postgresql.org/message-id/CAAKRu_YxyYOCCO2e83UmHb51sky1hXgeRzQw-PoqT1iHj2ZKVg%40mail.gmail.com
+ * for more details.
+ *
+ * TODO: expose these constants as GUCs as they are very workload sensitive.
  */
-#define TID_RESERVATION_THRESHOLD	5
+
+#define SINGLE_INSERT_TID_RESERVATION_THRESHOLD	5
+#define SINGLE_INSERT_TID_RESERVATION_SIZE		100
+#define MULTI_INSERT_TID_RESERVATION_FACTOR		10
 
 #define ATTBUFFER_SIZE				(1024 * 1024)
 
@@ -52,13 +64,12 @@ typedef struct
 	int			natts;			/* # of attributes on table might change, if it's ALTERed */
 	attbuffer	*attbuffers;
 
-	uint64		num_repeated_inserts;	/* number of inserted tuples since last flush */
+	uint64		num_repeated_single_inserts;	/* # of repeated single inserts for the same (xid, cid) */
 
 	TransactionId reserved_tids_xid;
 	CommandId	reserved_tids_cid;
-	zstid		reserved_tids_start;
-	zstid		reserved_tids_next;
-	zstid		reserved_tids_end;
+	zstid		reserved_tids_start;	/* inclusive */
+	zstid		reserved_tids_end;		/* inclusive */
 
 } tuplebuffer;
 
@@ -119,12 +130,11 @@ retry:
 			zsbt_attbuffer_init(attr, attbuffer);
 		}
 
-		tupbuffer->reserved_tids_xid = InvalidTransactionId;
-		tupbuffer->reserved_tids_cid = InvalidCommandId;
-		tupbuffer->reserved_tids_start = InvalidZSTid;
-		tupbuffer->reserved_tids_next = InvalidZSTid;
-		tupbuffer->reserved_tids_end = InvalidZSTid;
-		tupbuffer->num_repeated_inserts = 0;
+		tupbuffer->reserved_tids_xid           = InvalidTransactionId;
+		tupbuffer->reserved_tids_cid           = InvalidCommandId;
+		tupbuffer->reserved_tids_start         = InvalidZSTid;
+		tupbuffer->reserved_tids_end           = InvalidZSTid;
+		tupbuffer->num_repeated_single_inserts = 0;
 
 		MemoryContextSwitchTo(oldcxt);
 	}
@@ -138,10 +148,24 @@ retry:
 }
 
 /*
- * Allocate a TID for insert.
+ * Allocate TIDs for insert.
+ *
+ * First check if the reserved tids can cater to the number of tids requested for
+ * allocation (ntids). If yes, consume the tids from these reserved tids. Else,
+ * we have to request more tids by inserting into the tid tree.
+ *
+ * We reserve tids inside the tupbuffer for the same (xid, cid) combo. The way we
+ * reserve tids is slightly different for single-insert vs multi-insert.
+ *
+ * For single inserts, in the same (xid, cid) once we encounter number of inserts =
+ * SINGLE_INSERT_TID_RESERVATION_THRESHOLD, we request and reserve
+ * SINGLE_INSERT_TID_RESERVATION_SIZE number of tids.
+ *
+ * For multi-inserts, we request and reserve (ntids * MULTI_INSERT_TID_RESERVATION_FACTOR)
+ * number of tids.
  */
 zstid
-zsbt_tuplebuffer_allocate_tid(Relation rel, TransactionId xid, CommandId cid)
+zsbt_tuplebuffer_allocate_tids(Relation rel, TransactionId xid, CommandId cid, int ntids)
 {
 	tuplebuffer *tupbuffer;
 	zstid		result;
@@ -156,36 +180,58 @@ zsbt_tuplebuffer_allocate_tid(Relation rel, TransactionId xid, CommandId cid)
 		 * is the first insertion.)
 		 */
 		tuplebuffer_kill_unused_reserved_tids(rel, tupbuffer);
-		tupbuffer->num_repeated_inserts = 0;
+		tupbuffer->num_repeated_single_inserts = 0;
 
 		tupbuffer->reserved_tids_xid = xid;
 		tupbuffer->reserved_tids_cid = cid;
+		tupbuffer->reserved_tids_start = InvalidZSTid;
+		tupbuffer->reserved_tids_end = InvalidZSTid;
 	}
 
-	if (tupbuffer->reserved_tids_next < tupbuffer->reserved_tids_end)
+	if ((tupbuffer->reserved_tids_start != InvalidZSTid &&
+		tupbuffer->reserved_tids_end != InvalidZSTid) && ntids <=
+		(tupbuffer->reserved_tids_end - tupbuffer->reserved_tids_start + 1))
 	{
-		/* We have pre-reserved TIDs. Consume one of them. */
-		Assert(tupbuffer->reserved_tids_next >= tupbuffer->reserved_tids_start);
-		Assert(tupbuffer->reserved_tids_next < tupbuffer->reserved_tids_end);
-		result = (tupbuffer->reserved_tids_next++);
+		/* We have enough reserved tids */
+		result = tupbuffer->reserved_tids_start;
+		tupbuffer->reserved_tids_start += ntids;
 	}
-	else if (tupbuffer->num_repeated_inserts < TID_RESERVATION_THRESHOLD)
+	else if (ntids == 1)
 	{
-		/* We haven't seen many inserts yet, so just allocate a single TID for this. */
-		result = zsbt_tid_multi_insert(rel, 1, xid, cid,
-									   INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
+		/* We don't have enough reserved tids for a single insert */
+		if (tupbuffer->num_repeated_single_inserts < SINGLE_INSERT_TID_RESERVATION_THRESHOLD)
+		{
+			/* We haven't seen many single inserts yet, so just allocate a single TID for this. */
+			result = zsbt_tid_multi_insert(rel, 1, xid, cid,
+										   INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
+			/* Since we don't reserve any tids, invalidate reservation fields */
+			tupbuffer->reserved_tids_start = InvalidZSTid;
+			tupbuffer->reserved_tids_end = InvalidZSTid;
+		}
+		else
+		{
+			/* We're in batch mode for single inserts. Reserve a new block of TIDs. */
+			result = zsbt_tid_multi_insert(rel, SINGLE_INSERT_TID_RESERVATION_SIZE, xid, cid,
+										   INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
+			tupbuffer->reserved_tids_start = result + 1;
+			tupbuffer->reserved_tids_end = result + SINGLE_INSERT_TID_RESERVATION_SIZE - 1;
+		}
+		tupbuffer->num_repeated_single_inserts++;
 	}
 	else
 	{
-		/* We're in batch mode. Reserve a new block of TIDs. */
-		result = zsbt_tid_multi_insert(rel, TID_RESERVATION_SIZE, xid, cid,
-									   INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
-		tupbuffer->reserved_tids_start = result;
-		tupbuffer->reserved_tids_next = result + 1;
-		tupbuffer->reserved_tids_end = result + TID_RESERVATION_SIZE;
-	}
+		/* We don't have enough tids for a multi-insert. */
 
-	tupbuffer->num_repeated_inserts++;
+		/*
+		 * Kill the unused tids in the tuple buffer first since we will replace
+		 * them with a list of fresh continuous tids.
+		 */
+		tuplebuffer_kill_unused_reserved_tids(rel, tupbuffer);
+		result = zsbt_tid_multi_insert(rel, MULTI_INSERT_TID_RESERVATION_FACTOR * ntids, xid, cid,
+										 INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
+		tupbuffer->reserved_tids_end = result + (MULTI_INSERT_TID_RESERVATION_FACTOR * ntids) - 1;
+		tupbuffer->reserved_tids_start = result + ntids;
+	}
 
 	return result;
 }
@@ -374,7 +420,9 @@ tuplebuffer_kill_unused_reserved_tids(Relation rel, tuplebuffer *tupbuffer)
 	IntegerSet *unused_tids;
 	zstid		tid;
 
-	if (tupbuffer->reserved_tids_next == tupbuffer->reserved_tids_end)
+	if ((tupbuffer->reserved_tids_start == InvalidZSTid &&
+		tupbuffer->reserved_tids_end == InvalidZSTid) ||
+		tupbuffer->reserved_tids_start > tupbuffer->reserved_tids_end)
 		return;	/* no reserved TIDs */
 
 	/*
@@ -391,8 +439,8 @@ tuplebuffer_kill_unused_reserved_tids(Relation rel, tuplebuffer *tupbuffer)
 	 */
 	unused_tids = intset_create();
 
-	for (tid = tupbuffer->reserved_tids_next;
-		 tid < tupbuffer->reserved_tids_end;
+	for (tid = tupbuffer->reserved_tids_start;
+		 tid <= tupbuffer->reserved_tids_end;
 		 tid++)
 	{
 		intset_add_member(unused_tids, tid);
@@ -401,7 +449,6 @@ tuplebuffer_kill_unused_reserved_tids(Relation rel, tuplebuffer *tupbuffer)
 	zsbt_tid_remove(rel, unused_tids);
 
 	tupbuffer->reserved_tids_start = InvalidZSTid;
-	tupbuffer->reserved_tids_next = InvalidZSTid;
 	tupbuffer->reserved_tids_end = InvalidZSTid;
 }
 
@@ -418,7 +465,7 @@ tuplebuffer_flush_internal(Relation rel, tuplebuffer *tupbuffer)
 		zsbt_attbuffer_flush(rel, attno, attbuffer, true);
 	}
 
-	tupbuffer->num_repeated_inserts = 0;
+	tupbuffer->num_repeated_single_inserts = 0;
 }
 
 void

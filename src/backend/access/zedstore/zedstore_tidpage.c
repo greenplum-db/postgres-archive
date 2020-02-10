@@ -1541,6 +1541,7 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *ne
 
 		if (RelationNeedsWAL(rel))
 			zsbt_wal_log_tidleaf_items(rel, buf, targetoff, true, newitems, undo_op);
+
 		END_CRIT_SECTION();
 
 #ifdef USE_ASSERT_CHECKING

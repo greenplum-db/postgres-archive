@@ -184,7 +184,7 @@ zedstoream_insert_internal(Relation relation, TupleTableSlot *slot, CommandId ci
 		elog(ERROR, "slot's attribute count doesn't match relcache entry");
 
 	if (speculative_token == INVALID_SPECULATIVE_TOKEN)
-		tid = zsbt_tuplebuffer_allocate_tid(relation, xid, cid);
+		tid = zsbt_tuplebuffer_allocate_tids(relation, xid, cid, 1);
 	else
 		tid = zsbt_tid_multi_insert(relation, 1, xid, cid, speculative_token,
 									InvalidUndoPtr);
@@ -261,8 +261,7 @@ zedstoream_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		return;
 	}
 
-	firsttid = zsbt_tid_multi_insert(relation, ntuples, xid, cid,
-									 INVALID_SPECULATIVE_TOKEN, InvalidUndoPtr);
+	firsttid = zsbt_tuplebuffer_allocate_tids(relation, xid, cid, ntuples);
 
 	tids = palloc(ntuples * sizeof(zstid));
 	for (i = 0; i < ntuples; i++)
