@@ -57,6 +57,7 @@ static zstid zsbt_tid_update_insert_new(Relation rel, TransactionId xid, Command
 static bool zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 									  TransactionId xid, CommandId cid, bool key_update, ZSUndoRecPtr prevrecptr);
 static OffsetNumber zsbt_binsrch_tidpage(zstid key, Page page);
+static void zsbt_wal_log_tidleaf_items_begin(int nitems, zs_pending_undo_op *undo_op);
 static void zsbt_wal_log_tidleaf_items(Relation rel, Buffer buf,
 									   OffsetNumber off, bool replace, List *items,
 									   zs_pending_undo_op *undo_op);
@@ -1380,6 +1381,9 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems, zs_pending_undo_op 
 		OffsetNumber startoff;
 		OffsetNumber off;
 
+		if (RelationNeedsWAL(rel))
+			zsbt_wal_log_tidleaf_items_begin(list_length(newitems), undo_op);
+
 		START_CRIT_SECTION();
 
 		startoff = maxoff + 1;
@@ -1504,6 +1508,9 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *ne
 	{
 		ZSTidArrayItem *newitem;
 		OffsetNumber off;
+
+		if (RelationNeedsWAL(rel))
+			zsbt_wal_log_tidleaf_items_begin(list_length(newitems), undo_op);
 
 		START_CRIT_SECTION();
 
@@ -1917,6 +1924,32 @@ zsbt_binsrch_tidpage(zstid key, Page page)
 	return low - 1;
 }
 
+/*
+ * Start a WAL operation to log changes to tid tree leaf items.
+ * This allocates enough space to accommodate records for the tid leaf items and
+ * any associated undo_op.
+ */
+static void
+zsbt_wal_log_tidleaf_items_begin(int nitems, zs_pending_undo_op *undo_op)
+{
+	int nrdatas;
+
+	XLogBeginInsert();
+	/*
+	 * We allocate an rdata per tid leaf item. We may need two extra
+	 * rdatas for UNDO. This must be called before we enter the critical
+	 * section as XLogEnsureRecordSpace() performs memory allocation.
+	 */
+	nrdatas = nitems + 1;
+	if (undo_op)
+		nrdatas += 2;
+	XLogEnsureRecordSpace(0, nrdatas);
+}
+
+/*
+ * It must be called after zsbt_wal_log_tidleaf_items_begin() is called and it
+ * must be called from a critical section.
+ */
 static void
 zsbt_wal_log_tidleaf_items(Relation rel, Buffer buf,
 						   OffsetNumber off, bool replace, List *items,
@@ -1926,10 +1959,10 @@ zsbt_wal_log_tidleaf_items(Relation rel, Buffer buf,
 	XLogRecPtr	recptr;
 	wal_zedstore_tidleaf_items xlrec;
 
+	Assert(CritSectionCount > 0);
+
 	xlrec.nitems = list_length(items);
 	xlrec.off = off;
-
-	XLogBeginInsert();
 	XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 	XLogRegisterData((char *) &xlrec, SizeOfZSWalTidLeafItems);
 
