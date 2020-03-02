@@ -438,6 +438,24 @@ pg_zs_dump_attstreams(PG_FUNCTION_ARGS)
 	MemoryContext per_query_ctx;
 	MemoryContext oldcontext;
 
+	Datum		values[14];
+	bool		nulls[14];
+
+	Buffer		buf;
+	Page		page;
+	ZSBtreePageOpaque *opaque;
+	int			chunkno;
+	bool		upperstream;
+	bool		attbyval;
+	int16		attlen;
+	int			chunk_start;
+	PageHeader	phdr;
+
+	attstream_decoder decoder;
+
+	ZSAttStream *streams[2];
+	int			nstreams = 0;
+
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
@@ -481,21 +499,6 @@ pg_zs_dump_attstreams(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary tables of other sessions")));
 
-	Datum		values[14];
-	bool		nulls[14];
-
-	Buffer		buf;
-	Page		page;
-	ZSBtreePageOpaque *opaque;
-	int			chunkno;
-	bool		upperstream;
-	bool		attbyval;
-	int16		attlen;
-	int			chunk_start;
-	PageHeader	phdr;
-
-	attstream_decoder decoder;
-
 	memset(values, 0, sizeof(values));
 	memset(nulls, 0, sizeof(nulls));
 
@@ -532,8 +535,6 @@ pg_zs_dump_attstreams(PG_FUNCTION_ARGS)
 	attlen = rel->rd_att->attrs[opaque->zs_attno - 1].attlen;
 
 	phdr = (PageHeader) page;
-	ZSAttStream *streams[2];
-	int			nstreams = 0;
 
 	if (phdr->pd_lower - SizeOfPageHeaderData > SizeOfZSAttStreamHeader)
 	{

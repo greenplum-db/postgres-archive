@@ -2125,11 +2125,12 @@ chunk_num_elements(char *chunk, int attlen)
 {
 	char	   *p = chunk;
 	uint64		codeword;
+	int	    selector;
 
 	memcpy(&codeword, p, sizeof(uint64));
 	p += sizeof(uint64);
 
-	int			selector = (codeword >> 60);
+	selector = (codeword >> 60);
 	return attlen > 0 ? fixed_width_modes[selector].num_ints : varlen_modes[selector].num_ints;
 }
 
