@@ -43,6 +43,53 @@
  *      2 |     3 |    38.7542309420398383
  * (3 rows)
  *
+ *
+ * Measure of leaf page randomness
+ *
+ * A run is a sequence of consecutive leaf blocks. Two blocks are consecutive
+ * if they have consecutive block numbers
+ *
+ * select (pg_zs_calculate_adjacent_block('t_zedstore'::regclass)).*;
+ *
+ * attnum | nruns | nblocks
+ * -------+-------+---------
+ *      0 |    21 |      27
+ *      1 |     4 |     107
+ *      2 |     4 |     107
+ *      3 |     4 |     107
+ * (4 rows)
+ *
+ *
+ * Get attstreams inside an attribute leaf page. Each row represents an encoded chunk.
+ *
+ * select * from pg_zs_dump_attstreams('t_zedstore', 3);
+ *
+ * select attno, chunkno, upperstream, compressed, chunk_start, chunk_len, prevtid, firsttid, lasttid, itemcount, chunk from pg_zs_dump_attstreams('t_zedstore', 11) limit 5;
+ *  attno | chunkno | upperstream | compressed | chunk_start | chunk_len | prevtid | firsttid | lasttid | itemcount |                                                                                                                               chunk
+ *
+ * -------+---------+-------------+------------+-------------+-----------+---------+----------+---------+-----------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ * ---------------------------------------------------------------------------------------------------
+ *      1 |       0 | f           | f          |           0 |        12 | 0       | 10001    | 10001   |         1 | \x11270000000000f001000000
+ *      1 |       0 | t           | t          |           0 |        24 | 0       | 9931     | 9934    |         4 | \xcb660010000400c0cb260000cc260000cd260000ce260000
+ *      1 |       1 | t           | t          |          24 |        88 | 9934    | 9935     | 9954    |        20 | \x5555555555000030cf260000d0260000d1260000d2260000d3260000d4260000d5260000d6260000d7260000d8260000d9260000da260000db260000dc260000dd260000de260000df260000e02600
+ * 00e1260000e2260000
+ *      1 |       2 | t           | t          |         112 |        32 | 9954    | 9955     | 9960    |         6 | \x01020408102000b0e3260000e4260000e5260000e6260000e7260000e8260000
+ *      1 |       3 | t           | t          |         144 |       128 | 9960    | 9961     | 9990    |        30 | \xffffff3f00000010e9260000ea260000eb260000ec260000ed260000ee260000ef260000f0260000f1260000f2260000f3260000f4260000f5260000f6260000f7260000f8260000f9260000fa2600
+ * 00fb260000fc260000fd260000fe260000ff26000000270000012700000227000003270000042700000527000006270000
+ * (5 rows)
+ *
+ *
+ * Decode chunks inside an attribute leaf page.
+ *
+ * select * from pg_zs_dump_attstreams('t_zedstore', 11), pg_zs_decode_chunk(attbyval,attlen,prevtid,lasttid,chunk);
+ *
+ * select chunkno, tids, datums, isnulls from pg_zs_dump_attstreams('t_zedstore', 11), pg_zs_decode_chunk(attbyval,attlen,prevtid,lasttid,chunk);
+ *  chunkno |         tids          |                          datums                           |  isnulls
+ * ---------+-----------------------+-----------------------------------------------------------+-----------
+ *        0 | {10001}               | {"\\x01000000"}                                           | {f}
+ *        0 | {9931,9932,9933,9934} | {"\\xcb260000","\\xcc260000","\\xcd260000","\\xce260000"} | {f,f,f,f}
+ * (2 rows)
+ *
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -72,6 +119,8 @@ Datum		pg_zs_btree_pages(PG_FUNCTION_ARGS);
 Datum		pg_zs_toast_pages(PG_FUNCTION_ARGS);
 Datum		pg_zs_meta_page(PG_FUNCTION_ARGS);
 Datum		pg_zs_calculate_adjacent_block(PG_FUNCTION_ARGS);
+Datum		pg_zs_dump_attstreams(PG_FUNCTION_ARGS);
+Datum		pg_zs_decode_chunk(PG_FUNCTION_ARGS);
 
 Datum
 pg_zs_page_type(PG_FUNCTION_ARGS)
