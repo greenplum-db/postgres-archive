@@ -93,7 +93,7 @@ zedstore_toast_datum(Relation rel, AttrNumber attno, Datum value, zstid tid)
 	{
 		Size		thisbytes;
 
-		buf = zspage_getnewbuf(rel);
+		buf = zspage_getnewbuf(rel, ZS_INVALID_ATTRIBUTE_NUM);
 		if (prevbuf == InvalidBuffer)
 			firstblk = BufferGetBlockNumber(buf);
 
@@ -245,7 +245,7 @@ zedstore_toast_delete(Relation rel, Form_pg_attribute attr, zstid tid, BlockNumb
 		Assert(opaque->zs_attno == attr->attnum);
 
 		nextblk = opaque->zs_next;
-		zspage_delete_page(rel, buf, InvalidBuffer);
+		zspage_delete_page(rel, buf, InvalidBuffer, ZS_INVALID_ATTRIBUTE_NUM);
 		UnlockReleaseBuffer(buf);
 	}
 }

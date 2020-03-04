@@ -271,7 +271,15 @@ typedef struct StdRdOptions
 	int			parallel_workers;	/* max number of parallel workers */
 	bool		vacuum_index_cleanup;	/* enables index vacuuming and cleanup */
 	bool		vacuum_truncate;	/* enables vacuum to truncate a relation */
+	/*
+	 * request zedstore_rel_extension_factor #blocks from storage manager
+	 * whenever we need to extend the relation by one block for attribute/tid
+	 * tree pages.
+	 */
+	int 		zedstore_rel_extension_factor;
 } StdRdOptions;
+
+#define ZEDSTORE_DEFAULT_REL_EXTENSION_FACTOR 1
 
 #define HEAP_MIN_FILLFACTOR			10
 #define HEAP_DEFAULT_FILLFACTOR		100

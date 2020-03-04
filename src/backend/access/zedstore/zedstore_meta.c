@@ -130,7 +130,10 @@ zsmeta_expand_metapage_for_new_attributes(Relation rel)
 
 		/* Initialize the new attribute roots to InvalidBlockNumber */
 		for (int i = metapg->nattributes; i < natts; i++)
+		{
 			metapg->tree_root_dir[i].root = InvalidBlockNumber;
+			metapg->tree_root_dir[i].fpm_head = InvalidBlockNumber;
+		}
 
 		metapg->nattributes = natts;
 		((PageHeader) page)->pd_lower = new_pd_lower;
@@ -194,7 +197,10 @@ zsmeta_initmetapage_internal(int natts)
 
 	metapg->nattributes = natts;
 	for (int i = 0; i < natts; i++)
+	{
 		metapg->tree_root_dir[i].root = InvalidBlockNumber;
+		metapg->tree_root_dir[i].fpm_head = InvalidBlockNumber;
+	}
 
 	((PageHeader) page)->pd_lower = new_pd_lower;
 	return page;
@@ -449,7 +455,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 			LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
 
 			/* TODO: release lock on metapage while we do I/O */
-			rootbuf = zspage_getnewbuf(rel);
+			rootbuf = zspage_getnewbuf(rel, attno);
 
 			LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 			metapg = (ZSMetaPage *) PageGetContents(page);
@@ -461,7 +467,7 @@ zsmeta_get_root_for_attribute(Relation rel, AttrNumber attno, bool readonly)
 				 * finding a free page. We won't need the page we allocated,
 				 * after all.
 				 */
-				zspage_delete_page(rel, rootbuf, metabuf);
+				zspage_delete_page(rel, rootbuf, metabuf, attno);
 			}
 			else
 			{

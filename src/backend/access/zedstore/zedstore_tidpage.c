@@ -1194,7 +1194,7 @@ zsbt_tid_remove(Relation rel, IntegerSet *tids)
 			}
 
 			/* apply the changes */
-			zs_apply_split_changes(rel, stack, NULL);
+			zs_apply_split_changes(rel, stack, NULL, 0);
 		}
 
 		ReleaseBuffer(buf);
@@ -1458,7 +1458,7 @@ zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems, zs_pending_undo_op 
 			}
 
 			/* apply the changes */
-			zs_apply_split_changes(rel, stack, undo_op);
+			zs_apply_split_changes(rel, stack, undo_op, 0);
 		}
 
 		list_free(items);
@@ -1633,7 +1633,7 @@ zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber targetoff, List *ne
 			}
 
 			/* apply the changes */
-			zs_apply_split_changes(rel, stack, undo_op);
+			zs_apply_split_changes(rel, stack, undo_op, 0);
 		}
 
 		list_free(items);
@@ -1840,7 +1840,7 @@ zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items, zs_pending
 
 		Assert(stack->next->buf == InvalidBuffer);
 
-		nextbuf = zspage_getnewbuf(rel);
+		nextbuf = zspage_getnewbuf(rel, 0);
 		stack->next->buf = nextbuf;
 
 		thisopaque->zs_next = BufferGetBlockNumber(nextbuf);
@@ -1894,7 +1894,7 @@ zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items, zs_pending
 	}
 
 	/* Finally, overwrite all the pages we had to modify */
-	zs_apply_split_changes(rel, cxt.stack_head, undo_op);
+	zs_apply_split_changes(rel, cxt.stack_head, undo_op, 0);
 }
 
 static OffsetNumber

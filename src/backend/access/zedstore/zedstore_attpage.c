@@ -909,7 +909,7 @@ zsbt_attr_repack_writeback_pages(zsbt_attr_repack_context *cxt,
 
 		Assert(stack->next->buf == InvalidBuffer);
 
-		nextbuf = zspage_getnewbuf(rel);
+		nextbuf = zspage_getnewbuf(rel, attno);
 		stack->next->buf = nextbuf;
 
 		thisopaque->zs_next = BufferGetBlockNumber(nextbuf);
@@ -955,7 +955,7 @@ zsbt_attr_repack_writeback_pages(zsbt_attr_repack_context *cxt,
 	}
 
 	/* Finally, overwrite all the pages we had to modify */
-	zs_apply_split_changes(rel, cxt->stack_head, NULL);
+	zs_apply_split_changes(rel, cxt->stack_head, NULL, attno);
 }
 
 static void

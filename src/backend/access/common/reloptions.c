@@ -350,6 +350,15 @@ static relopt_int intRelOpts[] =
 		},
 		-1, 0, 1024
 	},
+	{
+		{
+			"zedstore_rel_extension_factor",
+			"Extend zedstore relations by zedstore_rel_extension_factor #blocks.",
+			RELOPT_KIND_HEAP,
+			ShareUpdateExclusiveLock
+		},
+		ZEDSTORE_DEFAULT_REL_EXTENSION_FACTOR, 1, INT_MAX
+	},
 
 	/* list terminator */
 	{{NULL}}
@@ -1524,7 +1533,9 @@ default_reloptions(Datum reloptions, bool validate, relopt_kind kind)
 		{"vacuum_index_cleanup", RELOPT_TYPE_BOOL,
 		offsetof(StdRdOptions, vacuum_index_cleanup)},
 		{"vacuum_truncate", RELOPT_TYPE_BOOL,
-		offsetof(StdRdOptions, vacuum_truncate)}
+		offsetof(StdRdOptions, vacuum_truncate)},
+		{"zedstore_rel_extension_factor", RELOPT_TYPE_INT,
+		 offsetof(StdRdOptions, zedstore_rel_extension_factor)}
 	};
 
 	return (bytea *) build_reloptions(reloptions, validate, kind,

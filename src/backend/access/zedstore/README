@@ -269,17 +269,25 @@ TOAST Page:
 Free Pages Map
 --------------
 
-There is a simple Free Pages Map, which is just a linked list of unused
-blocks. The block number of the first unused page in the list is stored
+The Free Page Map structure used in Zedstore is simply a linked list of unused
+blocks. There are multiple free page maps, with one free page map for the table,
+to cater to allocation requests for UNDO pages. There is a free page map for the
+tid tree and a separate free page map for each attribute (we use the term
+attribute-level free page map for the free page map for the tid tree as well,
+considering it as attribute 0).
+The block number of the first unused page for each of these lists is stored
 in the metapage. Each unused block contains link to the next unused
 block in the chain. When a block comes unused, it is added to the
 head of the list.
 
+By batching page allocations and by having attribute-level free page maps, we
+ensure that each attribute B-tree gets more contiguous ranges of blocks, even under
+concurrent inserts to the same table to allow I/O readahead to be effective.
+The batching factor we use is the reloption: zedstore_rel_extension_factor.
+
 TODO: That doesn't scale very well, and the pages are reused in LIFO
 order. We'll probably want to do something smarter to avoid making the
-metapage a bottleneck for this, as well as try to batch the page
-allocations so that each attribute B-tree would get contiguous ranges
-of blocks, to allow I/O readahead to be effective.
+metapage a bottleneck for this.
 
 
 Enhancement ideas / alternative designs

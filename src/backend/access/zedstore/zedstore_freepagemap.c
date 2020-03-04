@@ -123,22 +123,27 @@ zspage_is_unused(Buffer buf)
  * That's unfortunate, but hopefully won't happen too often.
  */
 Buffer
-zspage_getnewbuf(Relation rel)
+zspage_getnewbuf(Relation rel, AttrNumber attrNumber)
 {
 	Buffer		buf;
 	BlockNumber blk;
 	Buffer		metabuf;
 	Page		metapage;
+	ZSMetaPage  *metapg;
 	ZSMetaPageOpaque *metaopaque;
 
 	metabuf = ReadBuffer(rel, ZS_META_BLK);
 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
-	metapage = BufferGetPage(metabuf);
+	metapage   = BufferGetPage(metabuf);
 	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
+	metapg     = (ZSMetaPage *) PageGetContents(metapage);
 
-	/* Get a block from the FPM. */
-	blk = metaopaque->zs_fpm_head;
+	if (attrNumber == ZS_INVALID_ATTRIBUTE_NUM)
+		blk = metaopaque->zs_fpm_head;
+	else
+		blk = metapg->tree_root_dir[attrNumber].fpm_head;
+
 	if (blk == ZS_META_BLK)
 	{
 		/* metapage, not expected */
@@ -163,7 +168,10 @@ zspage_getnewbuf(Relation rel)
 		opaque = (ZSFreePageOpaque *) PageGetSpecialPointer(page);
 		next_free_blkno = opaque->zs_next;
 
-		metaopaque->zs_fpm_head = next_free_blkno;
+		if (attrNumber == ZS_INVALID_ATTRIBUTE_NUM)
+			metaopaque->zs_fpm_head = next_free_blkno;
+		else
+			metapg->tree_root_dir[attrNumber].fpm_head = next_free_blkno;
 
 		if (RelationNeedsWAL(rel))
 		{
@@ -191,10 +199,38 @@ zspage_getnewbuf(Relation rel)
 	}
 	else
 	{
-		/* No free pages. Have to extend the relation. */
-		UnlockReleaseBuffer(metabuf);
+		/*
+		 * No free pages in the FPM. Have to extend the relation.
+		 * 1. We extend the relation by zedstore_rel_extension_factor #blocks.
+		 * 2. Out of the zedstore_rel_extension_factor #blocks returned by the
+		 *    storage manager, we return the first block. The other blocks
+		 *    returned are prepended to the attribute level FPM.
+		 */
+		StdRdOptions *rd_options = (StdRdOptions *)rel->rd_options;
+		int extension_factor = rd_options ? rd_options->zedstore_rel_extension_factor : ZEDSTORE_DEFAULT_REL_EXTENSION_FACTOR;
+
 		buf = zspage_extendrel_newbuf(rel);
 		blk = BufferGetBlockNumber(buf);
+
+		Buffer *extrabufs = palloc((extension_factor - 1) * sizeof(Buffer));
+		for (int i = 0; i < extension_factor - 1; i++) {
+			extrabufs[i] = zspage_extendrel_newbuf(rel);
+			/*
+			 * We unlock the extrabuf here to prevent hitting MAX_SIMUL_LWLOCKS.
+			 * It is safe to unlock the extrabuf here as it cannot be referenced
+			 * by other backends until it is put on the attribute-level FPM.
+			 * We grab the lock again in the following loop before placing the
+			 * page on the FPM.
+			 */
+			LockBuffer(extrabufs[i], BUFFER_LOCK_UNLOCK);
+		}
+
+		for (int i = extension_factor - 2; i >=0; i--) {
+			LockBuffer(extrabufs[i], BUFFER_LOCK_EXCLUSIVE);
+			zspage_delete_page(rel, extrabufs[i], metabuf, attrNumber);
+			UnlockReleaseBuffer(extrabufs[i]);
+		}
+		UnlockReleaseBuffer(metabuf);
 	}
 
 	return buf;
@@ -280,11 +316,12 @@ zspage_extendrel_newbuf(Relation rel)
  * you can use zspage_mark_page_deleted() to avoid it.
  */
 void
-zspage_delete_page(Relation rel, Buffer buf, Buffer metabuf)
+zspage_delete_page(Relation rel, Buffer buf, Buffer metabuf, AttrNumber attrNumber)
 {
 	bool		release_metabuf;
 	BlockNumber blk = BufferGetBlockNumber(buf);
 	Page		metapage;
+	ZSMetaPage  *metapg;
 	ZSMetaPageOpaque *metaopaque;
 	Page		page;
 	BlockNumber next_free_blkno;
@@ -299,12 +336,27 @@ zspage_delete_page(Relation rel, Buffer buf, Buffer metabuf)
 		release_metabuf = false;
 
 	metapage = BufferGetPage(metabuf);
+	metapg = (ZSMetaPage *) PageGetContents(metapage);
 	metaopaque = (ZSMetaPageOpaque *) PageGetSpecialPointer(metapage);
 
 	page = BufferGetPage(buf);
-	next_free_blkno = metaopaque->zs_fpm_head;
-	zspage_mark_page_deleted(page, next_free_blkno);
-	metaopaque->zs_fpm_head = blk;
+
+	if (attrNumber != ZS_INVALID_ATTRIBUTE_NUM)
+	{
+		/*
+		 * Add the page to the attribute specific free page map.
+		 */
+		next_free_blkno = metapg->tree_root_dir[attrNumber].fpm_head;
+		zspage_mark_page_deleted(page, next_free_blkno);
+		metapg->tree_root_dir[attrNumber].fpm_head = blk;
+	}
+	else
+	{
+		next_free_blkno = metaopaque->zs_fpm_head;
+		zspage_mark_page_deleted(page, next_free_blkno);
+		metaopaque->zs_fpm_head = blk;
+	}
+
 
 	MarkBufferDirty(metabuf);
 	MarkBufferDirty(buf);
