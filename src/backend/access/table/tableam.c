@@ -727,6 +727,12 @@ InitAnalyzeSampleContextForChild(AnalyzeSampleContext *context,
 			ExecDropSingleTupleTableSlot(context->sample_slots[ANALYZE_SAMPLE_DATA]);
 			context->sample_slots[ANALYZE_SAMPLE_DATA] = NULL;
 		}
+		/* We also cannot use previous sample slot anymore */
+		if (context->sample_slots[ANALYZE_SAMPLE_DISKSIZE])
+		{
+			ExecDropSingleTupleTableSlot(context->sample_slots[ANALYZE_SAMPLE_DISKSIZE]);
+			context->sample_slots[ANALYZE_SAMPLE_DISKSIZE] = NULL;
+		}
 	}
 }
 
@@ -839,7 +845,7 @@ AnalyzeRecordSampleRow(AnalyzeSampleContext *context,
 		tuple = sample_tuple;
 
 	/* We may need to convert from child's rowtype to parent's */
-	if (context->tup_convert_map != NULL)
+	if (context->tup_convert_map != NULL && type == ANALYZE_SAMPLE_DATA)
 	{
 		HeapTuple	newtup;
 		newtup = execute_attr_map_tuple(tuple, context->tup_convert_map);
