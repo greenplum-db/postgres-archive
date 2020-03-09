@@ -2483,6 +2483,11 @@ zedstoream_scan_analyze_next_tuple(TransactionId OldestXmin, AnalyzeSampleContex
 		{
 			slot = AnalyzeGetSampleSlot(context, scan->rs_rd, ANALYZE_SAMPLE_DISKSIZE);
 
+			ExecClearTuple(slot);
+
+			for (i = 0; i < scan->rs_rd->rd_att->natts; i++)
+				slot->tts_isnull[i] = true;
+
 			for (i = 1; i < sscan->proj_data.num_proj_atts; i++)
 			{
 				attr_scan = &sscan->proj_data.attr_scans[i - 1];	
@@ -2491,8 +2496,9 @@ zedstoream_scan_analyze_next_tuple(TransactionId OldestXmin, AnalyzeSampleContex
 				slot->tts_values[attno - 1] =
 					Float8GetDatum(attr_scan->decoder.avg_elements_size); 
 				slot->tts_isnull[attno - 1] = false;
-				slot->tts_flags &= ~TTS_FLAG_EMPTY;
 			}
+
+			slot->tts_flags &= ~TTS_FLAG_EMPTY;
 		}
 
 		context->liverows++;
