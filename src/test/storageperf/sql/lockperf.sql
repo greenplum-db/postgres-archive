@@ -25,7 +25,7 @@ select pg_current_wal_insert_lsn() as wal_before, extract(epoch from now()) as t
 select pg_current_wal_insert_lsn() as wal_after, extract(epoch from now()) as time_after
 \gset
 INSERT INTO results (testname, size, walsize, time)
-  VALUES ('pgbench, FOR SHARE',
+  VALUES ('lockperf, pgbench, FOR SHARE',
           pg_total_relation_size('twocol'),
 	  :'wal_after'::pg_lsn - :'wal_before',
 	  :time_after - :time_before);
@@ -43,7 +43,7 @@ select pg_current_wal_insert_lsn() as wal_before, extract(epoch from now()) as t
 select pg_current_wal_insert_lsn() as wal_after, extract(epoch from now()) as time_after
 \gset
 INSERT INTO results (testname, size, walsize, time)
-  VALUES ('pgbench, UPDATE',
+  VALUES ('lockperf, pgbench, UPDATE',
           pg_total_relation_size('twocol'),
 	  :'wal_after'::pg_lsn - :'wal_before',
 	  :time_after - :time_before);

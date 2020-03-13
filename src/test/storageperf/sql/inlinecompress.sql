@@ -60,7 +60,7 @@ select pg_current_wal_insert_lsn() as wal_after, extract(epoch from now()) as ti
 \gset
 
 INSERT INTO results (testname, size, walsize, time)
-  VALUES ('SELECT, seqscan',
+  VALUES ('inlinecompress, SELECT, seqscan',
           pg_total_relation_size('inlinecompress'),
 	  :'wal_after'::pg_lsn - :'wal_before',
 	  :time_after - :time_before);
@@ -86,7 +86,7 @@ select pg_current_wal_insert_lsn() as wal_after, extract(epoch from now()) as ti
 \gset
 
 INSERT INTO results (testname, size, walsize, time)
-  VALUES ('SELECT, bitmap scan',
+  VALUES ('inlinecompress, SELECT, bitmap scan',
           pg_total_relation_size('inlinecompress'),
 	  :'wal_after'::pg_lsn - :'wal_before',
 	  :time_after - :time_before);
