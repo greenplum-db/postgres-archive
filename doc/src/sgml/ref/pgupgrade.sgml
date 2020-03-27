@@ -114,8 +114,8 @@
      </varlistentry>
 
      <varlistentry>
-      <term><option>-j</option></term>
-      <term><option>--jobs</option></term>
+      <term><option>-j <replaceable class="parameter">njobs</replaceable></option></term>
+      <term><option>--jobs=<replaceable class="parameter">njobs</replaceable></option></term>
       <listitem><para>number of simultaneous processes or threads to use
       </para></listitem>
      </varlistentry>
@@ -773,9 +773,17 @@ psql --username=postgres --file=script.sql postgres
   <para>
    <application>pg_upgrade</application> does not support upgrading of databases
    containing table columns using these <type>reg*</type> OID-referencing system data types:
-   <type>regproc</type>, <type>regprocedure</type>, <type>regoper</type>,
-   <type>regoperator</type>, <type>regconfig</type>, and
-   <type>regdictionary</type>.  (<type>regtype</type> can be upgraded.)
+   <simplelist>
+    <member><type>regcollation</type></member>
+    <member><type>regconfig</type></member>
+    <member><type>regdictionary</type></member>
+    <member><type>regnamespace</type></member>
+    <member><type>regoper</type></member>
+    <member><type>regoperator</type></member>
+    <member><type>regproc</type></member>
+    <member><type>regprocedure</type></member>
+   </simplelist>
+   (<type>regclass</type>, <type>regrole</type>, and <type>regtype</type> can be upgraded.)
   </para>
 
   <para>

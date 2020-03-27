@@ -6,7 +6,7 @@
  * gram.y
  *	  POSTGRESQL BISON rules/actions
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -249,7 +249,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 		AlterDatabaseStmt AlterDatabaseSetStmt AlterDomainStmt AlterEnumStmt
 		AlterFdwStmt AlterForeignServerStmt AlterGroupStmt
 		AlterObjectDependsStmt AlterObjectSchemaStmt AlterOwnerStmt
-		AlterOperatorStmt AlterSeqStmt AlterSystemStmt AlterTableStmt
+		AlterOperatorStmt AlterTypeStmt AlterSeqStmt AlterSystemStmt AlterTableStmt
 		AlterTblSpcStmt AlterExtensionStmt AlterExtensionContentsStmt AlterForeignTableStmt
 		AlterCompositeTypeStmt AlterUserMappingStmt
 		AlterRoleStmt AlterRoleSetStmt AlterPolicyStmt AlterStatsStmt
@@ -598,10 +598,13 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
  * the set of keywords.  PL/pgSQL depends on this so that it can share the
  * same lexer.  If you add/change tokens here, fix PL/pgSQL to match!
  *
+ * UIDENT and USCONST are reduced to IDENT and SCONST in parser.c, so that
+ * they need no productions here; but we must assign token codes to them.
+ *
  * DOT_DOT is unused in the core SQL grammar, and so will always provoke
  * parse errors.  It is needed by PL/pgSQL.
  */
-%token <str>	IDENT FCONST SCONST BCONST XCONST Op
+%token <str>	IDENT UIDENT FCONST SCONST USCONST BCONST XCONST Op
 %token <ival>	ICONST PARAM
 %token			TYPECAST DOT_DOT COLON_EQUALS EQUALS_GREATER
 %token			LESS_EQUALS GREATER_EQUALS NOT_EQUALS
@@ -636,7 +639,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	DOUBLE_P DROP
 
 	EACH ELSE ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ESCAPE EVENT EXCEPT
-	EXCLUDE EXCLUDING EXCLUSIVE EXECUTE EXISTS EXPLAIN
+	EXCLUDE EXCLUDING EXCLUSIVE EXECUTE EXISTS EXPLAIN EXPRESSION
 	EXTENSION EXTERNAL EXTRACT
 
 	FALSE_P FAMILY FETCH FILTER FIRST_P FLOAT_P FOLLOWING FOR
@@ -691,8 +694,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	TREAT TRIGGER TRIM TRUE_P
 	TRUNCATE TRUSTED TYPE_P TYPES_P
 
-	UNBOUNDED UNCOMMITTED UNENCRYPTED UNION UNIQUE UNKNOWN UNLISTEN UNLOGGED
-	UNTIL UPDATE USER USING
+	UESCAPE UNBOUNDED UNCOMMITTED UNENCRYPTED UNION UNIQUE UNKNOWN
+	UNLISTEN UNLOGGED UNTIL UPDATE USER USING
 
 	VACUUM VALID VALIDATE VALIDATOR VALUE_P VALUES VARCHAR VARIADIC VARYING
 	VERBOSE VERSION_P VIEW VIEWS VOLATILE
@@ -844,6 +847,7 @@ stmt :
 			| AlterObjectSchemaStmt
 			| AlterOwnerStmt
 			| AlterOperatorStmt
+			| AlterTypeStmt
 			| AlterPolicyStmt
 			| AlterSeqStmt
 			| AlterSystemStmt
@@ -2124,6 +2128,23 @@ alter_table_cmd:
 					AlterTableCmd *n = makeNode(AlterTableCmd);
 					n->subtype = AT_SetNotNull;
 					n->name = $3;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP EXPRESSION */
+			| ALTER opt_column ColId DROP EXPRESSION
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_DropExpression;
+					n->name = $3;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <name> ALTER [COLUMN] <colname> DROP EXPRESSION IF EXISTS */
+			| ALTER opt_column ColId DROP EXPRESSION IF_P EXISTS
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_DropExpression;
+					n->name = $3;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			/* ALTER TABLE <name> ALTER [COLUMN] <colname> SET STATISTICS <SignedIconst> */
@@ -4304,14 +4325,17 @@ NumericOnly_list:	NumericOnly						{ $$ = list_make1($1); }
 CreatePLangStmt:
 			CREATE opt_or_replace opt_trusted opt_procedural LANGUAGE NonReservedWord_or_Sconst
 			{
-				CreatePLangStmt *n = makeNode(CreatePLangStmt);
-				n->replace = $2;
-				n->plname = $6;
-				/* parameters are all to be supplied by system */
-				n->plhandler = NIL;
-				n->plinline = NIL;
-				n->plvalidator = NIL;
-				n->pltrusted = false;
+				/*
+				 * We now interpret parameterless CREATE LANGUAGE as
+				 * CREATE EXTENSION.  "OR REPLACE" is silently translated
+				 * to "IF NOT EXISTS", which isn't quite the same, but
+				 * seems more useful than throwing an error.  We just
+				 * ignore TRUSTED, as the previous code would have too.
+				 */
+				CreateExtensionStmt *n = makeNode(CreateExtensionStmt);
+				n->if_not_exists = $2;
+				n->extname = $6;
+				n->options = NIL;
 				$$ = (Node *)n;
 			}
 			| CREATE opt_or_replace opt_trusted opt_procedural LANGUAGE NonReservedWord_or_Sconst
@@ -4437,7 +4461,7 @@ DropTableSpaceStmt: DROP TABLESPACE name
  *
  *		QUERY:
  *             CREATE EXTENSION extension
- *             [ WITH ] [ SCHEMA schema ] [ VERSION version ] [ FROM oldversion ]
+ *             [ WITH ] [ SCHEMA schema ] [ VERSION version ]
  *
  *****************************************************************************/
 
@@ -4477,7 +4501,10 @@ create_extension_opt_item:
 				}
 			| FROM NonReservedWord_or_Sconst
 				{
-					$$ = makeDefElem("old_version", (Node *)makeString($2), @1);
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("CREATE EXTENSION ... FROM is no longer supported"),
+							 parser_errposition(@1)));
 				}
 			| CASCADE
 				{
@@ -9337,6 +9364,24 @@ operator_def_arg:
 			| qual_all_Op					{ $$ = (Node *)$1; }
 			| NumericOnly					{ $$ = (Node *)$1; }
 			| Sconst						{ $$ = (Node *)makeString($1); }
+		;
+
+/*****************************************************************************
+ *
+ * ALTER TYPE name SET define
+ *
+ * We repurpose ALTER OPERATOR's version of "definition" here
+ *
+ *****************************************************************************/
+
+AlterTypeStmt:
+			ALTER TYPE_P any_name SET '(' operator_def_list ')'
+				{
+					AlterTypeStmt *n = makeNode(AlterTypeStmt);
+					n->typeName = $3;
+					n->options = $6;
+					$$ = (Node *)n;
+				}
 		;
 
 /*****************************************************************************
@@ -15193,6 +15238,7 @@ unreserved_keyword:
 			| EXCLUSIVE
 			| EXECUTE
 			| EXPLAIN
+			| EXPRESSION
 			| EXTENSION
 			| EXTERNAL
 			| FAMILY
@@ -15374,6 +15420,7 @@ unreserved_keyword:
 			| TRUSTED
 			| TYPE_P
 			| TYPES_P
+			| UESCAPE
 			| UNBOUNDED
 			| UNCOMMITTED
 			| UNENCRYPTED

@@ -132,8 +132,8 @@ CREATE FOREIGN TABLE ft6 (
 -- ===================================================================
 -- tests for validator
 -- ===================================================================
--- requiressl, krbsrvname and gsslib are omitted because they depend on
--- configure options
+-- requiressl and some other parameters are omitted because
+-- valid values for them depend on configure options
 ALTER SERVER testserver1 OPTIONS (
 	use_remote_estimate 'false',
 	updatable 'true',
@@ -158,10 +158,10 @@ ALTER SERVER testserver1 OPTIONS (
 	sslcert 'value',
 	sslkey 'value',
 	sslrootcert 'value',
-	sslcrl 'value'
+	sslcrl 'value',
 	--requirepeer 'value',
-	-- krbsrvname 'value',
-	-- gsslib 'value',
+	krbsrvname 'value',
+	gsslib 'value'
 	--replication 'value'
 );
 -- Error, invalid list syntax
@@ -174,6 +174,18 @@ WARNING:  extension "bar" is not installed
 ALTER SERVER testserver1 OPTIONS (DROP extensions);
 ALTER USER MAPPING FOR public SERVER testserver1
 	OPTIONS (DROP user, DROP password);
+-- Attempt to add a valid option that's not allowed in a user mapping
+ALTER USER MAPPING FOR public SERVER testserver1
+	OPTIONS (ADD sslmode 'require');
+ERROR:  invalid option "sslmode"
+HINT:  Valid options in this context are: user, password, sslpassword, password_required, sslcert, sslkey
+-- But we can add valid ones fine
+ALTER USER MAPPING FOR public SERVER testserver1
+	OPTIONS (ADD sslpassword 'dummy');
+-- Ensure valid options we haven't used in a user mapping yet are
+-- permitted to check validation.
+ALTER USER MAPPING FOR public SERVER testserver1
+	OPTIONS (ADD sslkey 'value', ADD sslcert 'value');
 ALTER FOREIGN TABLE ft1 OPTIONS (schema_name 'S 1', table_name 'T 1');
 ALTER FOREIGN TABLE ft2 OPTIONS (schema_name 'S 1', table_name 'T 1');
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c1 OPTIONS (column_name 'C 1');
@@ -5437,6 +5449,37 @@ DELETE FROM ft2
 (10 rows)
 
 DELETE FROM ft2 WHERE ft2.c1 > 1200;
+-- Test UPDATE with a MULTIEXPR sub-select
+-- (maybe someday this'll be remotely executable, but not today)
+EXPLAIN (verbose, costs off)
+UPDATE ft2 AS target SET (c2, c7) = (
+    SELECT c2 * 10, c7
+        FROM ft2 AS src
+        WHERE target.c1 = src.c1
+) WHERE c1 > 1100;
+                                                                    QUERY PLAN                                                                     
+---------------------------------------------------------------------------------------------------------------------------------------------------
+ Update on public.ft2 target
+   Remote SQL: UPDATE "S 1"."T 1" SET c2 = $2, c7 = $3 WHERE ctid = $1
+   ->  Foreign Scan on public.ft2 target
+         Output: target.c1, $1, NULL::integer, target.c3, target.c4, target.c5, target.c6, $2, target.c8, (SubPlan 1 (returns $1,$2)), target.ctid
+         Remote SQL: SELECT "C 1", c3, c4, c5, c6, c8, ctid FROM "S 1"."T 1" WHERE (("C 1" > 1100)) FOR UPDATE
+         SubPlan 1 (returns $1,$2)
+           ->  Foreign Scan on public.ft2 src
+                 Output: (src.c2 * 10), src.c7
+                 Remote SQL: SELECT c2, c7 FROM "S 1"."T 1" WHERE (($1::integer = "C 1"))
+(9 rows)
+
+UPDATE ft2 AS target SET (c2, c7) = (
+    SELECT c2 * 10, c7
+        FROM ft2 AS src
+        WHERE target.c1 = src.c1
+) WHERE c1 > 1100;
+UPDATE ft2 AS target SET (c2) = (
+    SELECT c2 / 10
+        FROM ft2 AS src
+        WHERE target.c1 = src.c1
+) WHERE c1 > 1100;
 -- Test UPDATE/DELETE with WHERE or JOIN/ON conditions containing
 -- user-defined operators/functions
 ALTER SERVER loopback OPTIONS (DROP extensions);
@@ -6459,6 +6502,36 @@ DROP TRIGGER trig_row_after ON rem1;
 DROP TRIGGER trig_stmt_before ON rem1;
 DROP TRIGGER trig_stmt_after ON rem1;
 DELETE from rem1;
+-- Test multiple AFTER ROW triggers on a foreign table
+CREATE TRIGGER trig_row_after1
+AFTER INSERT OR UPDATE OR DELETE ON rem1
+FOR EACH ROW EXECUTE PROCEDURE trigger_data(23,'skidoo');
+CREATE TRIGGER trig_row_after2
+AFTER INSERT OR UPDATE OR DELETE ON rem1
+FOR EACH ROW EXECUTE PROCEDURE trigger_data(23,'skidoo');
+insert into rem1 values(1,'insert');
+NOTICE:  trig_row_after1(23, skidoo) AFTER ROW INSERT ON rem1
+NOTICE:  NEW: (1,insert)
+NOTICE:  trig_row_after2(23, skidoo) AFTER ROW INSERT ON rem1
+NOTICE:  NEW: (1,insert)
+update rem1 set f2  = 'update' where f1 = 1;
+NOTICE:  trig_row_after1(23, skidoo) AFTER ROW UPDATE ON rem1
+NOTICE:  OLD: (1,insert),NEW: (1,update)
+NOTICE:  trig_row_after2(23, skidoo) AFTER ROW UPDATE ON rem1
+NOTICE:  OLD: (1,insert),NEW: (1,update)
+update rem1 set f2 = f2 || f2;
+NOTICE:  trig_row_after1(23, skidoo) AFTER ROW UPDATE ON rem1
+NOTICE:  OLD: (1,update),NEW: (1,updateupdate)
+NOTICE:  trig_row_after2(23, skidoo) AFTER ROW UPDATE ON rem1
+NOTICE:  OLD: (1,update),NEW: (1,updateupdate)
+delete from rem1;
+NOTICE:  trig_row_after1(23, skidoo) AFTER ROW DELETE ON rem1
+NOTICE:  OLD: (1,updateupdate)
+NOTICE:  trig_row_after2(23, skidoo) AFTER ROW DELETE ON rem1
+NOTICE:  OLD: (1,updateupdate)
+-- cleanup
+DROP TRIGGER trig_row_after1 ON rem1;
+DROP TRIGGER trig_row_after2 ON rem1;
 -- Test WHEN conditions
 CREATE TRIGGER trig_row_before_insupd
 BEFORE INSERT OR UPDATE ON rem1
@@ -6689,7 +6762,7 @@ NOTICE:  trig_row_after(23, skidoo) AFTER ROW INSERT ON rem1
 NOTICE:  NEW: (13,"test triggered !")
   ctid  
 --------
- (0,29)
+ (0,32)
 (1 row)
 
 -- cleanup
@@ -7064,10 +7137,10 @@ select * from bar where f1 in (select f1 from foo) for update;
          Inner Unique: true
          Hash Cond: (bar.f1 = foo.f1)
          ->  Append
-               ->  Seq Scan on public.bar
-                     Output: bar.f1, bar.f2, bar.ctid, bar.*, bar.tableoid
-               ->  Foreign Scan on public.bar2 bar_1
+               ->  Seq Scan on public.bar bar_1
                      Output: bar_1.f1, bar_1.f2, bar_1.ctid, bar_1.*, bar_1.tableoid
+               ->  Foreign Scan on public.bar2 bar_2
+                     Output: bar_2.f1, bar_2.f2, bar_2.ctid, bar_2.*, bar_2.tableoid
                      Remote SQL: SELECT f1, f2, f3, ctid FROM public.loct2 FOR UPDATE
          ->  Hash
                Output: foo.ctid, foo.f1, foo.*, foo.tableoid
@@ -7075,10 +7148,10 @@ select * from bar where f1 in (select f1 from foo) for update;
                      Output: foo.ctid, foo.f1, foo.*, foo.tableoid
                      Group Key: foo.f1
                      ->  Append
-                           ->  Seq Scan on public.foo
-                                 Output: foo.ctid, foo.f1, foo.*, foo.tableoid
-                           ->  Foreign Scan on public.foo2 foo_1
+                           ->  Seq Scan on public.foo foo_1
                                  Output: foo_1.ctid, foo_1.f1, foo_1.*, foo_1.tableoid
+                           ->  Foreign Scan on public.foo2 foo_2
+                                 Output: foo_2.ctid, foo_2.f1, foo_2.*, foo_2.tableoid
                                  Remote SQL: SELECT f1, f2, f3, ctid FROM public.loct1
 (23 rows)
 
@@ -7102,10 +7175,10 @@ select * from bar where f1 in (select f1 from foo) for share;
          Inner Unique: true
          Hash Cond: (bar.f1 = foo.f1)
          ->  Append
-               ->  Seq Scan on public.bar
-                     Output: bar.f1, bar.f2, bar.ctid, bar.*, bar.tableoid
-               ->  Foreign Scan on public.bar2 bar_1
+               ->  Seq Scan on public.bar bar_1
                      Output: bar_1.f1, bar_1.f2, bar_1.ctid, bar_1.*, bar_1.tableoid
+               ->  Foreign Scan on public.bar2 bar_2
+                     Output: bar_2.f1, bar_2.f2, bar_2.ctid, bar_2.*, bar_2.tableoid
                      Remote SQL: SELECT f1, f2, f3, ctid FROM public.loct2 FOR SHARE
          ->  Hash
                Output: foo.ctid, foo.f1, foo.*, foo.tableoid
@@ -7113,10 +7186,10 @@ select * from bar where f1 in (select f1 from foo) for share;
                      Output: foo.ctid, foo.f1, foo.*, foo.tableoid
                      Group Key: foo.f1
                      ->  Append
-                           ->  Seq Scan on public.foo
-                                 Output: foo.ctid, foo.f1, foo.*, foo.tableoid
-                           ->  Foreign Scan on public.foo2 foo_1
+                           ->  Seq Scan on public.foo foo_1
                                  Output: foo_1.ctid, foo_1.f1, foo_1.*, foo_1.tableoid
+                           ->  Foreign Scan on public.foo2 foo_2
+                                 Output: foo_2.ctid, foo_2.f1, foo_2.*, foo_2.tableoid
                                  Remote SQL: SELECT f1, f2, f3, ctid FROM public.loct1
 (23 rows)
 
@@ -7150,10 +7223,10 @@ update bar set f2 = f2 + 100 where f1 in (select f1 from foo);
                      Output: foo.ctid, foo.f1, foo.*, foo.tableoid
                      Group Key: foo.f1
                      ->  Append
-                           ->  Seq Scan on public.foo
-                                 Output: foo.ctid, foo.f1, foo.*, foo.tableoid
-                           ->  Foreign Scan on public.foo2 foo_1
+                           ->  Seq Scan on public.foo foo_1
                                  Output: foo_1.ctid, foo_1.f1, foo_1.*, foo_1.tableoid
+                           ->  Foreign Scan on public.foo2 foo_2
+                                 Output: foo_2.ctid, foo_2.f1, foo_2.*, foo_2.tableoid
                                  Remote SQL: SELECT f1, f2, f3, ctid FROM public.loct1
    ->  Hash Join
          Output: bar_1.f1, (bar_1.f2 + 100), bar_1.f3, bar_1.ctid, foo.ctid, foo.*, foo.tableoid
@@ -7168,10 +7241,10 @@ update bar set f2 = f2 + 100 where f1 in (select f1 from foo);
                      Output: foo.ctid, foo.f1, foo.*, foo.tableoid
                      Group Key: foo.f1
                      ->  Append
-                           ->  Seq Scan on public.foo
-                                 Output: foo.ctid, foo.f1, foo.*, foo.tableoid
-                           ->  Foreign Scan on public.foo2 foo_1
+                           ->  Seq Scan on public.foo foo_1
                                  Output: foo_1.ctid, foo_1.f1, foo_1.*, foo_1.tableoid
+                           ->  Foreign Scan on public.foo2 foo_2
+                                 Output: foo_2.ctid, foo_2.f1, foo_2.*, foo_2.tableoid
                                  Remote SQL: SELECT f1, f2, f3, ctid FROM public.loct1
 (39 rows)
 
@@ -7286,10 +7359,10 @@ explain (verbose, costs off)
                Merge Cond: (foo.f1 = loct1.f1)
                ->  Merge Append
                      Sort Key: foo.f1
-                     ->  Index Scan using i_foo_f1 on public.foo
-                           Output: foo.f1, foo.f2
-                     ->  Foreign Scan on public.foo2 foo_1
+                     ->  Index Scan using i_foo_f1 on public.foo foo_1
                            Output: foo_1.f1, foo_1.f2
+                     ->  Foreign Scan on public.foo2 foo_2
+                           Output: foo_2.f1, foo_2.f2
                            Remote SQL: SELECT f1, f2 FROM public.loct1 ORDER BY f1 ASC NULLS LAST
                ->  Index Only Scan using i_loct1_f1 on public.loct1
                      Output: loct1.f1
@@ -7326,10 +7399,10 @@ explain (verbose, costs off)
                Merge Cond: (foo.f1 = loct1.f1)
                ->  Merge Append
                      Sort Key: foo.f1
-                     ->  Index Scan using i_foo_f1 on public.foo
-                           Output: foo.f1, foo.f2
-                     ->  Foreign Scan on public.foo2 foo_1
+                     ->  Index Scan using i_foo_f1 on public.foo foo_1
                            Output: foo_1.f1, foo_1.f2
+                     ->  Foreign Scan on public.foo2 foo_2
+                           Output: foo_2.f1, foo_2.f2
                            Remote SQL: SELECT f1, f2 FROM public.loct1 ORDER BY f1 ASC NULLS LAST
                ->  Index Only Scan using i_loct1_f1 on public.loct1
                      Output: loct1.f1
@@ -8486,9 +8559,9 @@ SELECT t1.a,t2.b,t3.c FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) INNER J
    Sort Key: t1.a, t3.c
    ->  Append
          ->  Foreign Scan
-               Relations: ((ftprt1_p1 t1) INNER JOIN (ftprt2_p1 t2)) INNER JOIN (ftprt1_p1 t3)
+               Relations: ((ftprt1_p1 t1_1) INNER JOIN (ftprt2_p1 t2_1)) INNER JOIN (ftprt1_p1 t3_1)
          ->  Foreign Scan
-               Relations: ((ftprt1_p2 t1_1) INNER JOIN (ftprt2_p2 t2_1)) INNER JOIN (ftprt1_p2 t3_1)
+               Relations: ((ftprt1_p2 t1_2) INNER JOIN (ftprt2_p2 t2_2)) INNER JOIN (ftprt1_p2 t3_2)
 (7 rows)
 
 SELECT t1.a,t2.b,t3.c FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) INNER JOIN fprt1 t3 ON (t2.b = t3.a) WHERE t1.a % 25 =0 ORDER BY 1,2,3;
@@ -8531,12 +8604,12 @@ SELECT t1.wr, t2.wr FROM (SELECT t1 wr, a FROM fprt1 t1 WHERE t1.a % 25 = 0) t1 
    ->  Hash Full Join
          Hash Cond: (t1.a = t2.b)
          ->  Append
-               ->  Foreign Scan on ftprt1_p1 t1
-               ->  Foreign Scan on ftprt1_p2 t1_1
+               ->  Foreign Scan on ftprt1_p1 t1_1
+               ->  Foreign Scan on ftprt1_p2 t1_2
          ->  Hash
                ->  Append
-                     ->  Foreign Scan on ftprt2_p1 t2
-                     ->  Foreign Scan on ftprt2_p2 t2_1
+                     ->  Foreign Scan on ftprt2_p1 t2_1
+                     ->  Foreign Scan on ftprt2_p2 t2_2
 (11 rows)
 
 SELECT t1.wr, t2.wr FROM (SELECT t1 wr, a FROM fprt1 t1 WHERE t1.a % 25 = 0) t1 FULL JOIN (SELECT t2 wr, b FROM fprt2 t2 WHERE t2.b % 25 = 0) t2 ON (t1.a = t2.b) ORDER BY 1,2;
@@ -8567,9 +8640,9 @@ SELECT t1.a,t1.b FROM fprt1 t1, LATERAL (SELECT t2.a, t2.b FROM fprt2 t2 WHERE t
    Sort Key: t1.a, t1.b
    ->  Append
          ->  Foreign Scan
-               Relations: (ftprt1_p1 t1) INNER JOIN (ftprt2_p1 t2)
+               Relations: (ftprt1_p1 t1_1) INNER JOIN (ftprt2_p1 t2_1)
          ->  Foreign Scan
-               Relations: (ftprt1_p2 t1_1) INNER JOIN (ftprt2_p2 t2_1)
+               Relations: (ftprt1_p2 t1_2) INNER JOIN (ftprt2_p2 t2_2)
 (7 rows)
 
 SELECT t1.a,t1.b FROM fprt1 t1, LATERAL (SELECT t2.a, t2.b FROM fprt2 t2 WHERE t1.a = t2.b AND t1.b = t2.a) q WHERE t1.a%25 = 0 ORDER BY 1,2;
@@ -8590,15 +8663,15 @@ SELECT t1.a, t1.phv, t2.b, t2.phv FROM (SELECT 't1_phv' phv, * FROM fprt1 WHERE 
    Sort Key: fprt1.a, fprt2.b
    ->  Append
          ->  Hash Full Join
-               Hash Cond: (fprt1.a = fprt2.b)
-               ->  Foreign Scan on ftprt1_p1 fprt1
-               ->  Hash
-                     ->  Foreign Scan on ftprt2_p1 fprt2
-         ->  Hash Full Join
                Hash Cond: (fprt1_1.a = fprt2_1.b)
-               ->  Foreign Scan on ftprt1_p2 fprt1_1
+               ->  Foreign Scan on ftprt1_p1 fprt1_1
                ->  Hash
-                     ->  Foreign Scan on ftprt2_p2 fprt2_1
+                     ->  Foreign Scan on ftprt2_p1 fprt2_1
+         ->  Hash Full Join
+               Hash Cond: (fprt1_2.a = fprt2_2.b)
+               ->  Foreign Scan on ftprt1_p2 fprt1_2
+               ->  Hash
+                     ->  Foreign Scan on ftprt2_p2 fprt2_2
 (13 rows)
 
 SELECT t1.a, t1.phv, t2.b, t2.phv FROM (SELECT 't1_phv' phv, * FROM fprt1 WHERE a % 25 = 0) t1 FULL JOIN (SELECT 't2_phv' phv, * FROM fprt2 WHERE b % 25 = 0) t2 ON (t1.a = t2.b) ORDER BY t1.a, t2.b;
@@ -8631,12 +8704,12 @@ SELECT t1.a, t2.b FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) WHERE t1.a 
          ->  Hash Join
                Hash Cond: (t2.b = t1.a)
                ->  Append
-                     ->  Foreign Scan on ftprt2_p1 t2
-                     ->  Foreign Scan on ftprt2_p2 t2_1
+                     ->  Foreign Scan on ftprt2_p1 t2_1
+                     ->  Foreign Scan on ftprt2_p2 t2_2
                ->  Hash
                      ->  Append
-                           ->  Foreign Scan on ftprt1_p1 t1
-                           ->  Foreign Scan on ftprt1_p2 t1_1
+                           ->  Foreign Scan on ftprt1_p1 t1_1
+                           ->  Foreign Scan on ftprt1_p2 t1_2
 (12 rows)
 
 SELECT t1.a, t2.b FROM fprt1 t1 INNER JOIN fprt2 t2 ON (t1.a = t2.b) WHERE t1.a % 25 = 0 ORDER BY 1,2 FOR UPDATE OF t1;
@@ -8680,9 +8753,9 @@ SELECT a, sum(b), min(b), count(*) FROM pagg_tab GROUP BY a HAVING avg(b) < 22 O
          Group Key: pagg_tab.a
          Filter: (avg(pagg_tab.b) < '22'::numeric)
          ->  Append
-               ->  Foreign Scan on fpagg_tab_p1 pagg_tab
-               ->  Foreign Scan on fpagg_tab_p2 pagg_tab_1
-               ->  Foreign Scan on fpagg_tab_p3 pagg_tab_2
+               ->  Foreign Scan on fpagg_tab_p1 pagg_tab_1
+               ->  Foreign Scan on fpagg_tab_p2 pagg_tab_2
+               ->  Foreign Scan on fpagg_tab_p3 pagg_tab_3
 (9 rows)
 
 -- Plan with partitionwise aggregates is enabled
@@ -8779,6 +8852,113 @@ SELECT b, avg(a), max(a), count(*) FROM pagg_tab GROUP BY b HAVING sum(a) < 700 
                      ->  Foreign Scan on fpagg_tab_p3 pagg_tab_2
 (15 rows)
 
+-- ===================================================================
+-- access rights and superuser
+-- ===================================================================
+-- Non-superuser cannot create a FDW without a password in the connstr
+CREATE ROLE regress_nosuper NOSUPERUSER;
+GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO regress_nosuper;
+SET ROLE regress_nosuper;
+SHOW is_superuser;
+ is_superuser 
+--------------
+ off
+(1 row)
+
+-- This will be OK, we can create the FDW
+DO $d$
+    BEGIN
+        EXECUTE $$CREATE SERVER loopback_nopw FOREIGN DATA WRAPPER postgres_fdw
+            OPTIONS (dbname '$$||current_database()||$$',
+                     port '$$||current_setting('port')||$$'
+            )$$;
+    END;
+$d$;
+-- But creation of user mappings for non-superusers should fail
+CREATE USER MAPPING FOR public SERVER loopback_nopw;
+CREATE USER MAPPING FOR CURRENT_USER SERVER loopback_nopw;
+CREATE FOREIGN TABLE ft1_nopw (
+	c1 int NOT NULL,
+	c2 int NOT NULL,
+	c3 text,
+	c4 timestamptz,
+	c5 timestamp,
+	c6 varchar(10),
+	c7 char(10) default 'ft1',
+	c8 user_enum
+) SERVER loopback_nopw OPTIONS (schema_name 'public', table_name 'ft1');
+SELECT * FROM ft1_nopw LIMIT 1;
+ERROR:  password is required
+DETAIL:  Non-superusers must provide a password in the user mapping.
+-- If we add a password to the connstr it'll fail, because we don't allow passwords
+-- in connstrs only in user mappings.
+DO $d$
+    BEGIN
+        EXECUTE $$ALTER SERVER loopback_nopw OPTIONS (ADD password 'dummypw')$$;
+    END;
+$d$;
+ERROR:  invalid option "password"
+HINT:  Valid options in this context are: service, passfile, channel_binding, connect_timeout, dbname, host, hostaddr, port, options, application_name, keepalives, keepalives_idle, keepalives_interval, keepalives_count, tcp_user_timeout, sslmode, sslcompression, sslcert, sslkey, sslrootcert, sslcrl, requirepeer, sslminprotocolversion, sslmaxprotocolversion, gssencmode, krbsrvname, gsslib, target_session_attrs, use_remote_estimate, fdw_startup_cost, fdw_tuple_cost, extensions, updatable, fetch_size
+CONTEXT:  SQL statement "ALTER SERVER loopback_nopw OPTIONS (ADD password 'dummypw')"
+PL/pgSQL function inline_code_block line 3 at EXECUTE
+-- If we add a password for our user mapping instead, we should get a different
+-- error because the password wasn't actually *used* when we run with trust auth.
+--
+-- This won't work with installcheck, but neither will most of the FDW checks.
+ALTER USER MAPPING FOR CURRENT_USER SERVER loopback_nopw OPTIONS (ADD password 'dummypw');
+SELECT * FROM ft1_nopw LIMIT 1;
+ERROR:  password is required
+DETAIL:  Non-superuser cannot connect if the server does not request a password.
+HINT:  Target server's authentication method must be changed or password_required=false set in the user mapping attributes.
+-- Unpriv user cannot make the mapping passwordless
+ALTER USER MAPPING FOR CURRENT_USER SERVER loopback_nopw OPTIONS (ADD password_required 'false');
+ERROR:  password_required=false is superuser-only
+HINT:  User mappings with the password_required option set to false may only be created or modified by the superuser
+SELECT * FROM ft1_nopw LIMIT 1;
+ERROR:  password is required
+DETAIL:  Non-superuser cannot connect if the server does not request a password.
+HINT:  Target server's authentication method must be changed or password_required=false set in the user mapping attributes.
+RESET ROLE;
+-- But the superuser can
+ALTER USER MAPPING FOR regress_nosuper SERVER loopback_nopw OPTIONS (ADD password_required 'false');
+SET ROLE regress_nosuper;
+-- Should finally work now
+SELECT * FROM ft1_nopw LIMIT 1;
+  c1  | c2 | c3 | c4 | c5 | c6 |     c7     | c8 
+------+----+----+----+----+----+------------+----
+ 1111 |  2 |    |    |    |    | ft1        | 
+(1 row)
+
+-- unpriv user also cannot set sslcert / sslkey on the user mapping
+-- first set password_required so we see the right error messages
+ALTER USER MAPPING FOR CURRENT_USER SERVER loopback_nopw OPTIONS (SET password_required 'true');
+ALTER USER MAPPING FOR CURRENT_USER SERVER loopback_nopw OPTIONS (ADD sslcert 'foo.crt');
+ERROR:  sslcert and sslkey are superuser-only
+HINT:  User mappings with the sslcert or sslkey options set may only be created or modified by the superuser
+ALTER USER MAPPING FOR CURRENT_USER SERVER loopback_nopw OPTIONS (ADD sslkey 'foo.key');
+ERROR:  sslcert and sslkey are superuser-only
+HINT:  User mappings with the sslcert or sslkey options set may only be created or modified by the superuser
+-- We're done with the role named after a specific user and need to check the
+-- changes to the public mapping.
+DROP USER MAPPING FOR CURRENT_USER SERVER loopback_nopw;
+-- This will fail again as it'll resolve the user mapping for public, which
+-- lacks password_required=false
+SELECT * FROM ft1_nopw LIMIT 1;
+ERROR:  password is required
+DETAIL:  Non-superusers must provide a password in the user mapping.
+RESET ROLE;
+-- The user mapping for public is passwordless and lacks the password_required=false
+-- mapping option, but will work because the current user is a superuser.
+SELECT * FROM ft1_nopw LIMIT 1;
+  c1  | c2 | c3 | c4 | c5 | c6 |     c7     | c8 
+------+----+----+----+----+----+------------+----
+ 1111 |  2 |    |    |    |    | ft1        | 
+(1 row)
+
+-- cleanup
+DROP USER MAPPING FOR public SERVER loopback_nopw;
+DROP OWNED BY regress_nosuper;
+DROP ROLE regress_nosuper;
 -- Clean-up
 RESET enable_partitionwise_aggregate;
 -- Two-phase transactions are not supported.

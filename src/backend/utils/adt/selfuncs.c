@@ -10,7 +10,7 @@
  *	  Index cost functions are located via the index AM's API struct,
  *	  which is obtained from the handler function registered in pg_am.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -126,6 +126,7 @@
 #include "parser/parsetree.h"
 #include "statistics/statistics.h"
 #include "storage/bufmgr.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/datum.h"
@@ -3526,16 +3527,8 @@ double
 estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
 						   double dNumGroups)
 {
-	Size		hashentrysize;
-
-	/* Estimate per-hash-entry space at tuple width... */
-	hashentrysize = MAXALIGN(path->pathtarget->width) +
-		MAXALIGN(SizeofMinimalTupleHeader);
-
-	/* plus space for pass-by-ref transition values... */
-	hashentrysize += agg_costs->transitionSpace;
-	/* plus the per-hash-entry overhead */
-	hashentrysize += hash_agg_entry_size(agg_costs->numAggs);
+	Size		hashentrysize = hash_agg_entry_size(
+		agg_costs->numAggs, path->pathtarget->width, agg_costs->transitionSpace);
 
 	/*
 	 * Note that this disregards the effect of fill-factor and growth policy
@@ -6356,7 +6349,8 @@ spgcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 
 typedef struct
 {
-	bool		haveFullScan;
+	bool		attHasFullScan[INDEX_MAX_KEYS];
+	bool		attHasNormalScan[INDEX_MAX_KEYS];
 	double		partialEntries;
 	double		exactEntries;
 	double		searchEntries;
@@ -6452,16 +6446,21 @@ gincost_pattern(IndexOptInfo *index, int indexcol,
 		counts->searchEntries++;
 	}
 
-	if (searchMode == GIN_SEARCH_MODE_INCLUDE_EMPTY)
+	if (searchMode == GIN_SEARCH_MODE_DEFAULT)
+	{
+		counts->attHasNormalScan[indexcol] = true;
+	}
+	else if (searchMode == GIN_SEARCH_MODE_INCLUDE_EMPTY)
 	{
 		/* Treat "include empty" like an exact-match item */
+		counts->attHasNormalScan[indexcol] = true;
 		counts->exactEntries++;
 		counts->searchEntries++;
 	}
-	else if (searchMode != GIN_SEARCH_MODE_DEFAULT)
+	else
 	{
 		/* It's GIN_SEARCH_MODE_ALL */
-		counts->haveFullScan = true;
+		counts->attHasFullScan[indexcol] = true;
 	}
 
 	return true;
@@ -6597,7 +6596,8 @@ gincost_scalararrayopexpr(PlannerInfo *root,
 			/* We ignore array elements that are unsatisfiable patterns */
 			numPossible++;
 
-			if (elemcounts.haveFullScan)
+			if (elemcounts.attHasFullScan[indexcol] &&
+				!elemcounts.attHasNormalScan[indexcol])
 			{
 				/*
 				 * Full index scan will be required.  We treat this as if
@@ -6654,6 +6654,7 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 				numEntries;
 	GinQualCounts counts;
 	bool		matchPossible;
+	bool		fullIndexScan;
 	double		partialScale;
 	double		entryPagesFetched,
 				dataPagesFetched,
@@ -6665,6 +6666,7 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	Relation	indexRel;
 	GinStatsData ginStats;
 	ListCell   *lc;
+	int			i;
 
 	/*
 	 * Obtain statistical information from the meta page, if possible.  Else
@@ -6821,7 +6823,23 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 		return;
 	}
 
-	if (counts.haveFullScan || indexQuals == NIL)
+	/*
+	 * If attribute has a full scan and at the same time doesn't have normal
+	 * scan, then we'll have to scan all non-null entries of that attribute.
+	 * Currently, we don't have per-attribute statistics for GIN.  Thus, we
+	 * must assume the whole GIN index has to be scanned in this case.
+	 */
+	fullIndexScan = false;
+	for (i = 0; i < index->nkeycolumns; i++)
+	{
+		if (counts.attHasFullScan[i] && !counts.attHasNormalScan[i])
+		{
+			fullIndexScan = true;
+			break;
+		}
+	}
+
+	if (fullIndexScan || indexQuals == NIL)
 	{
 		/*
 		 * Full index scan will be required.  We treat this as if every key in

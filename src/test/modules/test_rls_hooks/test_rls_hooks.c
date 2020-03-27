@@ -3,7 +3,7 @@
  * test_rls_hooks.c
  *		Code for testing RLS hooks.
  *
- * Copyright (c) 2015-2019, PostgreSQL Global Development Group
+ * Copyright (c) 2015-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		src/test/modules/test_rls_hooks/test_rls_hooks.c
@@ -70,7 +70,7 @@ test_rls_hooks_permissive(CmdType cmdtype, Relation relation)
 	Node	   *e;
 	ColumnRef  *c;
 	ParseState *qual_pstate;
-	RangeTblEntry *rte;
+	ParseNamespaceItem *nsitem;
 
 	if (strcmp(RelationGetRelationName(relation), "rls_test_permissive") != 0 &&
 		strcmp(RelationGetRelationName(relation), "rls_test_both") != 0)
@@ -78,15 +78,16 @@ test_rls_hooks_permissive(CmdType cmdtype, Relation relation)
 
 	qual_pstate = make_parsestate(NULL);
 
-	rte = addRangeTableEntryForRelation(qual_pstate, relation, AccessShareLock,
-										NULL, false, false);
-	addRTEtoQuery(qual_pstate, rte, false, true, true);
+	nsitem = addRangeTableEntryForRelation(qual_pstate,
+										   relation, AccessShareLock,
+										   NULL, false, false);
+	addNSItemToQuery(qual_pstate, nsitem, false, true, true);
 
 	role = ObjectIdGetDatum(ACL_ID_PUBLIC);
 
 	policy->policy_name = pstrdup("extension policy");
 	policy->polcmd = '*';
-	policy->roles = construct_array(&role, 1, OIDOID, sizeof(Oid), true, 'i');
+	policy->roles = construct_array(&role, 1, OIDOID, sizeof(Oid), true, TYPALIGN_INT);
 
 	/*
 	 * policy->qual = (Expr *) makeConst(BOOLOID, -1, InvalidOid,
@@ -134,8 +135,7 @@ test_rls_hooks_restrictive(CmdType cmdtype, Relation relation)
 	Node	   *e;
 	ColumnRef  *c;
 	ParseState *qual_pstate;
-	RangeTblEntry *rte;
-
+	ParseNamespaceItem *nsitem;
 
 	if (strcmp(RelationGetRelationName(relation), "rls_test_restrictive") != 0 &&
 		strcmp(RelationGetRelationName(relation), "rls_test_both") != 0)
@@ -143,15 +143,16 @@ test_rls_hooks_restrictive(CmdType cmdtype, Relation relation)
 
 	qual_pstate = make_parsestate(NULL);
 
-	rte = addRangeTableEntryForRelation(qual_pstate, relation, AccessShareLock,
-										NULL, false, false);
-	addRTEtoQuery(qual_pstate, rte, false, true, true);
+	nsitem = addRangeTableEntryForRelation(qual_pstate,
+										   relation, AccessShareLock,
+										   NULL, false, false);
+	addNSItemToQuery(qual_pstate, nsitem, false, true, true);
 
 	role = ObjectIdGetDatum(ACL_ID_PUBLIC);
 
 	policy->policy_name = pstrdup("extension policy");
 	policy->polcmd = '*';
-	policy->roles = construct_array(&role, 1, OIDOID, sizeof(Oid), true, 'i');
+	policy->roles = construct_array(&role, 1, OIDOID, sizeof(Oid), true, TYPALIGN_INT);
 
 	n = makeFuncCall(list_make2(makeString("pg_catalog"),
 								makeString("current_user")), NIL, 0);

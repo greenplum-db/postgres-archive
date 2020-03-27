@@ -1,7 +1,7 @@
 /* src/interfaces/ecpg/preproc/ecpg.c */
 
 /* Main for ecpg, the PostgreSQL embedded SQL precompiler. */
-/* Copyright (c) 1996-2019, PostgreSQL Global Development Group */
+/* Copyright (c) 1996-2020, PostgreSQL Global Development Group */
 
 #include "postgres_fe.h"
 
@@ -58,7 +58,8 @@ help(const char *progname)
 	printf(_("  -?, --help     show this help, then exit\n"));
 	printf(_("\nIf no output file is specified, the name is formed by adding .c to the\n"
 			 "input file name, after stripping off .pgc if present.\n"));
-	printf(_("\nReport bugs to <pgsql-bugs@lists.postgresql.org>.\n"));
+	printf(_("\nReport bugs to <%s>.\n"), PACKAGE_BUGREPORT);
+	printf(_("%s home page: <%s>\n"), PACKAGE_NAME, PACKAGE_URL);
 }
 
 static void

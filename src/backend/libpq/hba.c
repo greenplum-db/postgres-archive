@@ -5,7 +5,7 @@
  *	  wherein you authenticate a user by seeing what IP address the system
  *	  says he comes from and choosing authentication method based on it).
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -2390,7 +2390,7 @@ gethba_options(HbaLine *hba)
 	Assert(noptions <= MAX_HBA_OPTIONS);
 
 	if (noptions > 0)
-		return construct_array(options, noptions, TEXTOID, -1, false, 'i');
+		return construct_array(options, noptions, TEXTOID, -1, false, TYPALIGN_INT);
 	else
 		return NULL;
 }
@@ -2667,8 +2667,7 @@ pg_hba_file_rules(PG_FUNCTION_ARGS)
 	if (!(rsi->allowedModes & SFRM_Materialize))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not " \
-						"allowed in this context")));
+				 errmsg("materialize mode required, but it is not allowed in this context")));
 
 	rsi->returnMode = SFRM_Materialize;
 

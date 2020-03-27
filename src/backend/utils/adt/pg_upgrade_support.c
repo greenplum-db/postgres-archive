@@ -5,7 +5,7 @@
  *	to control oid and relfilenode assignment, and do other special
  *	hacks needed for pg_upgrade.
  *
- *	Copyright (c) 2010-2019, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2020, PostgreSQL Global Development Group
  *	src/backend/utils/adt/pg_upgrade_support.c
  */
 
@@ -26,7 +26,7 @@ do {															\
 	if (!IsBinaryUpgrade)										\
 		ereport(ERROR,											\
 				(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),	\
-				 (errmsg("function can only be called when server is in binary upgrade mode")))); \
+				 errmsg("function can only be called when server is in binary upgrade mode"))); \
 } while (0)
 
 Datum
@@ -160,7 +160,7 @@ binary_upgrade_create_empty_extension(PG_FUNCTION_ARGS)
 		int			i;
 
 		deconstruct_array(textArray,
-						  TEXTOID, -1, false, 'i',
+						  TEXTOID, -1, false, TYPALIGN_INT,
 						  &textDatums, NULL, &ndatums);
 		for (i = 0; i < ndatums; i++)
 		{

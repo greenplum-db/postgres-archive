@@ -4,7 +4,7 @@
  *
  * Entrypoints of the hooks in PostgreSQL, and dispatches the callbacks.
  *
- * Copyright (c) 2010-2019, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2020, PostgreSQL Global Development Group
  *
  * -------------------------------------------------------------------------
  */
@@ -317,7 +317,7 @@ sepgsql_utility_command(PlannedStmt *pstmt,
 						ParamListInfo params,
 						QueryEnvironment *queryEnv,
 						DestReceiver *dest,
-						char *completionTag)
+						QueryCompletion *qc)
 {
 	Node	   *parsetree = pstmt->utilityStmt;
 	sepgsql_context_info_t saved_context_info = sepgsql_context_info;
@@ -380,11 +380,11 @@ sepgsql_utility_command(PlannedStmt *pstmt,
 		if (next_ProcessUtility_hook)
 			(*next_ProcessUtility_hook) (pstmt, queryString,
 										 context, params, queryEnv,
-										 dest, completionTag);
+										 dest, qc);
 		else
 			standard_ProcessUtility(pstmt, queryString,
 									context, params, queryEnv,
-									dest, completionTag);
+									dest, qc);
 	}
 	PG_FINALLY();
 	{

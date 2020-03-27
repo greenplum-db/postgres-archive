@@ -3,7 +3,7 @@
  * arrayutils.c
  *	  This file contains some support routines required for array functions.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -220,7 +220,7 @@ ArrayGetIntegerTypmods(ArrayType *arr, int *n)
 
 	/* hardwired knowledge about cstring's representation details here */
 	deconstruct_array(arr, CSTRINGOID,
-					  -2, false, 'c',
+					  -2, false, TYPALIGN_CHAR,
 					  &elem_values, NULL, n);
 
 	result = (int32 *) palloc(*n * sizeof(int32));

@@ -15,7 +15,7 @@ PostgreSQL documentation
  </refmeta>
 
  <refnamediv>
-  <refname id="vacuumdb">vacuumdb</refname>
+  <refname>vacuumdb</refname>
   <refpurpose>garbage-collect and analyze a <productname>PostgreSQL</productname> database</refpurpose>
  </refnamediv>
 
@@ -221,6 +221,24 @@ PostgreSQL documentation
         <para>
          This option is only available for servers running
          <productname>PostgreSQL</productname> 9.6 and later.
+        </para>
+       </note>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>-P <replaceable class="parameter">parallel_degree</replaceable></option></term>
+      <term><option>--parallel=<replaceable class="parameter">parallel_degree</replaceable></option></term>
+      <listitem>
+       <para>
+        Specify the parallel degree of <firstterm>parallel vacuum</firstterm>.
+        This allows the vacuum to leverage multiple CPUs to process indexes.
+        See <xref linkend="sql-vacuum"/>.
+       </para>
+       <note>
+        <para>
+         This option is only available for servers running
+         <productname>PostgreSQL</productname> 13 and later.
         </para>
        </note>
       </listitem>
@@ -456,8 +474,8 @@ PostgreSQL documentation
     <term><envar>PG_COLOR</envar></term>
     <listitem>
      <para>
-      Specifies whether to use color in diagnostics messages.  Possible values
-      are <literal>always</literal>, <literal>auto</literal>,
+      Specifies whether to use color in diagnostic messages. Possible values
+      are <literal>always</literal>, <literal>auto</literal> and
       <literal>never</literal>.
      </para>
     </listitem>

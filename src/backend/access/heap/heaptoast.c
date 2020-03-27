@@ -4,7 +4,7 @@
  *	  Heap-specific definitions for external and compressed storage
  *	  of variable size attributes.
  *
- * Copyright (c) 2000-2019, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2020, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -25,10 +25,12 @@
 #include "postgres.h"
 
 #include "access/detoast.h"
+#include "access/genam.h"
 #include "access/heapam.h"
 #include "access/heaptoast.h"
 #include "access/toast_helper.h"
 #include "access/toast_internals.h"
+#include "utils/fmgroids.h"
 
 
 /* ----------
@@ -157,11 +159,12 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	/* ----------
 	 * Compress and/or save external until data fits into target length
 	 *
-	 *	1: Inline compress attributes with attstorage 'x', and store very
-	 *	   large attributes with attstorage 'x' or 'e' external immediately
-	 *	2: Store attributes with attstorage 'x' or 'e' external
-	 *	3: Inline compress attributes with attstorage 'm'
-	 *	4: Store attributes with attstorage 'm' external
+	 *	1: Inline compress attributes with attstorage EXTENDED, and store very
+	 *	   large attributes with attstorage EXTENDED or EXTERNAL external
+	 *	   immediately
+	 *	2: Store attributes with attstorage EXTENDED or EXTERNAL external
+	 *	3: Inline compress attributes with attstorage MAIN
+	 *	4: Store attributes with attstorage MAIN external
 	 * ----------
 	 */
 
@@ -174,8 +177,9 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	maxDataLen = RelationGetToastTupleTarget(rel, TOAST_TUPLE_TARGET) - hoff;
 
 	/*
-	 * Look for attributes with attstorage 'x' to compress.  Also find large
-	 * attributes with attstorage 'x' or 'e', and store them external.
+	 * Look for attributes with attstorage EXTENDED to compress.  Also find
+	 * large attributes with attstorage EXTENDED or EXTERNAL, and store them
+	 * external.
 	 */
 	while (heap_compute_data_size(tupleDesc,
 								  toast_values, toast_isnull) > maxDataLen)
@@ -187,13 +191,16 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 			break;
 
 		/*
-		 * Attempt to compress it inline, if it has attstorage 'x'
+		 * Attempt to compress it inline, if it has attstorage EXTENDED
 		 */
-		if (TupleDescAttr(tupleDesc, biggest_attno)->attstorage == 'x')
+		if (TupleDescAttr(tupleDesc, biggest_attno)->attstorage == TYPSTORAGE_EXTENDED)
 			toast_tuple_try_compression(&ttc, biggest_attno);
 		else
 		{
-			/* has attstorage 'e', ignore on subsequent compression passes */
+			/*
+			 * has attstorage EXTERNAL, ignore on subsequent compression
+			 * passes
+			 */
 			toast_attr[biggest_attno].tai_colflags |= TOASTCOL_INCOMPRESSIBLE;
 		}
 
@@ -211,9 +218,9 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	}
 
 	/*
-	 * Second we look for attributes of attstorage 'x' or 'e' that are still
-	 * inline, and make them external.  But skip this if there's no toast
-	 * table to push them to.
+	 * Second we look for attributes of attstorage EXTENDED or EXTERNAL that
+	 * are still inline, and make them external.  But skip this if there's no
+	 * toast table to push them to.
 	 */
 	while (heap_compute_data_size(tupleDesc,
 								  toast_values, toast_isnull) > maxDataLen &&
@@ -228,7 +235,7 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	}
 
 	/*
-	 * Round 3 - this time we take attributes with storage 'm' into
+	 * Round 3 - this time we take attributes with storage MAIN into
 	 * compression
 	 */
 	while (heap_compute_data_size(tupleDesc,
@@ -244,8 +251,8 @@ heap_toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	}
 
 	/*
-	 * Finally we store attributes of type 'm' externally.  At this point we
-	 * increase the target tuple size, so that 'm' attributes aren't stored
+	 * Finally we store attributes of type MAIN externally.  At this point we
+	 * increase the target tuple size, so that MAIN attributes aren't stored
 	 * externally unless really necessary.
 	 */
 	maxDataLen = TOAST_TUPLE_TARGET_MAIN - hoff;
@@ -603,4 +610,184 @@ toast_build_flattened_tuple(TupleDesc tupleDesc,
 		pfree(freeable_values[i]);
 
 	return new_tuple;
+}
+
+/*
+ * Fetch a TOAST slice from a heap table.
+ *
+ * toastrel is the relation from which chunks are to be fetched.
+ * valueid identifies the TOAST value from which chunks are being fetched.
+ * attrsize is the total size of the TOAST value.
+ * sliceoffset is the byte offset within the TOAST value from which to fetch.
+ * slicelength is the number of bytes to be fetched from the TOAST value.
+ * result is the varlena into which the results should be written.
+ */
+void
+heap_fetch_toast_slice(Relation toastrel, Oid valueid, int32 attrsize,
+					   int32 sliceoffset, int32 slicelength,
+					   struct varlena *result)
+{
+	Relation   *toastidxs;
+	ScanKeyData toastkey[3];
+	TupleDesc	toasttupDesc = toastrel->rd_att;
+	int			nscankeys;
+	SysScanDesc toastscan;
+	HeapTuple	ttup;
+	int32		expectedchunk;
+	int32		totalchunks = ((attrsize - 1) / TOAST_MAX_CHUNK_SIZE) + 1;
+	int			startchunk;
+	int			endchunk;
+	int			num_indexes;
+	int			validIndex;
+	SnapshotData SnapshotToast;
+
+	/* Look for the valid index of toast relation */
+	validIndex = toast_open_indexes(toastrel,
+									AccessShareLock,
+									&toastidxs,
+									&num_indexes);
+
+	startchunk = sliceoffset / TOAST_MAX_CHUNK_SIZE;
+	endchunk = (sliceoffset + slicelength - 1) / TOAST_MAX_CHUNK_SIZE;
+	Assert(endchunk <= totalchunks);
+
+	/* Set up a scan key to fetch from the index. */
+	ScanKeyInit(&toastkey[0],
+				(AttrNumber) 1,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(valueid));
+
+	/*
+	 * No additional condition if fetching all chunks. Otherwise, use an
+	 * equality condition for one chunk, and a range condition otherwise.
+	 */
+	if (startchunk == 0 && endchunk == totalchunks - 1)
+		nscankeys = 1;
+	else if (startchunk == endchunk)
+	{
+		ScanKeyInit(&toastkey[1],
+					(AttrNumber) 2,
+					BTEqualStrategyNumber, F_INT4EQ,
+					Int32GetDatum(startchunk));
+		nscankeys = 2;
+	}
+	else
+	{
+		ScanKeyInit(&toastkey[1],
+					(AttrNumber) 2,
+					BTGreaterEqualStrategyNumber, F_INT4GE,
+					Int32GetDatum(startchunk));
+		ScanKeyInit(&toastkey[2],
+					(AttrNumber) 2,
+					BTLessEqualStrategyNumber, F_INT4LE,
+					Int32GetDatum(endchunk));
+		nscankeys = 3;
+	}
+
+	/* Prepare for scan */
+	init_toast_snapshot(&SnapshotToast);
+	toastscan = systable_beginscan_ordered(toastrel, toastidxs[validIndex],
+										   &SnapshotToast, nscankeys, toastkey);
+
+	/*
+	 * Read the chunks by index
+	 *
+	 * The index is on (valueid, chunkidx) so they will come in order
+	 */
+	expectedchunk = startchunk;
+	while ((ttup = systable_getnext_ordered(toastscan, ForwardScanDirection)) != NULL)
+	{
+		int32		curchunk;
+		Pointer		chunk;
+		bool		isnull;
+		char	   *chunkdata;
+		int32		chunksize;
+		int32		expected_size;
+		int32		chcpystrt;
+		int32		chcpyend;
+
+		/*
+		 * Have a chunk, extract the sequence number and the data
+		 */
+		curchunk = DatumGetInt32(fastgetattr(ttup, 2, toasttupDesc, &isnull));
+		Assert(!isnull);
+		chunk = DatumGetPointer(fastgetattr(ttup, 3, toasttupDesc, &isnull));
+		Assert(!isnull);
+		if (!VARATT_IS_EXTENDED(chunk))
+		{
+			chunksize = VARSIZE(chunk) - VARHDRSZ;
+			chunkdata = VARDATA(chunk);
+		}
+		else if (VARATT_IS_SHORT(chunk))
+		{
+			/* could happen due to heap_form_tuple doing its thing */
+			chunksize = VARSIZE_SHORT(chunk) - VARHDRSZ_SHORT;
+			chunkdata = VARDATA_SHORT(chunk);
+		}
+		else
+		{
+			/* should never happen */
+			elog(ERROR, "found toasted toast chunk for toast value %u in %s",
+				 valueid, RelationGetRelationName(toastrel));
+			chunksize = 0;		/* keep compiler quiet */
+			chunkdata = NULL;
+		}
+
+		/*
+		 * Some checks on the data we've found
+		 */
+		if (curchunk != expectedchunk)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg_internal("unexpected chunk number %d (expected %d) for toast value %u in %s",
+									 curchunk, expectedchunk, valueid,
+									 RelationGetRelationName(toastrel))));
+		if (curchunk > endchunk)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg_internal("unexpected chunk number %d (out of range %d..%d) for toast value %u in %s",
+									 curchunk,
+									 startchunk, endchunk, valueid,
+									 RelationGetRelationName(toastrel))));
+		expected_size = curchunk < totalchunks - 1 ? TOAST_MAX_CHUNK_SIZE
+			: attrsize - ((totalchunks - 1) * TOAST_MAX_CHUNK_SIZE);
+		if (chunksize != expected_size)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg_internal("unexpected chunk size %d (expected %d) in chunk %d of %d for toast value %u in %s",
+									 chunksize, expected_size,
+									 curchunk, totalchunks, valueid,
+									 RelationGetRelationName(toastrel))));
+
+		/*
+		 * Copy the data into proper place in our result
+		 */
+		chcpystrt = 0;
+		chcpyend = chunksize - 1;
+		if (curchunk == startchunk)
+			chcpystrt = sliceoffset % TOAST_MAX_CHUNK_SIZE;
+		if (curchunk == endchunk)
+			chcpyend = (sliceoffset + slicelength - 1) % TOAST_MAX_CHUNK_SIZE;
+
+		memcpy(VARDATA(result) +
+			   (curchunk * TOAST_MAX_CHUNK_SIZE - sliceoffset) + chcpystrt,
+			   chunkdata + chcpystrt,
+			   (chcpyend - chcpystrt) + 1);
+
+		expectedchunk++;
+	}
+
+	/*
+	 * Final checks that we successfully fetched the datum
+	 */
+	if (expectedchunk != (endchunk + 1))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg_internal("missing chunk number %d for toast value %u in %s",
+								 expectedchunk, valueid,
+								 RelationGetRelationName(toastrel))));
+
+	/* End scan and close indexes. */
+	systable_endscan_ordered(toastscan);
+	toast_close_indexes(toastidxs, num_indexes, AccessShareLock);
 }

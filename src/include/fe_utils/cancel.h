@@ -3,7 +3,7 @@
  * Query cancellation support for frontend code
  *
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/fe_utils/cancel.h
@@ -14,9 +14,11 @@
 #ifndef CANCEL_H
 #define CANCEL_H
 
+#include <signal.h>
+
 #include "libpq-fe.h"
 
-extern bool CancelRequested;
+extern volatile sig_atomic_t CancelRequested;
 
 extern void SetCancelConn(PGconn *conn);
 extern void ResetCancelConn(void);

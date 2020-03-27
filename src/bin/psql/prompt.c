@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2019, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2020, PostgreSQL Global Development Group
  *
  * src/bin/psql/prompt.c
  */
@@ -10,11 +10,6 @@
 #ifdef WIN32
 #include <io.h>
 #include <win32.h>
-#endif
-
-#ifdef HAVE_UNIX_SOCKETS
-#include <unistd.h>
-#include <netdb.h>
 #endif
 
 #include "common.h"
@@ -147,7 +142,6 @@ get_prompt(promptStatus_t status, ConditionalStack cstack)
 							if (*p == 'm')
 								buf[strcspn(buf, ".")] = '\0';
 						}
-#ifdef HAVE_UNIX_SOCKETS
 						/* UNIX socket */
 						else
 						{
@@ -158,7 +152,6 @@ get_prompt(promptStatus_t status, ConditionalStack cstack)
 							else
 								snprintf(buf, sizeof(buf), "[local:%s]", host);
 						}
-#endif
 					}
 					break;
 					/* DB server port number */
@@ -373,7 +366,10 @@ get_prompt(promptStatus_t status, ConditionalStack cstack)
 				if (visible)
 				{
 					chwidth = PQdsplen(p, pset.encoding);
-					if (chwidth > 0)
+
+					if (*p == '\n')
+						last_prompt1_width = 0;
+					else if (chwidth > 0)
 						last_prompt1_width += chwidth;
 				}
 

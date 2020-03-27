@@ -3,7 +3,7 @@
  * heap.c
  *	  code to create and destroy POSTGRES heap relations
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -83,7 +83,6 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/partcache.h"
-#include "utils/rel.h"
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -157,8 +156,8 @@ static const FormData_pg_attribute a1 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = false,
-	.attstorage = 'p',
-	.attalign = 's',
+	.attstorage = TYPSTORAGE_PLAIN,
+	.attalign = TYPALIGN_SHORT,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -171,8 +170,8 @@ static const FormData_pg_attribute a2 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = true,
-	.attstorage = 'p',
-	.attalign = 'i',
+	.attstorage = TYPSTORAGE_PLAIN,
+	.attalign = TYPALIGN_INT,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -185,8 +184,8 @@ static const FormData_pg_attribute a3 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = true,
-	.attstorage = 'p',
-	.attalign = 'i',
+	.attstorage = TYPSTORAGE_PLAIN,
+	.attalign = TYPALIGN_INT,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -199,8 +198,8 @@ static const FormData_pg_attribute a4 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = true,
-	.attstorage = 'p',
-	.attalign = 'i',
+	.attstorage = TYPSTORAGE_PLAIN,
+	.attalign = TYPALIGN_INT,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -213,8 +212,8 @@ static const FormData_pg_attribute a5 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = true,
-	.attstorage = 'p',
-	.attalign = 'i',
+	.attstorage = TYPSTORAGE_PLAIN,
+	.attalign = TYPALIGN_INT,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -233,8 +232,8 @@ static const FormData_pg_attribute a6 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = true,
-	.attstorage = 'p',
-	.attalign = 'i',
+	.attstorage = TYPSTORAGE_PLAIN,
+	.attalign = TYPALIGN_INT,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -572,6 +571,10 @@ CheckAttributeNamesTypes(TupleDesc tupdesc, char relkind,
  * are reliably identifiable only within a session, since the identity info
  * may use a typmod that is only locally assigned.  The caller is expected
  * to know whether these cases are safe.)
+ *
+ * flags can also control the phrasing of the error messages.  If
+ * CHKATYPE_IS_PARTKEY is specified, "attname" should be a partition key
+ * column number as text, not a real column name.
  * --------------------------------
  */
 void
@@ -598,10 +601,19 @@ CheckAttributeType(const char *attname,
 		if (!((atttypid == ANYARRAYOID && (flags & CHKATYPE_ANYARRAY)) ||
 			  (atttypid == RECORDOID && (flags & CHKATYPE_ANYRECORD)) ||
 			  (atttypid == RECORDARRAYOID && (flags & CHKATYPE_ANYRECORD))))
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-					 errmsg("column \"%s\" has pseudo-type %s",
-							attname, format_type_be(atttypid))));
+		{
+			if (flags & CHKATYPE_IS_PARTKEY)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+				/* translator: first %s is an integer not a name */
+						 errmsg("partition key column %s has pseudo-type %s",
+								attname, format_type_be(atttypid))));
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+						 errmsg("column \"%s\" has pseudo-type %s",
+								attname, format_type_be(atttypid))));
+		}
 	}
 	else if (att_typtype == TYPTYPE_DOMAIN)
 	{
@@ -648,12 +660,22 @@ CheckAttributeType(const char *attname,
 			CheckAttributeType(NameStr(attr->attname),
 							   attr->atttypid, attr->attcollation,
 							   containing_rowtypes,
-							   flags);
+							   flags & ~CHKATYPE_IS_PARTKEY);
 		}
 
 		relation_close(relation, AccessShareLock);
 
 		containing_rowtypes = list_delete_last(containing_rowtypes);
+	}
+	else if (att_typtype == TYPTYPE_RANGE)
+	{
+		/*
+		 * If it's a range, recurse to check its subtype.
+		 */
+		CheckAttributeType(attname, get_range_subtype(atttypid),
+						   get_range_collation(atttypid),
+						   containing_rowtypes,
+						   flags);
 	}
 	else if (OidIsValid((att_typelem = get_element_type(atttypid))))
 	{
@@ -670,11 +692,21 @@ CheckAttributeType(const char *attname,
 	 * useless, and it cannot be dumped, so we must disallow it.
 	 */
 	if (!OidIsValid(attcollation) && type_is_collatable(atttypid))
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-				 errmsg("no collation was derived for column \"%s\" with collatable type %s",
-						attname, format_type_be(atttypid)),
-				 errhint("Use the COLLATE clause to set the collation explicitly.")));
+	{
+		if (flags & CHKATYPE_IS_PARTKEY)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+			/* translator: first %s is an integer not a name */
+					 errmsg("no collation was derived for partition key column %s with collatable type %s",
+							attname, format_type_be(atttypid)),
+					 errhint("Use the COLLATE clause to set the collation explicitly.")));
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+					 errmsg("no collation was derived for column \"%s\" with collatable type %s",
+							attname, format_type_be(atttypid)),
+					 errhint("Use the COLLATE clause to set the collation explicitly.")));
+	}
 }
 
 /*
@@ -1021,8 +1053,8 @@ AddNewRelationType(const char *typeName,
 				   NULL,		/* default value - none */
 				   NULL,		/* default binary representation */
 				   false,		/* passed by reference */
-				   'd',			/* alignment - must be the largest! */
-				   'x',			/* fully TOASTable */
+				   TYPALIGN_DOUBLE, /* alignment - must be the largest! */
+				   TYPSTORAGE_EXTENDED, /* fully TOASTable */
 				   -1,			/* typmod */
 				   0,			/* array dimensions for typBaseType */
 				   false,		/* Type NOT NULL */
@@ -1302,8 +1334,8 @@ heap_create_with_catalog(const char *relname,
 				   NULL,		/* default value - none */
 				   NULL,		/* default binary representation */
 				   false,		/* passed by reference */
-				   'd',			/* alignment - must be the largest! */
-				   'x',			/* fully TOASTable */
+				   TYPALIGN_DOUBLE, /* alignment - must be the largest! */
+				   TYPSTORAGE_EXTENDED, /* fully TOASTable */
 				   -1,			/* typmod */
 				   0,			/* array dimensions for typBaseType */
 				   false,		/* Type NOT NULL */
@@ -2225,8 +2257,7 @@ StoreAttrDefault(Relation rel, AttrNumber attnum,
 			else
 			{
 				/* otherwise make a one-element array of the value */
-				missingval = PointerGetDatum(
-											 construct_array(&missingval,
+				missingval = PointerGetDatum(construct_array(&missingval,
 															 1,
 															 defAttStruct->atttypid,
 															 defAttStruct->attlen,
@@ -2500,7 +2531,7 @@ AddRelationNewConstraints(Relation rel,
 	TupleConstr *oldconstr;
 	int			numoldchecks;
 	ParseState *pstate;
-	RangeTblEntry *rte;
+	ParseNamespaceItem *nsitem;
 	int			numchecks;
 	List	   *checknames;
 	ListCell   *cell;
@@ -2523,13 +2554,13 @@ AddRelationNewConstraints(Relation rel,
 	 */
 	pstate = make_parsestate(NULL);
 	pstate->p_sourcetext = queryString;
-	rte = addRangeTableEntryForRelation(pstate,
-										rel,
-										AccessShareLock,
-										NULL,
-										false,
-										true);
-	addRTEtoQuery(pstate, rte, true, true, true);
+	nsitem = addRangeTableEntryForRelation(pstate,
+										   rel,
+										   AccessShareLock,
+										   NULL,
+										   false,
+										   true);
+	addNSItemToQuery(pstate, nsitem, true, true, true);
 
 	/*
 	 * Process column default expressions.
@@ -3365,15 +3396,26 @@ List *
 heap_truncate_find_FKs(List *relationIds)
 {
 	List	   *result = NIL;
+	List	   *oids = list_copy(relationIds);
+	List	   *parent_cons;
+	ListCell   *cell;
+	ScanKeyData key;
 	Relation	fkeyRel;
 	SysScanDesc fkeyScan;
 	HeapTuple	tuple;
+	bool		restart;
+
+	oids = list_copy(relationIds);
 
 	/*
 	 * Must scan pg_constraint.  Right now, it is a seqscan because there is
 	 * no available index on confrelid.
 	 */
 	fkeyRel = table_open(ConstraintRelationId, AccessShareLock);
+
+restart:
+	restart = false;
+	parent_cons = NIL;
 
 	fkeyScan = systable_beginscan(fkeyRel, InvalidOid, false,
 								  NULL, 0, NULL);
@@ -3387,16 +3429,85 @@ heap_truncate_find_FKs(List *relationIds)
 			continue;
 
 		/* Not referencing one of our list of tables */
-		if (!list_member_oid(relationIds, con->confrelid))
+		if (!list_member_oid(oids, con->confrelid))
 			continue;
 
-		/* Add referencer to result, unless present in input list */
+		/*
+		 * If this constraint has a parent constraint which we have not seen
+		 * yet, keep track of it for the second loop, below.  Tracking parent
+		 * constraints allows us to climb up to the top-level level constraint
+		 * and look for all possible relations referencing the partitioned
+		 * table.
+		 */
+		if (OidIsValid(con->conparentid) &&
+			!list_member_oid(parent_cons, con->conparentid))
+			parent_cons = lappend_oid(parent_cons, con->conparentid);
+
+		/*
+		 * Add referencer to result, unless present in input list.  (Don't
+		 * worry about dupes: we'll fix that below).
+		 */
 		if (!list_member_oid(relationIds, con->conrelid))
 			result = lappend_oid(result, con->conrelid);
 	}
 
 	systable_endscan(fkeyScan);
+
+	/*
+	 * Process each parent constraint we found to add the list of referenced
+	 * relations by them to the oids list.  If we do add any new such
+	 * relations, redo the first loop above.  Also, if we see that the parent
+	 * constraint in turn has a parent, add that so that we process all
+	 * relations in a single additional pass.
+	 */
+	foreach(cell, parent_cons)
+	{
+		Oid		parent = lfirst_oid(cell);
+
+		ScanKeyInit(&key,
+					Anum_pg_constraint_oid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(parent));
+
+		fkeyScan = systable_beginscan(fkeyRel, ConstraintOidIndexId,
+									  true, NULL, 1, &key);
+
+		tuple = systable_getnext(fkeyScan);
+		if (HeapTupleIsValid(tuple))
+		{
+			Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tuple);
+
+			/*
+			 * pg_constraint rows always appear for partitioned hierarchies
+			 * this way: on the each side of the constraint, one row appears
+			 * for each partition that points to the top-most table on the
+			 * other side.
+			 *
+			 * Because of this arrangement, we can correctly catch all
+			 * relevant relations by adding to 'parent_cons' all rows with
+			 * valid conparentid, and to the 'oids' list all rows with a
+			 * zero conparentid.  If any oids are added to 'oids', redo the
+			 * first loop above by setting 'restart'.
+			 */
+			if (OidIsValid(con->conparentid))
+				parent_cons = list_append_unique_oid(parent_cons,
+													 con->conparentid);
+			else if (!list_member_oid(oids, con->confrelid))
+			{
+				oids = lappend_oid(oids, con->confrelid);
+				restart = true;
+			}
+		}
+
+		systable_endscan(fkeyScan);
+	}
+
+	list_free(parent_cons);
+	if (restart)
+		goto restart;
+
 	table_close(fkeyRel, AccessShareLock);
+	list_free(oids);
 
 	/* Now sort and de-duplicate the result list */
 	list_sort(result, list_oid_cmp);

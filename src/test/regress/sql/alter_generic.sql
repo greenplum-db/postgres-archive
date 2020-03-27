@@ -430,6 +430,9 @@ ALTER OPERATOR FAMILY alt_opf18 USING btree ADD
   OPERATOR 4 >= (int4, int2) ,
   OPERATOR 5 > (int4, int2) ,
   FUNCTION 1 btint42cmp(int4, int2);
+-- Should fail. Not allowed to have cross-type equalimage function.
+ALTER OPERATOR FAMILY alt_opf18 USING btree
+  ADD FUNCTION 4 (int4, int2) btequalimage(oid);
 ALTER OPERATOR FAMILY alt_opf18 USING btree DROP FUNCTION 2 (int4, int4);
 DROP OPERATOR FAMILY alt_opf18 USING btree;
 
@@ -442,7 +445,7 @@ CREATE STATISTICS alt_stat1 ON a, b FROM alt_regress_1;
 CREATE STATISTICS alt_stat2 ON a, b FROM alt_regress_1;
 
 ALTER STATISTICS alt_stat1 RENAME TO alt_stat2;   -- failed (name conflict)
-ALTER STATISTICS alt_stat1 RENAME TO alt_stat3;   -- failed (name conflict)
+ALTER STATISTICS alt_stat1 RENAME TO alt_stat3;   -- OK
 ALTER STATISTICS alt_stat2 OWNER TO regress_alter_generic_user2;  -- failed (no role membership)
 ALTER STATISTICS alt_stat2 OWNER TO regress_alter_generic_user3;  -- OK
 ALTER STATISTICS alt_stat2 SET SCHEMA alt_nsp2;    -- OK

@@ -3,7 +3,7 @@
  * allpaths.c
  *	  Routines to find possible search paths for processing a query
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -691,7 +691,7 @@ set_rel_consider_parallel(PlannerInfo *root, RelOptInfo *rel,
 
 			/*
 			 * Currently, parallel workers can't access the leader's temporary
-			 * tables.  We could possibly relax this if the wrote all of its
+			 * tables.  We could possibly relax this if we wrote all of its
 			 * local buffers at the start of the query and made no changes
 			 * thereafter (maybe we could allow hint bit changes), and if we
 			 * taught the workers to read them.  Writing a large number of

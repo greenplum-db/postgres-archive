@@ -3,7 +3,7 @@
  * analyze.c
  *	  the Postgres statistics generator
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -35,6 +35,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_statistic_ext.h"
 #include "commands/dbcommands.h"
+#include "commands/progress.h"
 #include "commands/tablecmds.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
@@ -82,6 +83,7 @@ int			default_statistics_target = 100;
 /* A few variables that don't seem worth passing around as parameters */
 static MemoryContext anl_context = NULL;
 static BufferAccessStrategy vac_strategy;
+
 
 static void do_analyze_rel(Relation onerel,
 						   VacuumParams *params, List *va_cols,
@@ -273,6 +275,8 @@ analyze_rel(Oid relid, RangeVar *relation,
 	 * expose us to concurrent-update failures in update_attstats.)
 	 */
 	relation_close(onerel, NoLock);
+
+	pgstat_progress_end_command();
 
 	/*
 	 * Reset my PGXACT flag.  Note: we need this here, and not in vacuum_rel,
@@ -509,6 +513,10 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 	/*
 	 * Acquire the sample rows
 	 */
+	rows = (HeapTuple *) palloc(targrows * sizeof(HeapTuple));
+	pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE,
+								 inh ? PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS_INH :
+								 PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS);
 	if (inh)
 		acquire_inherited_sample_rows(onerel, elevel, sample_context);
 	else
@@ -528,6 +536,9 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 	{
 		MemoryContext col_context,
 					old_context;
+
+		pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE,
+									 PROGRESS_ANALYZE_PHASE_COMPUTE_STATS);
 
 		col_context = AllocSetContextCreate(anl_context,
 											"Analyze Column",
@@ -608,10 +619,12 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 		 * not for relations representing inheritance trees.
 		 */
 		if (!inh)
-			BuildRelationExtStatistics(onerel, totalrows, numrows,
-									   rows,
+			BuildRelationExtStatistics(onerel, totalrows, numrows, rows,
 									   attr_cnt, vacattrstats);
 	}
+
+	pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE,
+								 PROGRESS_ANALYZE_PHASE_FINALIZE_ANALYZE);
 
 	/*
 	 * Update pages/tuples stats in pg_class ... but not if we're doing
@@ -1086,6 +1099,10 @@ acquire_sample_rows(Relation onerel, int elevel,
 	TransactionId OldestXmin;
 	BlockSamplerData bs;
 	ReservoirStateData rstate;
+	TupleTableSlot *slot;
+	TableScanDesc scan;
+	BlockNumber nblocks;
+	BlockNumber blksdone = 0;
 
 	Assert(targrows > 0);
 
@@ -1097,7 +1114,12 @@ acquire_sample_rows(Relation onerel, int elevel,
 	OldestXmin = GetOldestXmin(onerel, PROCARRAY_FLAGS_VACUUM);
 
 	/* Prepare for sampling block numbers */
-	BlockSampler_Init(&bs, totalblocks, targrows, random());
+	nblocks = BlockSampler_Init(&bs, totalblocks, targrows, random());
+
+	/* Report sampling block numbers */
+	pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_TOTAL,
+								 nblocks);
+
 	/* Prepare for sampling rows */
 	reservoir_init_selection_state(&rstate, targrows);
 
@@ -1159,6 +1181,9 @@ acquire_sample_rows(Relation onerel, int elevel,
 
 			samplerows += 1;
 		}
+
+		pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_DONE,
+									 ++blksdone);
 	}
 
 	table_scan_analyze_endscan(context);
@@ -1352,6 +1377,8 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 	 * rels have radically different free-space percentages, but it's not
 	 * clear that it's worth working harder.)
 	 */
+	pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_TOTAL,
+								 nrels);
 	for (i = 0; i < nrels; i++)
 	{
 		Relation	childrel = rels[i];
@@ -1379,6 +1406,8 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 		 * pointers to their TOAST tables in the sampled rows.
 		 */
 		table_close(childrel, NoLock);
+		pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_DONE,
+									 i + 1);
 	}
 }
 

@@ -3,7 +3,7 @@
  * tsvector_op.c
  *	  operations over tsvector
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -303,7 +303,7 @@ tsvector_setweight_by_filter(PG_FUNCTION_ARGS)
 	memcpy(tsout, tsin, VARSIZE(tsin));
 	entry = ARRPTR(tsout);
 
-	deconstruct_array(lexemes, TEXTOID, -1, false, 'i',
+	deconstruct_array(lexemes, TEXTOID, -1, false, TYPALIGN_INT,
 					  &dlexemes, &nulls, &nlexemes);
 
 	/*
@@ -582,7 +582,7 @@ tsvector_delete_arr(PG_FUNCTION_ARGS)
 	Datum	   *dlexemes;
 	bool	   *nulls;
 
-	deconstruct_array(lexemes, TEXTOID, -1, false, 'i',
+	deconstruct_array(lexemes, TEXTOID, -1, false, TYPALIGN_INT,
 					  &dlexemes, &nulls, &nlex);
 
 	/*
@@ -666,9 +666,7 @@ tsvector_unnest(PG_FUNCTION_ARGS)
 		bool		nulls[] = {false, false, false};
 		Datum		values[3];
 
-		values[0] = PointerGetDatum(
-									cstring_to_text_with_len(data + arrin[i].pos, arrin[i].len)
-			);
+		values[0] = PointerGetDatum(cstring_to_text_with_len(data + arrin[i].pos, arrin[i].len));
 
 		if (arrin[i].haspos)
 		{
@@ -689,15 +687,14 @@ tsvector_unnest(PG_FUNCTION_ARGS)
 			{
 				positions[j] = Int16GetDatum(WEP_GETPOS(posv->pos[j]));
 				weight = 'D' - WEP_GETWEIGHT(posv->pos[j]);
-				weights[j] = PointerGetDatum(
-											 cstring_to_text_with_len(&weight, 1)
-					);
+				weights[j] = PointerGetDatum(cstring_to_text_with_len(&weight,
+																	  1));
 			}
 
-			values[1] = PointerGetDatum(
-										construct_array(positions, posv->npos, INT2OID, 2, true, 's'));
-			values[2] = PointerGetDatum(
-										construct_array(weights, posv->npos, TEXTOID, -1, false, 'i'));
+			values[1] = PointerGetDatum(construct_array(positions, posv->npos,
+														INT2OID, 2, true, TYPALIGN_SHORT));
+			values[2] = PointerGetDatum(construct_array(weights, posv->npos,
+														TEXTOID, -1, false, TYPALIGN_INT));
 		}
 		else
 		{
@@ -709,7 +706,6 @@ tsvector_unnest(PG_FUNCTION_ARGS)
 	}
 	else
 	{
-		pfree(tsin);
 		SRF_RETURN_DONE(funcctx);
 	}
 }
@@ -730,12 +726,11 @@ tsvector_to_array(PG_FUNCTION_ARGS)
 
 	for (i = 0; i < tsin->size; i++)
 	{
-		elements[i] = PointerGetDatum(
-									  cstring_to_text_with_len(STRPTR(tsin) + arrin[i].pos, arrin[i].len)
-			);
+		elements[i] = PointerGetDatum(cstring_to_text_with_len(STRPTR(tsin) + arrin[i].pos,
+															   arrin[i].len));
 	}
 
-	array = construct_array(elements, tsin->size, TEXTOID, -1, false, 'i');
+	array = construct_array(elements, tsin->size, TEXTOID, -1, false, TYPALIGN_INT);
 
 	pfree(elements);
 	PG_FREE_IF_COPY(tsin, 0);
@@ -759,7 +754,7 @@ array_to_tsvector(PG_FUNCTION_ARGS)
 				datalen = 0;
 	char	   *cur;
 
-	deconstruct_array(v, TEXTOID, -1, false, 'i', &dlexemes, &nulls, &nitems);
+	deconstruct_array(v, TEXTOID, -1, false, TYPALIGN_INT, &dlexemes, &nulls, &nitems);
 
 	/* Reject nulls (maybe we should just ignore them, instead?) */
 	for (i = 0; i < nitems; i++)
@@ -827,7 +822,7 @@ tsvector_filter(PG_FUNCTION_ARGS)
 	int			cur_pos = 0;
 	char		mask = 0;
 
-	deconstruct_array(weights, CHAROID, 1, true, 'c',
+	deconstruct_array(weights, CHAROID, 1, true, TYPALIGN_CHAR,
 					  &dweights, &nulls, &nweights);
 
 	for (i = 0; i < nweights; i++)
@@ -2420,6 +2415,7 @@ tsvector_update_trigger(PG_FUNCTION_ARGS, bool config_column)
 	bool		isnull;
 	text	   *txt;
 	Oid			cfgId;
+	bool		update_needed;
 
 	/* Check call context */
 	if (!CALLED_AS_TRIGGER(fcinfo)) /* internal error */
@@ -2432,9 +2428,15 @@ tsvector_update_trigger(PG_FUNCTION_ARGS, bool config_column)
 		elog(ERROR, "tsvector_update_trigger: must be fired BEFORE event");
 
 	if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+	{
 		rettuple = trigdata->tg_trigtuple;
+		update_needed = true;
+	}
 	else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+	{
 		rettuple = trigdata->tg_newtuple;
+		update_needed = false;	/* computed below */
+	}
 	else
 		elog(ERROR, "tsvector_update_trigger: must be fired for INSERT or UPDATE");
 
@@ -2522,6 +2524,9 @@ tsvector_update_trigger(PG_FUNCTION_ARGS, bool config_column)
 					 errmsg("column \"%s\" is not of a character type",
 							trigger->tgargs[i])));
 
+		if (bms_is_member(numattr - FirstLowInvalidHeapAttributeNumber, trigdata->tg_updatedcols))
+			update_needed = true;
+
 		datum = SPI_getbinval(rettuple, rel->rd_att, numattr, &isnull);
 		if (isnull)
 			continue;
@@ -2534,16 +2539,19 @@ tsvector_update_trigger(PG_FUNCTION_ARGS, bool config_column)
 			pfree(txt);
 	}
 
-	/* make tsvector value */
-	datum = TSVectorGetDatum(make_tsvector(&prs));
-	isnull = false;
+	if (update_needed)
+	{
+		/* make tsvector value */
+		datum = TSVectorGetDatum(make_tsvector(&prs));
+		isnull = false;
 
-	/* and insert it into tuple */
-	rettuple = heap_modify_tuple_by_cols(rettuple, rel->rd_att,
-										 1, &tsvector_attr_num,
-										 &datum, &isnull);
+		/* and insert it into tuple */
+		rettuple = heap_modify_tuple_by_cols(rettuple, rel->rd_att,
+											 1, &tsvector_attr_num,
+											 &datum, &isnull);
 
-	pfree(DatumGetPointer(datum));
+		pfree(DatumGetPointer(datum));
+	}
 
 	return PointerGetDatum(rettuple);
 }

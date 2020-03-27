@@ -4,7 +4,7 @@
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/pg_basebackup.c
@@ -121,6 +121,7 @@ static char *label = "pg_basebackup base backup";
 static bool noclean = false;
 static bool checksum_failure = false;
 static bool showprogress = false;
+static bool estimatesize = true;
 static int	verbose = 0;
 static int	compresslevel = 0;
 static IncludeWal includewal = STREAM_WAL;
@@ -386,6 +387,7 @@ usage(void)
 	printf(_("      --no-slot          prevent creation of temporary replication slot\n"));
 	printf(_("      --no-verify-checksums\n"
 			 "                         do not verify checksums\n"));
+	printf(_("      --no-estimate-size do not estimate backup size in server side\n"));
 	printf(_("  -?, --help             show this help, then exit\n"));
 	printf(_("\nConnection options:\n"));
 	printf(_("  -d, --dbname=CONNSTR   connection string\n"));
@@ -396,7 +398,8 @@ usage(void)
 	printf(_("  -U, --username=NAME    connect as specified database user\n"));
 	printf(_("  -w, --no-password      never prompt for password\n"));
 	printf(_("  -W, --password         force password prompt (should happen automatically)\n"));
-	printf(_("\nReport bugs to <pgsql-bugs@lists.postgresql.org>.\n"));
+	printf(_("\nReport bugs to <%s>.\n"), PACKAGE_BUGREPORT);
+	printf(_("%s home page: <%s>\n"), PACKAGE_NAME, PACKAGE_URL);
 }
 
 
@@ -1022,7 +1025,20 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 #ifdef HAVE_LIBZ
 			if (compresslevel != 0)
 			{
-				state.ztarfile = gzdopen(dup(fileno(stdout)), "wb");
+				int		fd = dup(fileno(stdout));
+				if (fd < 0)
+				{
+					pg_log_error("could not duplicate stdout: %m");
+					exit(1);
+				}
+
+				state.ztarfile = gzdopen(fd, "wb");
+				if (state.ztarfile == NULL)
+				{
+					pg_log_error("could not open output file: %m");
+					exit(1);
+				}
+
 				if (gzsetparams(state.ztarfile, compresslevel,
 								Z_DEFAULT_STRATEGY) != Z_OK)
 				{
@@ -1727,7 +1743,7 @@ BaseBackup(void)
 	basebkp =
 		psprintf("BASE_BACKUP LABEL '%s' %s %s %s %s %s %s %s",
 				 escaped_label,
-				 showprogress ? "PROGRESS" : "",
+				 estimatesize ? "PROGRESS" : "",
 				 includewal == FETCH_WAL ? "WAL" : "",
 				 fastcheckpoint ? "FAST" : "",
 				 includewal == NO_WAL ? "" : "NOWAIT",
@@ -2052,6 +2068,7 @@ main(int argc, char **argv)
 		{"waldir", required_argument, NULL, 1},
 		{"no-slot", no_argument, NULL, 2},
 		{"no-verify-checksums", no_argument, NULL, 3},
+		{"no-estimate-size", no_argument, NULL, 4},
 		{NULL, 0, NULL, 0}
 	};
 	int			c;
@@ -2220,6 +2237,9 @@ main(int argc, char **argv)
 			case 3:
 				verify_checksums = false;
 				break;
+			case 4:
+				estimatesize = false;
+				break;
 			default:
 
 				/*
@@ -2341,6 +2361,14 @@ main(int argc, char **argv)
 		exit(1);
 	}
 #endif
+
+	if (showprogress && !estimatesize)
+	{
+		pg_log_error("--progress and --no-estimate-size are incompatible options");
+		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
+				progname);
+		exit(1);
+	}
 
 	/* connection in replication mode to server */
 	conn = GetConnection();

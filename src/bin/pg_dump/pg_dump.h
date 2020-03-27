@@ -3,7 +3,7 @@
  * pg_dump.h
  *	  Common header file for the pg_dump utility
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/pg_dump/pg_dump.h
@@ -132,6 +132,7 @@ typedef struct _dumpableObject
 	DumpComponents dump;		/* bitmask of components to dump */
 	DumpComponents dump_contains;	/* as above, but for contained objects */
 	bool		ext_member;		/* true if object is member of extension */
+	bool		depends_on_ext;	/* true if object depends on an extension */
 	DumpId	   *dependencies;	/* dumpIds of objects this one depends on */
 	int			nDeps;			/* number of valid dependencies */
 	int			allocDeps;		/* allocated size of dependencies[] */
@@ -282,6 +283,7 @@ typedef struct _tableInfo
 	uint32		toast_minmxid;	/* toast table's relminmxid */
 	int			ncheck;			/* # of CHECK expressions */
 	char	   *reloftype;		/* underlying type for typed table */
+	Oid			foreign_server; /* foreign server oid, if applicable */
 	/* these two are set only if table is a sequence owned by a column: */
 	Oid			owning_tab;		/* OID of table owning sequence */
 	int			owning_col;		/* attr # of column owning sequence */
@@ -639,8 +641,6 @@ typedef struct _extensionMemberId
 /* placeholders for comment starting and ending delimiters */
 extern char g_comment_start[10];
 extern char g_comment_end[10];
-
-extern char g_opaque_type[10];	/* name for the opaque type */
 
 /*
  *	common utility functions

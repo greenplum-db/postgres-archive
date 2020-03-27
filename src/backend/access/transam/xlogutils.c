@@ -8,7 +8,7 @@
  * None of this code is used during normal system operation.
  *
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/xlogutils.c
@@ -30,6 +30,9 @@
 #include "utils/hsearch.h"
 #include "utils/rel.h"
 
+
+/* GUC variable */
+bool		ignore_invalid_pages = false;
 
 /*
  * During XLOG replay, we may see XLOG records for incremental updates of
@@ -93,7 +96,8 @@ log_invalid_page(RelFileNode node, ForkNumber forkno, BlockNumber blkno,
 	if (reachedConsistency)
 	{
 		report_invalid_page(WARNING, node, forkno, blkno, present);
-		elog(PANIC, "WAL contains references to invalid pages");
+		elog(ignore_invalid_pages ? WARNING : PANIC,
+			 "WAL contains references to invalid pages");
 	}
 
 	/*
@@ -240,7 +244,8 @@ XLogCheckInvalidPages(void)
 	}
 
 	if (foundone)
-		elog(PANIC, "WAL contains references to invalid pages");
+		elog(ignore_invalid_pages ? WARNING : PANIC,
+			 "WAL contains references to invalid pages");
 
 	hash_destroy(invalid_page_tab);
 	invalid_page_tab = NULL;

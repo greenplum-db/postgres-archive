@@ -3,7 +3,7 @@
  * ts_locale.h
  *		locale compatibility layer for tsearch
  *
- * Copyright (c) 1998-2019, PostgreSQL Global Development Group
+ * Copyright (c) 1998-2020, PostgreSQL Global Development Group
  *
  * src/include/tsearch/ts_locale.h
  *
@@ -20,11 +20,9 @@
 
 /*
  * towlower() and friends should be in <wctype.h>, but some pre-C99 systems
- * declare them in <wchar.h>.
+ * declare them in <wchar.h>, so include that too.
  */
-#ifdef HAVE_WCHAR_H
 #include <wchar.h>
-#endif
 #ifdef HAVE_WCTYPE_H
 #include <wctype.h>
 #endif

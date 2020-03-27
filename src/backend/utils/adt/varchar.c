@@ -3,7 +3,7 @@
  * varchar.c
  *	  Functions for the built-in types char(n) and varchar(n).
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -17,13 +17,13 @@
 #include "access/detoast.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
+#include "common/hashfn.h"
 #include "libpq/pqformat.h"
 #include "mb/pg_wchar.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/supportnodes.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
-#include "utils/hashutils.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
 #include "utils/varlena.h"

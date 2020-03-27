@@ -63,7 +63,7 @@
  * the standbys which are considered as synchronous at that moment
  * will release waiters from the queue.
  *
- * Portions Copyright (c) 2010-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/syncrep.c
@@ -209,7 +209,7 @@ SyncRepWaitForLSN(XLogRecPtr lsn, bool commit)
 		memcpy(new_status, old_status, len);
 		sprintf(new_status + len, " waiting for %X/%X",
 				(uint32) (lsn >> 32), (uint32) lsn);
-		set_ps_display(new_status, false);
+		set_ps_display(new_status);
 		new_status[len] = '\0'; /* truncate off " waiting ..." */
 	}
 
@@ -311,7 +311,7 @@ SyncRepWaitForLSN(XLogRecPtr lsn, bool commit)
 	if (new_status)
 	{
 		/* Reset ps display */
-		set_ps_display(new_status, false);
+		set_ps_display(new_status);
 		pfree(new_status);
 	}
 }

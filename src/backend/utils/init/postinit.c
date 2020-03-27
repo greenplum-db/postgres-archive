@@ -3,7 +3,7 @@
  * postinit.c
  *	  postgres initialization utilities
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -236,6 +236,7 @@ PerformAuthentication(Port *port)
 	/*
 	 * Now perform authentication exchange.
 	 */
+	set_ps_display("authentication");
 	ClientAuthentication(port); /* might not return, if failure */
 
 	/*
@@ -303,7 +304,7 @@ PerformAuthentication(Port *port)
 		}
 	}
 
-	set_ps_display("startup", false);
+	set_ps_display("startup");
 
 	ClientAuthInProgress = false;	/* client_min_messages is active now */
 }

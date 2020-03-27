@@ -3,7 +3,7 @@
  *
  *	server checks and output routines
  *
- *	Copyright (c) 2010-2019, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2020, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/check.c
  */
 
@@ -1028,6 +1028,7 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 								"            WHERE nspname = 'pg_catalog') AND"
 								"		t.typname IN ( "
 		/* regclass.oid is preserved, so 'regclass' is OK */
+								"           'regcollation', "
 								"           'regconfig', "
 								"           'regdictionary', "
 								"           'regnamespace', "

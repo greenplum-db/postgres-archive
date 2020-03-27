@@ -12,7 +12,7 @@
  * case, but most of the heavy lifting for that is done elsewhere,
  * notably in prepjointree.c and allpaths.c.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1072,7 +1072,7 @@ choose_hashed_setop(PlannerInfo *root, List *groupClauses,
 			 numGroupCols, dNumGroups,
 			 NIL,
 			 input_path->startup_cost, input_path->total_cost,
-			 input_path->rows);
+			 input_path->rows, input_path->pathtarget->width);
 
 	/*
 	 * Now for the sorted case.  Note that the input is *always* unsorted,

@@ -3,7 +3,7 @@
  * parse_type.c
  *		handle type operations for parser
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -409,7 +409,7 @@ typenameTypeMod(ParseState *pstate, const TypeName *typeName, Type typ)
 
 	/* hardwired knowledge about cstring's representation details here */
 	arrtypmod = construct_array(datums, n, CSTRINGOID,
-								-2, false, 'c');
+								-2, false, TYPALIGN_CHAR);
 
 	/* arrange to report location if type's typmodin function fails */
 	setup_parser_errposition_callback(&pcbstate, pstate, typeName->location);

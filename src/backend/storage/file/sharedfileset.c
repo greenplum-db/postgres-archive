@@ -3,7 +3,7 @@
  * sharedfileset.c
  *	  Shared temporary file management.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -22,11 +22,11 @@
 
 #include "catalog/pg_tablespace.h"
 #include "commands/tablespace.h"
+#include "common/hashfn.h"
 #include "miscadmin.h"
 #include "storage/dsm.h"
 #include "storage/sharedfileset.h"
 #include "utils/builtins.h"
-#include "utils/hashutils.h"
 
 static void SharedFileSetOnDetach(dsm_segment *segment, Datum datum);
 static void SharedFileSetPath(char *path, SharedFileSet *fileset, Oid tablespace);

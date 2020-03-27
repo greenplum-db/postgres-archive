@@ -3,7 +3,7 @@
  * statscmds.c
  *	  Commands for creating and altering extended statistics objects
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -323,7 +323,7 @@ CreateStatistics(CreateStatsStmt *stmt)
 	if (build_mcv)
 		types[ntypes++] = CharGetDatum(STATS_EXT_MCV);
 	Assert(ntypes > 0 && ntypes <= lengthof(types));
-	stxkind = construct_array(types, ntypes, CHAROID, 1, true, 'c');
+	stxkind = construct_array(types, ntypes, CHAROID, 1, true, TYPALIGN_CHAR);
 
 	statrel = table_open(StatisticExtRelationId, RowExclusiveLock);
 

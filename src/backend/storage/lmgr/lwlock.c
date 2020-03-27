@@ -20,7 +20,7 @@
  * appropriate value for a free lock.  The meaning of the variable is up to
  * the caller, the lightweight lock code just assigns and compares it.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -310,6 +310,7 @@ get_lwlock_stats_entry(LWLock *lock)
 		return &lwlock_stats_dummy;
 
 	/* Fetch or create the entry. */
+	MemSet(&key, 0, sizeof(key));
 	key.tranche = lock->tranche;
 	key.instance = lock;
 	lwstats = hash_search(lwlock_stats_htab, &key, HASH_ENTER, &found);

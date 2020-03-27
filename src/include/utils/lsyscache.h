@@ -3,7 +3,7 @@
  * lsyscache.h
  *	  Convenience routines for common queries in the system catalog cache.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/lsyscache.h
@@ -90,6 +90,7 @@ extern char get_attgenerated(Oid relid, AttrNumber attnum);
 extern Oid	get_atttype(Oid relid, AttrNumber attnum);
 extern void get_atttypetypmodcoll(Oid relid, AttrNumber attnum,
 								  Oid *typid, int32 *typmod, Oid *collid);
+extern Oid	get_cast_oid(Oid sourcetypeid, Oid targettypeid, bool missing_ok);
 extern char *get_collation_name(Oid colloid);
 extern bool get_collation_isdeterministic(Oid colloid);
 extern char *get_constraint_name(Oid conoid);
@@ -179,12 +180,15 @@ extern void free_attstatsslot(AttStatsSlot *sslot);
 extern char *get_namespace_name(Oid nspid);
 extern char *get_namespace_name_or_temp(Oid nspid);
 extern Oid	get_range_subtype(Oid rangeOid);
+extern Oid	get_range_collation(Oid rangeOid);
 extern Oid	get_index_column_opclass(Oid index_oid, int attno);
+extern bool	get_index_isreplident(Oid index_oid);
+extern bool get_index_isvalid(Oid index_oid);
 
 #define type_is_array(typid)  (get_element_type(typid) != InvalidOid)
 /* type_is_array_domain accepts both plain arrays and domains over arrays */
 #define type_is_array_domain(typid)  (get_base_element_type(typid) != InvalidOid)
 
-#define TypeIsToastable(typid)	(get_typstorage(typid) != 'p')
+#define TypeIsToastable(typid)	(get_typstorage(typid) != TYPSTORAGE_PLAIN)
 
 #endif							/* LSYSCACHE_H */

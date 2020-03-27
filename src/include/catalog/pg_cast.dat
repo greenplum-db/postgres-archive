@@ -3,7 +3,7 @@
 # pg_cast.dat
 #    Initial contents of the pg_cast system catalog.
 #
-# Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+# Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
 # src/include/catalog/pg_cast.dat
@@ -188,6 +188,20 @@
 { castsource => 'regclass', casttarget => 'int8', castfunc => 'int8(oid)',
   castcontext => 'a', castmethod => 'f' },
 { castsource => 'regclass', casttarget => 'int4', castfunc => '0',
+  castcontext => 'a', castmethod => 'b' },
+{ castsource => 'oid', casttarget => 'regcollation', castfunc => '0',
+  castcontext => 'i', castmethod => 'b' },
+{ castsource => 'regcollation', casttarget => 'oid', castfunc => '0',
+  castcontext => 'i', castmethod => 'b' },
+{ castsource => 'int8', casttarget => 'regcollation', castfunc => 'oid',
+  castcontext => 'i', castmethod => 'f' },
+{ castsource => 'int2', casttarget => 'regcollation', castfunc => 'int4(int2)',
+  castcontext => 'i', castmethod => 'f' },
+{ castsource => 'int4', casttarget => 'regcollation', castfunc => '0',
+  castcontext => 'i', castmethod => 'b' },
+{ castsource => 'regcollation', casttarget => 'int8', castfunc => 'int8(oid)',
+  castcontext => 'a', castmethod => 'f' },
+{ castsource => 'regcollation', casttarget => 'int4', castfunc => '0',
   castcontext => 'a', castmethod => 'b' },
 { castsource => 'oid', casttarget => 'regtype', castfunc => '0',
   castcontext => 'i', castmethod => 'b' },

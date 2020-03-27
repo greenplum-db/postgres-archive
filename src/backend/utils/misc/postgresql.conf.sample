@@ -153,7 +153,7 @@
 
 # - Kernel Resources -
 
-#max_files_per_process = 1000		# min 25
+#max_files_per_process = 1000		# min 64
 					# (change requires restart)
 
 # - Cost-Based Vacuum Delay -
@@ -321,6 +321,7 @@
 #max_standby_streaming_delay = 30s	# max delay before canceling queries
 					# when reading streaming WAL;
 					# -1 allows indefinite delay
+#wal_receiver_create_temp_slot = on	# create temp slot if primary_slot_name not set
 #wal_receiver_status_interval = 10s	# send replies at least this often
 					# 0 disables
 #hot_standby_feedback = off		# send info from standby to prevent
@@ -527,6 +528,7 @@
 					#   %d = database name
 					#   %r = remote host and port
 					#   %h = remote host
+					#   %b = backend type
 					#   %p = process ID
 					#   %t = timestamp without milliseconds
 					#   %m = timestamp with milliseconds
@@ -544,6 +546,7 @@
 					# e.g. '<%u%%%d> '
 #log_lock_waits = off			# log lock waits >= deadlock_timeout
 #log_statement = 'none'			# none, ddl, mod, all
+#log_parameters_on_error = off	# on error log statements with bind parameters
 #log_replication_commands = off
 #log_temp_files = -1			# log temporary files equal or larger
 					# than the specified size in kilobytes;

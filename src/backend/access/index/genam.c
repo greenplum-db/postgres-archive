@@ -3,7 +3,7 @@
  * genam.c
  *	  general index access method routines
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -276,6 +276,10 @@ BuildIndexValueDescription(Relation indexRelation,
 /*
  * Get the latestRemovedXid from the table entries pointed at by the index
  * tuples being deleted.
+ *
+ * Note: index access methods that don't consistently use the standard
+ * IndexTuple + heap TID item pointer representation will need to provide
+ * their own version of this function.
  */
 TransactionId
 index_compute_xid_horizon_for_tuples(Relation irel,

@@ -3,7 +3,7 @@
  * pg_constraint.c
  *	  routines to support manipulation of the pg_constraint relation
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -18,7 +18,6 @@
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/table.h"
-#include "access/tupconvert.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
@@ -109,7 +108,7 @@ CreateConstraintEntry(const char *constraintName,
 		for (i = 0; i < constraintNKeys; i++)
 			conkey[i] = Int16GetDatum(constraintKey[i]);
 		conkeyArray = construct_array(conkey, constraintNKeys,
-									  INT2OID, 2, true, 's');
+									  INT2OID, 2, true, TYPALIGN_SHORT);
 	}
 	else
 		conkeyArray = NULL;
@@ -122,19 +121,19 @@ CreateConstraintEntry(const char *constraintName,
 		for (i = 0; i < foreignNKeys; i++)
 			fkdatums[i] = Int16GetDatum(foreignKey[i]);
 		confkeyArray = construct_array(fkdatums, foreignNKeys,
-									   INT2OID, 2, true, 's');
+									   INT2OID, 2, true, TYPALIGN_SHORT);
 		for (i = 0; i < foreignNKeys; i++)
 			fkdatums[i] = ObjectIdGetDatum(pfEqOp[i]);
 		conpfeqopArray = construct_array(fkdatums, foreignNKeys,
-										 OIDOID, sizeof(Oid), true, 'i');
+										 OIDOID, sizeof(Oid), true, TYPALIGN_INT);
 		for (i = 0; i < foreignNKeys; i++)
 			fkdatums[i] = ObjectIdGetDatum(ppEqOp[i]);
 		conppeqopArray = construct_array(fkdatums, foreignNKeys,
-										 OIDOID, sizeof(Oid), true, 'i');
+										 OIDOID, sizeof(Oid), true, TYPALIGN_INT);
 		for (i = 0; i < foreignNKeys; i++)
 			fkdatums[i] = ObjectIdGetDatum(ffEqOp[i]);
 		conffeqopArray = construct_array(fkdatums, foreignNKeys,
-										 OIDOID, sizeof(Oid), true, 'i');
+										 OIDOID, sizeof(Oid), true, TYPALIGN_INT);
 	}
 	else
 	{
@@ -152,7 +151,7 @@ CreateConstraintEntry(const char *constraintName,
 		for (i = 0; i < constraintNKeys; i++)
 			opdatums[i] = ObjectIdGetDatum(exclOp[i]);
 		conexclopArray = construct_array(opdatums, constraintNKeys,
-										 OIDOID, sizeof(Oid), true, 'i');
+										 OIDOID, sizeof(Oid), true, TYPALIGN_INT);
 	}
 	else
 		conexclopArray = NULL;

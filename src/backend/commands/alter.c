@@ -3,7 +3,7 @@
  * alter.c
  *	  Drivers for generic alter commands
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -212,8 +212,8 @@ AlterObjectRename_internal(Relation rel, Oid objectId, const char *new_name)
 		if (Anum_owner <= 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 (errmsg("must be superuser to rename %s",
-							 getObjectDescriptionOids(classId, objectId)))));
+					 errmsg("must be superuser to rename %s",
+							getObjectDescriptionOids(classId, objectId))));
 
 		/* Otherwise, must be owner of the existing object */
 		datum = heap_getattr(oldtup, Anum_owner,
@@ -433,10 +433,22 @@ ExecAlterObjectDependsStmt(AlterObjectDependsStmt *stmt, ObjectAddress *refAddre
 	ObjectAddress address;
 	ObjectAddress refAddr;
 	Relation	rel;
+	List   *currexts;
 
 	address =
 		get_object_address_rv(stmt->objectType, stmt->relation, (List *) stmt->object,
 							  &rel, AccessExclusiveLock, false);
+
+	/*
+	 * Verify that the user is entitled to run the command.
+	 *
+	 * We don't check any privileges on the extension, because that's not
+	 * needed.  The object owner is stipulating, by running this command, that
+	 * the extension owner can drop the object whenever they feel like it,
+	 * which is not considered a problem.
+	 */
+	check_object_ownership(GetUserId(),
+						   stmt->objectType, address, stmt->object, rel);
 
 	/*
 	 * If a relation was involved, it would have been opened and locked. We
@@ -451,7 +463,11 @@ ExecAlterObjectDependsStmt(AlterObjectDependsStmt *stmt, ObjectAddress *refAddre
 	if (refAddress)
 		*refAddress = refAddr;
 
-	recordDependencyOn(&address, &refAddr, DEPENDENCY_AUTO_EXTENSION);
+	/* Avoid duplicates */
+	currexts = getAutoExtensionsOfObject(address.classId,
+										 address.objectId);
+	if (!list_member_oid(currexts, refAddr.objectId))
+		recordDependencyOn(&address, &refAddr, DEPENDENCY_AUTO_EXTENSION);
 
 	return address;
 }
@@ -715,8 +731,8 @@ AlterObjectNamespace_internal(Relation rel, Oid objid, Oid nspOid)
 		if (Anum_owner <= 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 (errmsg("must be superuser to set schema of %s",
-							 getObjectDescriptionOids(classId, objid)))));
+					 errmsg("must be superuser to set schema of %s",
+							getObjectDescriptionOids(classId, objid))));
 
 		/* Otherwise, must be owner of the existing object */
 		owner = heap_getattr(tup, Anum_owner, RelationGetDescr(rel), &isnull);

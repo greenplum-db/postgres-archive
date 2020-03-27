@@ -3,7 +3,7 @@
  * vacuumlo.c
  *	  This removes orphaned large objects from a database.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -436,7 +436,8 @@ usage(const char *progname)
 	printf("  -w, --no-password         never prompt for password\n");
 	printf("  -W, --password            force password prompt\n");
 	printf("\n");
-	printf("Report bugs to <pgsql-bugs@lists.postgresql.org>.\n");
+	printf("Report bugs to <%s>.\n", PACKAGE_BUGREPORT);
+	printf("%s home page: <%s>\n", PACKAGE_NAME, PACKAGE_URL);
 }
 
 

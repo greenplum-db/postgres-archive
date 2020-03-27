@@ -16,7 +16,7 @@
  * bitcode.
  *
  *
- * Copyright (c) 2016-2019, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/jit/llvm/llvmjit_types.c
@@ -98,13 +98,43 @@ FunctionReturningBool(void)
  */
 void	   *referenced_functions[] =
 {
+	ExecAggInitGroup,
+	ExecAggTransReparent,
+	ExecEvalAggOrderedTransDatum,
+	ExecEvalAggOrderedTransTuple,
+	ExecEvalAlternativeSubPlan,
+	ExecEvalArrayCoerce,
+	ExecEvalArrayExpr,
+	ExecEvalConstraintCheck,
+	ExecEvalConstraintNotNull,
+	ExecEvalConvertRowtype,
+	ExecEvalCurrentOfExpr,
+	ExecEvalFieldSelect,
+	ExecEvalFieldStoreDeForm,
+	ExecEvalFieldStoreForm,
+	ExecEvalFuncExprFusage,
+	ExecEvalFuncExprStrictFusage,
+	ExecEvalGroupingFunc,
+	ExecEvalMinMax,
+	ExecEvalNextValueExpr,
+	ExecEvalParamExec,
+	ExecEvalParamExtern,
+	ExecEvalRow,
+	ExecEvalRowNotNull,
+	ExecEvalRowNull,
+	ExecEvalSQLValueFunction,
+	ExecEvalScalarArrayOp,
+	ExecEvalSubPlan,
+	ExecEvalSubscriptingRef,
+	ExecEvalSubscriptingRefAssign,
+	ExecEvalSubscriptingRefFetch,
+	ExecEvalSubscriptingRefOld,
+	ExecEvalSysVar,
+	ExecEvalWholeRowVar,
+	ExecEvalXmlExpr,
+	MakeExpandedObjectReadOnlyInternal,
+	slot_getmissingattrs,
+	slot_getsomeattrs_int,
 	strlen,
 	varsize_any,
-	slot_getsomeattrs_int,
-	slot_getmissingattrs,
-	MakeExpandedObjectReadOnlyInternal,
-	ExecEvalSubscriptingRef,
-	ExecEvalSysVar,
-	ExecAggTransReparent,
-	ExecAggInitGroup
 };

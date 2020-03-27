@@ -4,7 +4,7 @@
  *	  POSTGRES table access method definitions.
  *
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/tableam.h
@@ -107,18 +107,19 @@ typedef enum ScanOptions
 	SO_TYPE_SEQSCAN = 1 << 0,
 	SO_TYPE_BITMAPSCAN = 1 << 1,
 	SO_TYPE_SAMPLESCAN = 1 << 2,
-	SO_TYPE_ANALYZE = 1 << 3,
+	SO_TYPE_TIDSCAN = 1 << 3,
+	SO_TYPE_ANALYZE = 1 << 4,
 
 	/* several of SO_ALLOW_* may be specified */
 	/* allow or disallow use of access strategy */
-	SO_ALLOW_STRAT = 1 << 4,
+	SO_ALLOW_STRAT = 1 << 5,
 	/* report location to syncscan logic? */
-	SO_ALLOW_SYNC = 1 << 5,
+	SO_ALLOW_SYNC = 1 << 6,
 	/* verify visibility page-at-a-time? */
-	SO_ALLOW_PAGEMODE = 1 << 6,
+	SO_ALLOW_PAGEMODE = 1 << 7,
 
 	/* unregister snapshot at scan end? */
-	SO_TEMP_SNAPSHOT = 1 << 7
+	SO_TEMP_SNAPSHOT = 1 << 8
 } ScanOptions;
 
 /*
@@ -659,6 +660,24 @@ typedef struct TableAmRoutine
 	 */
 	bool		(*relation_needs_toast_table) (Relation rel);
 
+	/*
+	 * This callback should return the OID of the table AM that implements
+	 * TOAST tables for this AM.  If the relation_needs_toast_table callback
+	 * always returns false, this callback is not required.
+	 */
+	Oid		    (*relation_toast_am) (Relation rel);
+
+	/*
+	 * This callback is invoked when detoasting a value stored in a toast
+	 * table implemented by this AM.  See table_relation_fetch_toast_slice()
+	 * for more details.
+	 */
+	void		(*relation_fetch_toast_slice) (Relation toastrel, Oid valueid,
+											   int32 attrsize,
+											   int32 sliceoffset,
+											   int32 slicelength,
+											   struct varlena *result);
+
 
 	/* ------------------------------------------------------------------------
 	 * Planner related functions.
@@ -906,6 +925,19 @@ table_beginscan_sampling(Relation rel, Snapshot snapshot,
 		flags |= SO_ALLOW_PAGEMODE;
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
+}
+
+/*
+ * table_beginscan_tid is an alternative entry point for setting up a
+ * TableScanDesc for a Tid scan. As with bitmap scans, it's worth using
+ * the same data structure although the behavior is rather different.
+ */
+static inline TableScanDesc
+table_beginscan_tid(Relation rel, Snapshot snapshot)
+{
+	uint32		flags = SO_TYPE_TIDSCAN;
+
+	return rel->rd_tableam->scan_begin(rel, snapshot, 0, NULL, NULL, flags);
 }
 
 /*
@@ -1272,7 +1304,7 @@ table_tuple_complete_speculative(Relation rel, TupleTableSlot *slot,
  * operation. That's often faster than calling table_insert() in a loop,
  * because e.g. the AM can reduce WAL logging and page locking overhead.
  *
- * Except for taking `nslots` tuples as input, as an array of TupleTableSlots
+ * Except for taking `nslots` tuples as input, and an array of TupleTableSlots
  * in `slots`, the parameters for table_multi_insert() are the same as for
  * table_tuple_insert().
  *
@@ -1719,6 +1751,50 @@ static inline bool
 table_relation_needs_toast_table(Relation rel)
 {
 	return rel->rd_tableam->relation_needs_toast_table(rel);
+}
+
+/*
+ * Return the OID of the AM that should be used to implement the TOAST table
+ * for this relation.
+ */
+static inline Oid
+table_relation_toast_am(Relation rel)
+{
+	return rel->rd_tableam->relation_toast_am(rel);
+}
+
+/*
+ * Fetch all or part of a TOAST value from a TOAST table.
+ *
+ * If this AM is never used to implement a TOAST table, then this callback
+ * is not needed. But, if toasted values are ever stored in a table of this
+ * type, then you will need this callback.
+ *
+ * toastrel is the relation in which the toasted value is stored.
+ *
+ * valueid identifes which toast value is to be fetched. For the heap,
+ * this corresponds to the values stored in the chunk_id column.
+ *
+ * attrsize is the total size of the toast value to be fetched.
+ *
+ * sliceoffset is the offset within the toast value of the first byte that
+ * should be fetched.
+ *
+ * slicelength is the number of bytes from the toast value that should be
+ * fetched.
+ *
+ * result is caller-allocated space into which the fetched bytes should be
+ * stored.
+ */
+static inline void
+table_relation_fetch_toast_slice(Relation toastrel, Oid valueid,
+								 int32 attrsize, int32 sliceoffset,
+								 int32 slicelength, struct varlena *result)
+{
+	toastrel->rd_tableam->relation_fetch_toast_slice(toastrel, valueid,
+													 attrsize,
+													 sliceoffset, slicelength,
+													 result);
 }
 
 

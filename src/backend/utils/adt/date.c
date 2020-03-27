@@ -3,7 +3,7 @@
  * date.c
  *	  implements DATE and TIME data types specified in SQL standard
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  *
@@ -21,6 +21,7 @@
 #include <time.h>
 
 #include "access/xact.h"
+#include "common/hashfn.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "nodes/supportnodes.h"
@@ -29,7 +30,6 @@
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
-#include "utils/hashutils.h"
 #include "utils/sortsupport.h"
 
 /*

@@ -3,7 +3,7 @@
  * sync.c
  *	  File synchronization management code.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -216,7 +216,7 @@ SyncPostCheckpoint(void)
 
 		/*
 		 * As in ProcessSyncRequests, we don't want to stop absorbing fsync
-		 * requests for along time when there are many deletions to be done.
+		 * requests for a long time when there are many deletions to be done.
 		 * We can safely call AbsorbSyncRequests() at this point in the loop
 		 * (note it might try to delete list entries).
 		 */

@@ -3,7 +3,7 @@
  *
  *	options functions
  *
- *	Copyright (c) 2010-2019, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2020, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/option.c
  */
 
@@ -295,7 +295,7 @@ usage(void)
 	printf(_("  -c, --check                   check clusters only, don't change any data\n"));
 	printf(_("  -d, --old-datadir=DATADIR     old cluster data directory\n"));
 	printf(_("  -D, --new-datadir=DATADIR     new cluster data directory\n"));
-	printf(_("  -j, --jobs                    number of simultaneous processes or threads to use\n"));
+	printf(_("  -j, --jobs=NUM                number of simultaneous processes or threads to use\n"));
 	printf(_("  -k, --link                    link instead of copying files to new cluster\n"));
 	printf(_("  -o, --old-options=OPTIONS     old cluster options to pass to the server\n"));
 	printf(_("  -O, --new-options=OPTIONS     new cluster options to pass to the server\n"));
@@ -336,7 +336,8 @@ usage(void)
 			 "  C:\\> set PGBINNEW=newCluster/bin\n"
 			 "  C:\\> pg_upgrade\n"));
 #endif
-	printf(_("\nReport bugs to <pgsql-bugs@lists.postgresql.org>.\n"));
+	printf(_("\nReport bugs to <%s>.\n"), PACKAGE_BUGREPORT);
+	printf(_("%s home page: <%s>\n"), PACKAGE_NAME, PACKAGE_URL);
 }
 
 

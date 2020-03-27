@@ -3,7 +3,7 @@
  * reloptions.c
  *	  Core support for relation options (pg_class.reloptions)
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -155,6 +155,16 @@ static relopt_bool boolRelOpts[] =
 			"Enables vacuum to truncate empty pages at the end of this table",
 			RELOPT_KIND_HEAP | RELOPT_KIND_TOAST,
 			ShareUpdateExclusiveLock
+		},
+		true
+	},
+	{
+		{
+			"deduplicate_items",
+			"Enables \"deduplicate items\" feature for this btree index",
+			RELOPT_KIND_BTREE,
+			ShareUpdateExclusiveLock	/* since it applies only to later
+										 * inserts */
 		},
 		true
 	},
@@ -332,6 +342,19 @@ static relopt_int intRelOpts[] =
 		{
 			"effective_io_concurrency",
 			"Number of simultaneous requests that can be handled efficiently by the disk subsystem.",
+			RELOPT_KIND_TABLESPACE,
+			ShareUpdateExclusiveLock
+		},
+#ifdef USE_PREFETCH
+		-1, 0, MAX_IO_CONCURRENCY
+#else
+		0, 0, 0
+#endif
+	},
+	{
+		{
+			"maintenance_io_concurrency",
+			"Number of simultaneous requests that can be handled efficiently by the disk subsystem for maintenance work.",
 			RELOPT_KIND_TABLESPACE,
 			ShareUpdateExclusiveLock
 		},
@@ -891,7 +914,7 @@ transformRelOptions(Datum oldOptions, List *defList, const char *namspace,
 		int			noldoptions;
 		int			i;
 
-		deconstruct_array(array, TEXTOID, -1, false, 'i',
+		deconstruct_array(array, TEXTOID, -1, false, TYPALIGN_INT,
 						  &oldoptions, NULL, &noldoptions);
 
 		for (i = 0; i < noldoptions; i++)
@@ -1059,7 +1082,7 @@ untransformRelOptions(Datum options)
 
 	array = DatumGetArrayTypeP(options);
 
-	deconstruct_array(array, TEXTOID, -1, false, 'i',
+	deconstruct_array(array, TEXTOID, -1, false, TYPALIGN_INT,
 					  &optiondatums, NULL, &noptions);
 
 	for (i = 0; i < noptions; i++)
@@ -1200,7 +1223,7 @@ parseRelOptions(Datum options, bool validate, relopt_kind kind,
 		Datum	   *optiondatums;
 		int			noptions;
 
-		deconstruct_array(array, TEXTOID, -1, false, 'i',
+		deconstruct_array(array, TEXTOID, -1, false, TYPALIGN_INT,
 						  &optiondatums, NULL, &noptions);
 
 		for (i = 0; i < noptions; i++)
@@ -1701,7 +1724,8 @@ tablespace_reloptions(Datum reloptions, bool validate)
 	static const relopt_parse_elt tab[] = {
 		{"random_page_cost", RELOPT_TYPE_REAL, offsetof(TableSpaceOpts, random_page_cost)},
 		{"seq_page_cost", RELOPT_TYPE_REAL, offsetof(TableSpaceOpts, seq_page_cost)},
-		{"effective_io_concurrency", RELOPT_TYPE_INT, offsetof(TableSpaceOpts, effective_io_concurrency)}
+		{"effective_io_concurrency", RELOPT_TYPE_INT, offsetof(TableSpaceOpts, effective_io_concurrency)},
+		{"maintenance_io_concurrency", RELOPT_TYPE_INT, offsetof(TableSpaceOpts, maintenance_io_concurrency)}
 	};
 
 	return (bytea *) build_reloptions(reloptions, validate,

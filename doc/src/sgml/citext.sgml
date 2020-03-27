@@ -24,6 +24,12 @@
   </para>
  </tip>
 
+ <para>
+  This module is considered <quote>trusted</quote>, that is, it can be
+  installed by non-superusers who have <literal>CREATE</literal> privilege
+  on the current database.
+ </para>
+
  <sect2>
   <title>Rationale</title>
 
@@ -227,9 +233,10 @@ SELECT * FROM users WHERE nick = 'Larry';
      <para>
        <type>citext</type> is not as efficient as <type>text</type> because the
        operator functions and the B-tree comparison functions must make copies
-       of the data and convert it to lower case for comparisons. It is,
-       however, slightly more efficient than using <function>lower</function> to get
-       case-insensitive matching.
+       of the data and convert it to lower case for comparisons.  Also, only
+       <type>text</type> can support B-Tree deduplication.  However,
+       <type>citext</type> is slightly more efficient than using
+       <function>lower</function> to get case-insensitive matching.
      </para>
     </listitem>
 

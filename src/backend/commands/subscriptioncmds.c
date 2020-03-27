@@ -3,7 +3,7 @@
  * subscriptioncmds.c
  *		subscription catalog manipulation functions
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -38,6 +38,7 @@
 #include "replication/walsender.h"
 #include "replication/worker_internal.h"
 #include "storage/lmgr.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -293,7 +294,7 @@ publicationListToArray(List *publist)
 	MemoryContextSwitchTo(oldcxt);
 
 	arr = construct_array(datums, list_length(publist),
-						  TEXTOID, -1, false, 'i');
+						  TEXTOID, -1, false, TYPALIGN_INT);
 
 	MemoryContextDelete(memcxt);
 
@@ -347,7 +348,7 @@ CreateSubscription(CreateSubscriptionStmt *stmt, bool isTopLevel)
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 (errmsg("must be superuser to create subscriptions"))));
+				 errmsg("must be superuser to create subscriptions")));
 
 	/*
 	 * If built with appropriate switch, whine when regression-testing
@@ -428,7 +429,6 @@ CreateSubscription(CreateSubscriptionStmt *stmt, bool isTopLevel)
 	 */
 	if (connect)
 	{
-		XLogRecPtr	lsn;
 		char	   *err;
 		WalReceiverConn *wrconn;
 		List	   *tables;
@@ -479,7 +479,7 @@ CreateSubscription(CreateSubscriptionStmt *stmt, bool isTopLevel)
 				Assert(slotname);
 
 				walrcv_create_slot(wrconn, slotname, false,
-								   CRS_NOEXPORT_SNAPSHOT, &lsn);
+								   CRS_NOEXPORT_SNAPSHOT, NULL);
 				ereport(NOTICE,
 						(errmsg("created replication slot \"%s\" on publisher",
 								slotname)));

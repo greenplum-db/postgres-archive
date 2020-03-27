@@ -219,8 +219,9 @@ help(const char *progname)
 		   "  -p, --port=PORT            database server port number\n"
 		   "  -U, --username=USERNAME    connect as specified database user\n"
 		   "\nThe default action is to show all database OIDs.\n\n"
-		   "Report bugs to <pgsql-bugs@lists.postgresql.org>.\n",
-		   progname, progname);
+		   "Report bugs to <%s>.\n"
+		   "%s home page: <%s>\n",
+		   progname, progname, PACKAGE_BUGREPORT, PACKAGE_NAME, PACKAGE_URL);
 }
 
 /*
@@ -545,8 +546,7 @@ sql_exec_searchtables(PGconn *conn, struct options *opts)
 	free(comma_filenodes);
 
 	/* now build the query */
-	todo = psprintf(
-					"SELECT pg_catalog.pg_relation_filenode(c.oid) as \"Filenode\", relname as \"Table Name\" %s\n"
+	todo = psprintf("SELECT pg_catalog.pg_relation_filenode(c.oid) as \"Filenode\", relname as \"Table Name\" %s\n"
 					"FROM pg_catalog.pg_class c\n"
 					"	LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n"
 					"	LEFT JOIN pg_catalog.pg_database d ON d.datname = pg_catalog.current_database(),\n"

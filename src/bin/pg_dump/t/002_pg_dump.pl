@@ -522,7 +522,8 @@ my %tests = (
 						 OPERATOR 4 >=(bigint,int4),
 						 OPERATOR 5 >(bigint,int4),
 						 FUNCTION 1 (int4, int4) btint4cmp(int4,int4),
-						 FUNCTION 2 (int4, int4) btint4sortsupport(internal);',
+						 FUNCTION 2 (int4, int4) btint4sortsupport(internal),
+						 FUNCTION 4 (int4, int4) btequalimage(oid);',
 		regexp => qr/^
 			\QALTER OPERATOR FAMILY dump_test.op_family USING btree ADD\E\n\s+
 			\QOPERATOR 1 <(bigint,integer) ,\E\n\s+
@@ -531,7 +532,8 @@ my %tests = (
 			\QOPERATOR 4 >=(bigint,integer) ,\E\n\s+
 			\QOPERATOR 5 >(bigint,integer) ,\E\n\s+
 			\QFUNCTION 1 (integer, integer) btint4cmp(integer,integer) ,\E\n\s+
-			\QFUNCTION 2 (integer, integer) btint4sortsupport(internal);\E
+			\QFUNCTION 2 (integer, integer) btint4sortsupport(internal) ,\E\n\s+
+			\QFUNCTION 4 (integer, integer) btequalimage(oid);\E
 			/xm,
 		like =>
 		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
@@ -1554,7 +1556,8 @@ my %tests = (
 						 OPERATOR 4 >=(bigint,bigint),
 						 OPERATOR 5 >(bigint,bigint),
 						 FUNCTION 1 btint8cmp(bigint,bigint),
-						 FUNCTION 2 btint8sortsupport(internal);',
+						 FUNCTION 2 btint8sortsupport(internal),
+						 FUNCTION 4 btequalimage(oid);',
 		regexp => qr/^
 			\QCREATE OPERATOR CLASS dump_test.op_class\E\n\s+
 			\QFOR TYPE bigint USING btree FAMILY dump_test.op_family AS\E\n\s+
@@ -1564,7 +1567,8 @@ my %tests = (
 			\QOPERATOR 4 >=(bigint,bigint) ,\E\n\s+
 			\QOPERATOR 5 >(bigint,bigint) ,\E\n\s+
 			\QFUNCTION 1 (bigint, bigint) btint8cmp(bigint,bigint) ,\E\n\s+
-			\QFUNCTION 2 (bigint, bigint) btint8sortsupport(internal);\E
+			\QFUNCTION 2 (bigint, bigint) btint8sortsupport(internal) ,\E\n\s+
+			\QFUNCTION 4 (bigint, bigint) btequalimage(oid);\E
 			/xm,
 		like =>
 		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
@@ -2375,6 +2379,32 @@ my %tests = (
 			role             => 1,
 			binary_upgrade   => 1,
 		},
+	},
+
+	'Creation of row-level trigger in partitioned table' => {
+		create_order => 92,
+		create_sql   => 'CREATE TRIGGER test_trigger
+		   AFTER INSERT ON dump_test.measurement
+		   FOR EACH ROW EXECUTE PROCEDURE dump_test.trigger_func()',
+		regexp => qr/^
+			\QCREATE TRIGGER test_trigger AFTER INSERT ON dump_test.measurement \E
+			\QFOR EACH ROW \E
+			\QEXECUTE FUNCTION dump_test.trigger_func();\E
+			/xm,
+		like => {
+			%full_runs, %dump_test_schema_runs, section_post_data => 1,
+		},
+		unlike => {
+			exclude_dump_test_schema => 1,
+		},
+	},
+
+	# this shouldn't ever get emitted
+	'Creation of row-level trigger in partition' => {
+		regexp => qr/^
+			\QCREATE TRIGGER test_trigger AFTER INSERT ON dump_test_second_schema.measurement\E
+			/xm,
+		like => {},
 	},
 
 	'CREATE TABLE test_fourth_table_zero_col' => {

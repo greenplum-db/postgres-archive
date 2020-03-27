@@ -3,7 +3,7 @@
  *
  * PostgreSQL write-ahead log manager
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/xlog.h
@@ -313,6 +313,7 @@ extern XLogRecPtr GetFlushRecPtr(void);
 extern XLogRecPtr GetLastImportantRecPtr(void);
 extern void RemovePromoteSignalFiles(void);
 
+extern bool PromoteIsTriggered(void);
 extern bool CheckPromoteSignal(void);
 extern void WakeupRecovery(void);
 extern void SetWalWriterSleeping(bool sleeping);
@@ -349,7 +350,8 @@ extern XLogRecPtr do_pg_start_backup(const char *backupidstr, bool fast,
 									 bool needtblspcmapfile);
 extern XLogRecPtr do_pg_stop_backup(char *labelfile, bool waitforarchive,
 									TimeLineID *stoptli_p);
-extern void do_pg_abort_backup(void);
+extern void do_pg_abort_backup(int code, Datum arg);
+extern void register_persistent_abort_backup_handler(void);
 extern SessionBackupState get_backup_status(void);
 
 /* File path names (all relative to $PGDATA) */

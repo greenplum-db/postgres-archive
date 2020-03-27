@@ -29,7 +29,7 @@
  * and a non-lossy page.
  *
  *
- * Copyright (c) 2003-2019, PostgreSQL Global Development Group
+ * Copyright (c) 2003-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/nodes/tidbitmap.c
@@ -41,11 +41,11 @@
 #include <limits.h>
 
 #include "access/htup_details.h"
+#include "common/hashfn.h"
 #include "nodes/bitmapset.h"
 #include "nodes/tidbitmap.h"
 #include "storage/lwlock.h"
 #include "utils/dsa.h"
-#include "utils/hashutils.h"
 
 /*
  * The maximum number of tuples per page is not large (typically 256 with

@@ -3,7 +3,7 @@
  * matview.c
  *	  materialized view support
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -136,7 +136,7 @@ SetMatViewPopulatedState(Relation relation, bool newstate)
  */
 ObjectAddress
 ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
-				   ParamListInfo params, char *completionTag)
+				   ParamListInfo params, QueryCompletion *qc)
 {
 	Oid			matviewOid;
 	Relation	matviewRel;

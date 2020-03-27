@@ -2,7 +2,7 @@
  * worker.c
  *	   PostgreSQL logical replication worker (apply)
  *
- * Copyright (c) 2016-2019, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/logical/worker.c
@@ -42,9 +42,11 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/optimizer.h"
+#include "parser/analyze.h"
 #include "parser/parse_relation.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
+#include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/walwriter.h"
 #include "replication/decode.h"
@@ -111,8 +113,15 @@ static void store_flush_position(XLogRecPtr remote_lsn);
 
 static void maybe_reread_subscription(void);
 
-/* Flags set by signal handlers */
-static volatile sig_atomic_t got_SIGHUP = false;
+static void apply_handle_insert_internal(ResultRelInfo *relinfo,
+										 EState *estate, TupleTableSlot *remoteslot);
+static void apply_handle_update_internal(ResultRelInfo *relinfo,
+										 EState *estate, TupleTableSlot *remoteslot,
+										 LogicalRepTupleData *newtup,
+										 LogicalRepRelMapEntry *relmapentry);
+static void apply_handle_delete_internal(ResultRelInfo *relinfo, EState *estate,
+										 TupleTableSlot *remoteslot,
+										 LogicalRepRelation *remoterel);
 
 /*
  * Should this worker apply changes for given relation.
@@ -232,6 +241,7 @@ slot_fill_defaults(LogicalRepRelMapEntry *rel, EState *estate,
 	defmap = (int *) palloc(num_phys_attrs * sizeof(int));
 	defexprs = (ExprState **) palloc(num_phys_attrs * sizeof(ExprState *));
 
+	Assert(rel->attrmap->maplen == num_phys_attrs);
 	for (attnum = 0; attnum < num_phys_attrs; attnum++)
 	{
 		Expr	   *defexpr;
@@ -239,7 +249,7 @@ slot_fill_defaults(LogicalRepRelMapEntry *rel, EState *estate,
 		if (TupleDescAttr(desc, attnum)->attisdropped || TupleDescAttr(desc, attnum)->attgenerated)
 			continue;
 
-		if (rel->attrmap[attnum] >= 0)
+		if (rel->attrmap->attnums[attnum] >= 0)
 			continue;
 
 		defexpr = (Expr *) build_column_default(rel->localrel, attnum + 1);
@@ -321,10 +331,11 @@ slot_store_cstrings(TupleTableSlot *slot, LogicalRepRelMapEntry *rel,
 	error_context_stack = &errcallback;
 
 	/* Call the "in" function for each non-dropped attribute */
+	Assert(natts == rel->attrmap->maplen);
 	for (i = 0; i < natts; i++)
 	{
 		Form_pg_attribute att = TupleDescAttr(slot->tts_tupleDescriptor, i);
-		int			remoteattnum = rel->attrmap[i];
+		int			remoteattnum = rel->attrmap->attnums[i];
 
 		if (!att->attisdropped && remoteattnum >= 0 &&
 			values[remoteattnum] != NULL)
@@ -405,10 +416,11 @@ slot_modify_cstrings(TupleTableSlot *slot, TupleTableSlot *srcslot,
 	error_context_stack = &errcallback;
 
 	/* Call the "in" function for each replaced attribute */
+	Assert(natts == rel->attrmap->maplen);
 	for (i = 0; i < natts; i++)
 	{
 		Form_pg_attribute att = TupleDescAttr(slot->tts_tupleDescriptor, i);
-		int			remoteattnum = rel->attrmap[i];
+		int			remoteattnum = rel->attrmap->attnums[i];
 
 		if (remoteattnum < 0)
 			continue;
@@ -580,6 +592,7 @@ GetRelationIdentityOrPK(Relation rel)
 /*
  * Handle INSERT message.
  */
+
 static void
 apply_handle_insert(StringInfo s)
 {
@@ -619,13 +632,10 @@ apply_handle_insert(StringInfo s)
 	slot_fill_defaults(rel, estate, remoteslot);
 	MemoryContextSwitchTo(oldctx);
 
-	ExecOpenIndices(estate->es_result_relation_info, false);
+	Assert(rel->localrel->rd_rel->relkind == RELKIND_RELATION);
+	apply_handle_insert_internal(estate->es_result_relation_info, estate,
+								 remoteslot);
 
-	/* Do the insert. */
-	ExecSimpleRelationInsert(estate, remoteslot);
-
-	/* Cleanup. */
-	ExecCloseIndices(estate->es_result_relation_info);
 	PopActiveSnapshot();
 
 	/* Handle queued AFTER triggers. */
@@ -637,6 +647,20 @@ apply_handle_insert(StringInfo s)
 	logicalrep_rel_close(rel, NoLock);
 
 	CommandCounterIncrement();
+}
+
+/* Workhorse for apply_handle_insert() */
+static void
+apply_handle_insert_internal(ResultRelInfo *relinfo,
+							 EState *estate, TupleTableSlot *remoteslot)
+{
+	ExecOpenIndices(relinfo, false);
+
+	/* Do the insert. */
+	ExecSimpleRelationInsert(estate, remoteslot);
+
+	/* Cleanup. */
+	ExecCloseIndices(relinfo);
 }
 
 /*
@@ -682,15 +706,12 @@ apply_handle_update(StringInfo s)
 {
 	LogicalRepRelMapEntry *rel;
 	LogicalRepRelId relid;
-	Oid			idxoid;
 	EState	   *estate;
-	EPQState	epqstate;
 	LogicalRepTupleData oldtup;
 	LogicalRepTupleData newtup;
 	bool		has_oldtup;
-	TupleTableSlot *localslot;
 	TupleTableSlot *remoteslot;
-	bool		found;
+	RangeTblEntry *target_rte;
 	MemoryContext oldctx;
 
 	ensure_transaction();
@@ -716,12 +737,25 @@ apply_handle_update(StringInfo s)
 	remoteslot = ExecInitExtraTupleSlot(estate,
 										RelationGetDescr(rel->localrel),
 										&TTSOpsVirtual);
-	localslot = table_slot_create(rel->localrel,
-								  &estate->es_tupleTable);
-	EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1);
+
+	/*
+	 * Populate updatedCols so that per-column triggers can fire.  This could
+	 * include more columns than were actually changed on the publisher
+	 * because the logical replication protocol doesn't contain that
+	 * information.  But it would for example exclude columns that only exist
+	 * on the subscriber, since we are not touching those.
+	 */
+	target_rte = list_nth(estate->es_range_table, 0);
+	for (int i = 0; i < remoteslot->tts_tupleDescriptor->natts; i++)
+	{
+		if (newtup.changed[i])
+			target_rte->updatedCols = bms_add_member(target_rte->updatedCols,
+													 i + 1 - FirstLowInvalidHeapAttributeNumber);
+	}
+
+	fill_extraUpdatedCols(target_rte, RelationGetDescr(rel->localrel));
 
 	PushActiveSnapshot(GetTransactionSnapshot());
-	ExecOpenIndices(estate->es_result_relation_info, false);
 
 	/* Build the search tuple. */
 	oldctx = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
@@ -729,20 +763,56 @@ apply_handle_update(StringInfo s)
 						has_oldtup ? oldtup.values : newtup.values);
 	MemoryContextSwitchTo(oldctx);
 
+	Assert(rel->localrel->rd_rel->relkind == RELKIND_RELATION);
+	apply_handle_update_internal(estate->es_result_relation_info, estate,
+								 remoteslot, &newtup, rel);
+
+	PopActiveSnapshot();
+
+	/* Handle queued AFTER triggers. */
+	AfterTriggerEndQuery(estate);
+
+	ExecResetTupleTable(estate->es_tupleTable, false);
+	FreeExecutorState(estate);
+
+	logicalrep_rel_close(rel, NoLock);
+
+	CommandCounterIncrement();
+}
+
+/* Workhorse for apply_handle_update() */
+static void
+apply_handle_update_internal(ResultRelInfo *relinfo,
+							 EState *estate, TupleTableSlot *remoteslot,
+							 LogicalRepTupleData *newtup,
+							 LogicalRepRelMapEntry *relmapentry)
+{
+	Relation	localrel = relinfo->ri_RelationDesc;
+	Oid			idxoid;
+	EPQState	epqstate;
+	TupleTableSlot *localslot;
+	bool		found;
+	MemoryContext oldctx;
+
+	localslot = table_slot_create(localrel, &estate->es_tupleTable);
+	EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1);
+
+	ExecOpenIndices(relinfo, false);
+
 	/*
 	 * Try to find tuple using either replica identity index, primary key or
 	 * if needed, sequential scan.
 	 */
-	idxoid = GetRelationIdentityOrPK(rel->localrel);
+	idxoid = GetRelationIdentityOrPK(localrel);
 	Assert(OidIsValid(idxoid) ||
-		   (rel->remoterel.replident == REPLICA_IDENTITY_FULL && has_oldtup));
+		   (relmapentry->remoterel.replident == REPLICA_IDENTITY_FULL));
 
 	if (OidIsValid(idxoid))
-		found = RelationFindReplTupleByIndex(rel->localrel, idxoid,
+		found = RelationFindReplTupleByIndex(localrel, idxoid,
 											 LockTupleExclusive,
 											 remoteslot, localslot);
 	else
-		found = RelationFindReplTupleSeq(rel->localrel, LockTupleExclusive,
+		found = RelationFindReplTupleSeq(localrel, LockTupleExclusive,
 										 remoteslot, localslot);
 
 	ExecClearTuple(remoteslot);
@@ -756,8 +826,8 @@ apply_handle_update(StringInfo s)
 	{
 		/* Process and store remote tuple in the slot */
 		oldctx = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
-		slot_modify_cstrings(remoteslot, localslot, rel,
-							 newtup.values, newtup.changed);
+		slot_modify_cstrings(remoteslot, localslot, relmapentry,
+							 newtup->values, newtup->changed);
 		MemoryContextSwitchTo(oldctx);
 
 		EvalPlanQualSetSlot(&epqstate, remoteslot);
@@ -775,23 +845,12 @@ apply_handle_update(StringInfo s)
 		elog(DEBUG1,
 			 "logical replication did not find row for update "
 			 "in replication target relation \"%s\"",
-			 RelationGetRelationName(rel->localrel));
+			 RelationGetRelationName(localrel));
 	}
 
 	/* Cleanup. */
-	ExecCloseIndices(estate->es_result_relation_info);
-	PopActiveSnapshot();
-
-	/* Handle queued AFTER triggers. */
-	AfterTriggerEndQuery(estate);
-
+	ExecCloseIndices(relinfo);
 	EvalPlanQualEnd(&epqstate);
-	ExecResetTupleTable(estate->es_tupleTable, false);
-	FreeExecutorState(estate);
-
-	logicalrep_rel_close(rel, NoLock);
-
-	CommandCounterIncrement();
 }
 
 /*
@@ -805,12 +864,8 @@ apply_handle_delete(StringInfo s)
 	LogicalRepRelMapEntry *rel;
 	LogicalRepTupleData oldtup;
 	LogicalRepRelId relid;
-	Oid			idxoid;
 	EState	   *estate;
-	EPQState	epqstate;
 	TupleTableSlot *remoteslot;
-	TupleTableSlot *localslot;
-	bool		found;
 	MemoryContext oldctx;
 
 	ensure_transaction();
@@ -835,33 +890,64 @@ apply_handle_delete(StringInfo s)
 	remoteslot = ExecInitExtraTupleSlot(estate,
 										RelationGetDescr(rel->localrel),
 										&TTSOpsVirtual);
-	localslot = table_slot_create(rel->localrel,
-								  &estate->es_tupleTable);
-	EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1);
 
 	PushActiveSnapshot(GetTransactionSnapshot());
-	ExecOpenIndices(estate->es_result_relation_info, false);
 
-	/* Find the tuple using the replica identity index. */
+	/* Build the search tuple. */
 	oldctx = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
 	slot_store_cstrings(remoteslot, rel, oldtup.values);
 	MemoryContextSwitchTo(oldctx);
+
+	Assert(rel->localrel->rd_rel->relkind == RELKIND_RELATION);
+	apply_handle_delete_internal(estate->es_result_relation_info, estate,
+								 remoteslot, &rel->remoterel);
+
+	PopActiveSnapshot();
+
+	/* Handle queued AFTER triggers. */
+	AfterTriggerEndQuery(estate);
+
+	ExecResetTupleTable(estate->es_tupleTable, false);
+	FreeExecutorState(estate);
+
+	logicalrep_rel_close(rel, NoLock);
+
+	CommandCounterIncrement();
+}
+
+/* Workhorse for apply_handle_delete() */
+static void
+apply_handle_delete_internal(ResultRelInfo *relinfo, EState *estate,
+							 TupleTableSlot *remoteslot,
+							 LogicalRepRelation *remoterel)
+{
+	Relation	localrel = relinfo->ri_RelationDesc;
+	Oid			idxoid;
+	EPQState	epqstate;
+	TupleTableSlot *localslot;
+	bool		found;
+
+	localslot = table_slot_create(localrel, &estate->es_tupleTable);
+	EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1);
+
+	ExecOpenIndices(relinfo, false);
 
 	/*
 	 * Try to find tuple using either replica identity index, primary key or
 	 * if needed, sequential scan.
 	 */
-	idxoid = GetRelationIdentityOrPK(rel->localrel);
+	idxoid = GetRelationIdentityOrPK(localrel);
 	Assert(OidIsValid(idxoid) ||
-		   (rel->remoterel.replident == REPLICA_IDENTITY_FULL));
+		   (remoterel->replident == REPLICA_IDENTITY_FULL));
 
 	if (OidIsValid(idxoid))
-		found = RelationFindReplTupleByIndex(rel->localrel, idxoid,
+		found = RelationFindReplTupleByIndex(localrel, idxoid,
 											 LockTupleExclusive,
 											 remoteslot, localslot);
 	else
-		found = RelationFindReplTupleSeq(rel->localrel, LockTupleExclusive,
+		found = RelationFindReplTupleSeq(localrel, LockTupleExclusive,
 										 remoteslot, localslot);
+
 	/* If found delete it. */
 	if (found)
 	{
@@ -876,23 +962,12 @@ apply_handle_delete(StringInfo s)
 		elog(DEBUG1,
 			 "logical replication could not find row for delete "
 			 "in replication target relation \"%s\"",
-			 RelationGetRelationName(rel->localrel));
+			 RelationGetRelationName(localrel));
 	}
 
 	/* Cleanup. */
-	ExecCloseIndices(estate->es_result_relation_info);
-	PopActiveSnapshot();
-
-	/* Handle queued AFTER triggers. */
-	AfterTriggerEndQuery(estate);
-
+	ExecCloseIndices(relinfo);
 	EvalPlanQualEnd(&epqstate);
-	ExecResetTupleTable(estate->es_tupleTable, false);
-	FreeExecutorState(estate);
-
-	logicalrep_rel_close(rel, NoLock);
-
-	CommandCounterIncrement();
 }
 
 /*
@@ -1270,9 +1345,9 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 			CHECK_FOR_INTERRUPTS();
 		}
 
-		if (got_SIGHUP)
+		if (ConfigReloadPending)
 		{
-			got_SIGHUP = false;
+			ConfigReloadPending = false;
 			ProcessConfigFile(PGC_SIGHUP);
 		}
 
@@ -1563,20 +1638,6 @@ subscription_change_cb(Datum arg, int cacheid, uint32 hashvalue)
 	MySubscriptionValid = false;
 }
 
-/* SIGHUP: set flag to reload configuration at next convenient time */
-static void
-logicalrep_worker_sighup(SIGNAL_ARGS)
-{
-	int			save_errno = errno;
-
-	got_SIGHUP = true;
-
-	/* Waken anything waiting on the process latch */
-	SetLatch(MyLatch);
-
-	errno = save_errno;
-}
-
 /* Logical Replication Apply worker entry point */
 void
 ApplyWorkerMain(Datum main_arg)
@@ -1592,7 +1653,7 @@ ApplyWorkerMain(Datum main_arg)
 	logicalrep_worker_attach(worker_slot);
 
 	/* Setup signal handling */
-	pqsignal(SIGHUP, logicalrep_worker_sighup);
+	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGTERM, die);
 	BackgroundWorkerUnblockSignals();
 

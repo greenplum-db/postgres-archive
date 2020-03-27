@@ -4,7 +4,7 @@
  *	  definitions for executor state nodes
  *
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/execnodes.h
@@ -104,6 +104,7 @@ typedef struct ExprState
 	int			steps_len;		/* number of steps currently */
 	int			steps_alloc;	/* allocated length of steps array */
 
+#define FIELDNO_EXPRSTATE_PARENT 11
 	struct PlanState *parent;	/* parent PlanState node, if any */
 	ParamListInfo ext_params;	/* for compiling PARAM_EXTERN nodes */
 
@@ -455,6 +456,9 @@ typedef struct ResultRelInfo
 
 	/* array of stored generated columns expr states */
 	ExprState **ri_GeneratedExprs;
+
+	/* number of stored generated columns we need to compute */
+	int			ri_NumGeneratedNeeded;
 
 	/* for removing junk attributes from tuples */
 	JunkFilter *ri_junkFilter;
@@ -1171,7 +1175,6 @@ typedef struct ModifyTableState
 	List	  **mt_arowmarks;	/* per-subplan ExecAuxRowMark lists */
 	EPQState	mt_epqstate;	/* for evaluating EvalPlanQual rechecks */
 	bool		fireBSTriggers; /* do we need to fire stmt triggers? */
-	List	   *mt_excludedtlist;	/* the excluded pseudo relation's tlist  */
 
 	/*
 	 * Slot for storing tuples in the root partitioned table's rowtype during
@@ -1235,8 +1238,6 @@ struct AppendState
  *		slots			current output tuple of each subplan
  *		heap			heap of active tuples
  *		initialized		true if we have fetched first tuple from each subplan
- *		noopscan		true if partition pruning proved that none of the
- *						mergeplans can contain a record to satisfy this query.
  *		prune_state		details required to allow partitions to be
  *						eliminated from the scan, or NULL if not possible.
  *		valid_subplans	for runtime pruning, valid mergeplans indexes to
@@ -1253,7 +1254,6 @@ typedef struct MergeAppendState
 	TupleTableSlot **ms_slots;	/* array of length ms_nplans */
 	struct binaryheap *ms_heap; /* binary heap of slot indices */
 	bool		ms_initialized; /* are subplans started? */
-	bool		ms_noopscan;
 	struct PartitionPruneState *ms_prune_state;
 	Bitmapset  *ms_valid_subplans;
 } MergeAppendState;
@@ -1674,7 +1674,8 @@ typedef struct FunctionScanState
  *
  *		rowcontext			per-expression-list context
  *		exprlists			array of expression lists being evaluated
- *		array_len			size of array
+ *		exprstatelists		array of expression state lists, for SubPlans only
+ *		array_len			size of above arrays
  *		curr_idx			current array index (0-based)
  *
  *	Note: ss.ps.ps_ExprContext is used to evaluate any qual or projection
@@ -1682,6 +1683,12 @@ typedef struct FunctionScanState
  *	rowcontext, in which to build the executor expression state for each
  *	Values sublist.  Resetting this context lets us get rid of expression
  *	state for each row, avoiding major memory leakage over a long values list.
+ *	However, that doesn't work for sublists containing SubPlans, because a
+ *	SubPlan has to be connected up to the outer plan tree to work properly.
+ *	Therefore, for only those sublists containing SubPlans, we do expression
+ *	state construction at executor start, and store those pointers in
+ *	exprstatelists[].  NULL entries in that array correspond to simple
+ *	subexpressions that are handled as described above.
  * ----------------
  */
 typedef struct ValuesScanState
@@ -1689,6 +1696,7 @@ typedef struct ValuesScanState
 	ScanState	ss;				/* its first field is NodeTag */
 	ExprContext *rowcontext;
 	List	  **exprlists;
+	List	  **exprstatelists;
 	int			array_len;
 	int			curr_idx;
 } ValuesScanState;
@@ -2071,12 +2079,32 @@ typedef struct AggState
 	/* these fields are used in AGG_HASHED and AGG_MIXED modes: */
 	bool		table_filled;	/* hash table filled yet? */
 	int			num_hashes;
+	MemoryContext	hash_metacxt;	/* memory for hash table itself */
+	struct HashTapeInfo *hash_tapeinfo; /* metadata for spill tapes */
+	struct HashAggSpill *hash_spills; /* HashAggSpill for each grouping set,
+										 exists only during first pass */
+	TupleTableSlot *hash_spill_slot; /* slot for reading from spill files */
+	List	   *hash_batches;	/* hash batches remaining to be processed */
+	bool		hash_ever_spilled;	/* ever spilled during this execution? */
+	bool		hash_spill_mode;	/* we hit a limit during the current batch
+									   and we must not create new groups */
+	Size		hash_mem_limit;	/* limit before spilling hash table */
+	uint64		hash_ngroups_limit;	/* limit before spilling hash table */
+	int			hash_planned_partitions; /* number of partitions planned
+											for first pass */
+	double		hashentrysize;	/* estimate revised during execution */
+	Size		hash_mem_peak;	/* peak hash table memory usage */
+	uint64		hash_ngroups_current;	/* number of groups currently in
+										   memory in all hash tables */
+	uint64		hash_disk_used; /* kB of disk space used */
+	int			hash_batches_used;	/* batches used during entire execution */
+
 	AggStatePerHash perhash;	/* array of per-hashtable data */
 	AggStatePerGroup *hash_pergroup;	/* grouping set indexed array of
 										 * per-group pointers */
 
 	/* support for evaluation of agg input expressions: */
-#define FIELDNO_AGGSTATE_ALL_PERGROUPS 34
+#define FIELDNO_AGGSTATE_ALL_PERGROUPS 49
 	AggStatePerGroup *all_pergroups;	/* array of first ->pergroups, than
 										 * ->hash_pergroup */
 	ProjectionInfo *combinedproj;	/* projection machinery */

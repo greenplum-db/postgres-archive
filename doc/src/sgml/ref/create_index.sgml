@@ -129,6 +129,11 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
         &mdash; see <xref linkend="sql-createindex-concurrently"
         endterm="sql-createindex-concurrently-title"/>.
        </para>
+       <para>
+        For temporary tables, <command>CREATE INDEX</command> is always
+        non-concurrent, as no other session can access them, and
+        non-concurrent index creation is cheaper.
+       </para>
       </listitem>
      </varlistentry>
 
@@ -166,6 +171,8 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
         maximum size allowed for the index type, data insertion will fail.
         In any case, non-key columns duplicate data from the index's table
         and bloat the size of the index, thus potentially slowing searches.
+        Furthermore, B-tree deduplication is never used with indexes
+        that have a non-key column.
        </para>
 
        <para>
@@ -362,7 +369,7 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
 
    <variablelist>
    <varlistentry id="index-reloption-fillfactor" xreflabel="fillfactor">
-    <term><literal>fillfactor</literal>
+    <term><literal>fillfactor</literal> (<type>integer</type>)
      <indexterm>
       <primary><varname>fillfactor</varname> storage parameter</primary>
      </indexterm>
@@ -388,12 +395,40 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
    </variablelist>
 
    <para>
-    B-tree indexes additionally accept this parameter:
+    B-tree indexes also accept these parameters:
    </para>
 
    <variablelist>
+   <varlistentry id="index-reloption-deduplicate-items" xreflabel="deduplicate_items">
+    <term><literal>deduplicate_items</literal> (<type>boolean</type>)
+     <indexterm>
+      <primary><varname>deduplicate_items</varname> storage parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+    <para>
+      Controls usage of the B-tree deduplication technique described
+      in <xref linkend="btree-deduplication"/>.  Set to
+      <literal>ON</literal> or <literal>OFF</literal> to enable or
+      disable the optimization.  (Alternative spellings of
+      <literal>ON</literal> and <literal>OFF</literal> are allowed as
+      described in <xref linkend="config-setting"/>.) The default is
+      <literal>ON</literal>.
+    </para>
+
+    <note>
+     <para>
+      Turning <literal>deduplicate_items</literal> off via
+      <command>ALTER INDEX</command> prevents future insertions from
+      triggering deduplication, but does not in itself make existing
+      posting list tuples use the standard tuple representation.
+     </para>
+    </note>
+    </listitem>
+   </varlistentry>
+
    <varlistentry id="index-reloption-vacuum-cleanup-index-scale-factor" xreflabel="vacuum_cleanup_index_scale_factor">
-    <term><literal>vacuum_cleanup_index_scale_factor</literal>
+    <term><literal>vacuum_cleanup_index_scale_factor</literal> (<type>floating point</type>)
      <indexterm>
       <primary><varname>vacuum_cleanup_index_scale_factor</varname></primary>
       <secondary>storage parameter</secondary>
@@ -413,7 +448,7 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
 
    <variablelist>
    <varlistentry id="index-reloption-buffering" xreflabel="buffering">
-    <term><literal>buffering</literal>
+    <term><literal>buffering</literal> (<type>enum</type>)
      <indexterm>
       <primary><varname>buffering</varname> storage parameter</primary>
      </indexterm>
@@ -436,7 +471,7 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
 
    <variablelist>
    <varlistentry id="index-reloption-fastupdate" xreflabel="fastupdate">
-    <term><literal>fastupdate</literal>
+    <term><literal>fastupdate</literal> (<type>boolean</type>)
      <indexterm>
       <primary><varname>fastupdate</varname> storage parameter</primary>
      </indexterm>
@@ -446,9 +481,7 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
      This setting controls usage of the fast update technique described in
      <xref linkend="gin-fast-update"/>.  It is a Boolean parameter:
      <literal>ON</literal> enables fast update, <literal>OFF</literal> disables it.
-     (Alternative spellings of <literal>ON</literal> and <literal>OFF</literal> are
-     allowed as described in <xref linkend="config-setting"/>.)  The
-     default is <literal>ON</literal>.
+     The default is <literal>ON</literal>.
     </para>
 
     <note>
@@ -466,7 +499,7 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
 
    <variablelist>
    <varlistentry id="index-reloption-gin-pending-list-limit" xreflabel="gin_pending_list_limit">
-    <term><literal>gin_pending_list_limit</literal>
+    <term><literal>gin_pending_list_limit</literal> (<type>integer</type>)
      <indexterm>
       <primary><varname>gin_pending_list_limit</varname></primary>
       <secondary>storage parameter</secondary>
@@ -487,7 +520,7 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
 
    <variablelist>
    <varlistentry id="index-reloption-pages-per-range" xreflabel="pages_per_range">
-    <term><literal>pages_per_range</literal>
+    <term><literal>pages_per_range</literal> (<type>integer</type>)
      <indexterm>
       <primary><varname>pages_per_range</varname> storage parameter</primary>
      </indexterm>
@@ -502,7 +535,7 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
    </varlistentry>
 
    <varlistentry id="index-reloption-autosummarize" xreflabel="autosummarize">
-    <term><literal>autosummarize</literal>
+    <term><literal>autosummarize</literal> (<type>boolean</type>)
      <indexterm>
       <primary><varname>autosummarize</varname> storage parameter</primary>
      </indexterm>
@@ -797,6 +830,13 @@ CREATE UNIQUE INDEX title_idx ON films (title);
    and <literal>rating</literal> in the table <literal>films</literal>:
 <programlisting>
 CREATE UNIQUE INDEX title_idx ON films (title) INCLUDE (director, rating);
+</programlisting>
+  </para>
+
+  <para>
+   To create a B-Tree index with deduplication disabled:
+<programlisting>
+CREATE INDEX title_idx ON films (title) WITH (deduplicate_items = off);
 </programlisting>
   </para>
 

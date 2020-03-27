@@ -226,11 +226,6 @@
      </row>
 
      <row>
-      <entry><link linkend="catalog-pg-pltemplate"><structname>pg_pltemplate</structname></link></entry>
-      <entry>template data for procedural languages</entry>
-     </row>
-
-     <row>
       <entry><link linkend="catalog-pg-policy"><structname>pg_policy</structname></link></entry>
       <entry>row-security policies</entry>
      </row>
@@ -4911,113 +4906,6 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
  </sect1>
 
 
- <sect1 id="catalog-pg-pltemplate">
-  <title><structname>pg_pltemplate</structname></title>
-
-  <indexterm zone="catalog-pg-pltemplate">
-   <primary>pg_pltemplate</primary>
-  </indexterm>
-
-  <para>
-   The catalog <structname>pg_pltemplate</structname> stores
-   <quote>template</quote> information for procedural languages.
-   A template for a language allows the language to be created in a
-   particular database by a simple <command>CREATE LANGUAGE</command> command,
-   with no need to specify implementation details.
-  </para>
-
-  <para>
-   Unlike most system catalogs, <structname>pg_pltemplate</structname>
-   is shared across all databases of a cluster: there is only one
-   copy of <structname>pg_pltemplate</structname> per cluster, not
-   one per database.  This allows the information to be accessible in
-   each database as it is needed.
-  </para>
-
-  <table>
-   <title><structname>pg_pltemplate</structname> Columns</title>
-
-   <tgroup cols="3">
-    <thead>
-     <row>
-      <entry>Name</entry>
-      <entry>Type</entry>
-      <entry>Description</entry>
-     </row>
-    </thead>
-
-    <tbody>
-     <row>
-      <entry><structfield>tmplname</structfield></entry>
-      <entry><type>name</type></entry>
-      <entry>Name of the language this template is for</entry>
-     </row>
-
-     <row>
-      <entry><structfield>tmpltrusted</structfield></entry>
-      <entry><type>boolean</type></entry>
-      <entry>True if language is considered trusted</entry>
-     </row>
-
-     <row>
-      <entry><structfield>tmpldbacreate</structfield></entry>
-      <entry><type>boolean</type></entry>
-      <entry>True if language may be created by a database owner</entry>
-     </row>
-
-     <row>
-      <entry><structfield>tmplhandler</structfield></entry>
-      <entry><type>text</type></entry>
-      <entry>Name of call handler function</entry>
-     </row>
-
-     <row>
-      <entry><structfield>tmplinline</structfield></entry>
-      <entry><type>text</type></entry>
-      <entry>Name of anonymous-block handler function, or null if none</entry>
-     </row>
-
-     <row>
-      <entry><structfield>tmplvalidator</structfield></entry>
-      <entry><type>text</type></entry>
-      <entry>Name of validator function, or null if none</entry>
-     </row>
-
-     <row>
-      <entry><structfield>tmpllibrary</structfield></entry>
-      <entry><type>text</type></entry>
-      <entry>Path of shared library that implements language</entry>
-     </row>
-
-     <row>
-      <entry><structfield>tmplacl</structfield></entry>
-      <entry><type>aclitem[]</type></entry>
-      <entry>Access privileges for template (not actually used)</entry>
-     </row>
-
-    </tbody>
-   </tgroup>
-  </table>
-
-  <para>
-   There are not currently any commands that manipulate procedural language
-   templates; to change the built-in information, a superuser must modify
-   the table using ordinary <command>INSERT</command>, <command>DELETE</command>,
-   or <command>UPDATE</command> commands.
-  </para>
-
-  <note>
-   <para>
-    It is likely that <structname>pg_pltemplate</structname> will be removed in some
-    future release of <productname>PostgreSQL</productname>, in favor of
-    keeping this knowledge about procedural languages in their respective
-    extension installation scripts.
-   </para>
-  </note>
-
- </sect1>
-
-
  <sect1 id="catalog-pg-policy">
   <title><structname>pg_policy</structname></title>
 
@@ -6565,6 +6453,22 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
      </row>
 
      <row>
+      <entry><structfield>stxstattarget</structfield></entry>
+      <entry><type>int4</type></entry>
+      <entry></entry>
+      <entry>
+       <structfield>stxstattarget</structfield> controls the level of detail
+       of statistics accumulated for this statistics object by
+       <xref linkend="sql-analyze"/>.
+       A zero value indicates that no statistics should be collected.
+       A negative value says to use the system default statistics target.
+       Positive values <structfield>stxstattarget</structfield>
+       determine the target number of <quote>most common values</quote>
+       to collect.
+      </entry>
+     </row>
+
+     <row>
       <entry><structfield>stxkeys</structfield></entry>
       <entry><type>int2vector</type></entry>
       <entry><literal><link linkend="catalog-pg-attribute"><structname>pg_attribute</structname></link>.attnum</literal></entry>
@@ -7061,6 +6965,17 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
       <entry><type>oid</type></entry>
       <entry><literal><link linkend="catalog-pg-class"><structname>pg_class</structname></link>.oid</literal></entry>
       <entry>The table this trigger is on</entry>
+     </row>
+
+     <row>
+      <entry><structfield>tgparentid</structfield></entry>
+      <entry><type>oid</type></entry>
+      <entry><literal><link linkend="catalog-pg-trigger"><structname>pg_trigger</structname></link>.oid</literal></entry>
+      <entry>
+       Parent trigger that this trigger is cloned from, zero if not a clone;
+       this happens when partitions are created or attached to a partitioned
+       table.
+      </entry>
      </row>
 
      <row>
@@ -7929,28 +7844,38 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
        types (those with <structfield>typlen</structfield> = -1) if
        the type is prepared for toasting and what the default strategy
        for attributes of this type should be.
-       Possible values are
+       Possible values are:
        <itemizedlist>
         <listitem>
-         <para><literal>p</literal>: Value must always be stored plain.</para>
+         <para>
+          <literal>p</literal> (plain): Values must always be stored plain
+          (non-varlena types always use this value).
+         </para>
         </listitem>
         <listitem>
          <para>
-          <literal>e</literal>: Value can be stored in a <quote>secondary</quote>
-          relation (if relation has one, see
+          <literal>e</literal> (external): Values can be stored in a
+          secondary <quote>TOAST</quote> relation (if relation has one, see
           <literal>pg_class.reltoastrelid</literal>).
          </para>
         </listitem>
         <listitem>
-         <para><literal>m</literal>: Value can be stored compressed inline.</para>
+         <para>
+          <literal>m</literal> (main): Values can be compressed and stored
+          inline.
+         </para>
         </listitem>
         <listitem>
-         <para><literal>x</literal>: Value can be stored compressed inline or stored in <quote>secondary</quote> storage.</para>
+         <para>
+          <literal>x</literal> (extended): Values can be compressed and/or
+          moved to a secondary relation.
+         </para>
         </listitem>
        </itemizedlist>
-       Note that <literal>m</literal> columns can also be moved out to secondary
-       storage, but only as a last resort (<literal>e</literal> and <literal>x</literal> columns are
-       moved first).
+       <literal>x</literal> is the usual choice for toast-able types.
+       Note that <literal>m</literal> values can also be moved out to
+       secondary storage, but only as a last resort (<literal>e</literal>
+       and <literal>x</literal> values are moved first).
       </para></entry>
      </row>
 
@@ -8363,6 +8288,11 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
      </row>
 
      <row>
+      <entry><link linkend="view-pg-shmem-allocations"><structname>pg_shmem_allocations</structname></link></entry>
+      <entry>shared memory allocations</entry>
+     </row>
+
+     <row>
       <entry><link linkend="view-pg-stats-ext"><structname>pg_stats_ext</structname></link></entry>
       <entry>extended planner statistics</entry>
      </row>
@@ -8514,7 +8444,15 @@ SCRAM-SHA-256$<replaceable>&lt;iteration count&gt;</replaceable>:<replaceable>&l
      <row>
       <entry><structfield>superuser</structfield></entry>
       <entry><type>bool</type></entry>
-      <entry>True if only superusers are allowed to install this extension</entry>
+      <entry>True if only superusers are allowed to install this extension
+       (but see <structfield>trusted</structfield>)</entry>
+     </row>
+
+     <row>
+      <entry><structfield>trusted</structfield></entry>
+      <entry><type>bool</type></entry>
+      <entry>True if the extension can be installed by non-superusers
+       with appropriate privileges</entry>
      </row>
 
      <row>
@@ -10746,6 +10684,86 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
    </tgroup>
   </table>
 
+ </sect1>
+
+ <sect1 id="view-pg-shmem-allocations">
+  <title><structname>pg_shmem_allocations</structname></title>
+
+  <indexterm zone="view-pg-shmem-allocations">
+   <primary>pg_shmem_allocations</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_shmem_allocations</structname> view shows allocations
+   made from the server's main shared memory segment.  This includes both
+   memory allocated by <productname>postgres</productname> itself and memory
+   allocated by extensions using the mechanisms detailed in
+   <xref linkend="xfunc-shared-addin" />.
+  </para>
+
+  <para>
+   Note that this view does not include memory allocated using the dynamic
+   shared memory infrastructure.
+  </para>
+
+  <table>
+   <title><structname>pg_shmem_allocations</structname> Columns</title>
+
+   <tgroup cols="3">
+    <thead>
+     <row>
+      <entry>Name</entry>
+      <entry>Type</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry><structfield>name</structfield></entry>
+      <entry><type>text</type></entry>
+      <entry>The name of the shared memory allocation. NULL for unused memory
+      and <literal>&lt;anonymous&gt;</literal> for anonymous
+      allocations.</entry>
+     </row>
+
+     <row>
+      <entry><structfield>off</structfield></entry>
+      <entry><type>bigint</type></entry>
+      <entry>The offset at which the allocation starts. NULL for anonymous
+      allocations and unused memory.</entry>
+     </row>
+
+     <row>
+      <entry><structfield>size</structfield></entry>
+      <entry><type>bigint</type></entry>
+      <entry>Size of the allocation</entry>
+     </row>
+
+     <row>
+      <entry><structfield>allocated_size</structfield></entry>
+      <entry><type>bigint</type></entry>
+      <entry>Size of the allocation including padding. For anonymous
+      allocations, no information about padding is available, so the
+      <literal>size</literal> and <literal>allocated_size</literal> columns
+      will always be equal. Padding is not meaningful for free memory, so
+      the columns will be equal in that case also.</entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   Anonymous allocations are allocations that have been made
+   with <literal>ShmemAlloc()</literal> directly, rather than via
+   <literal>ShmemInitStruct()</literal> or
+   <literal>ShmemInitHash()</literal>.
+  </para>
+
+  <para>
+   By default, the <structname>pg_shmem_allocations</structname> view can be
+   read only by superusers.
+  </para>
  </sect1>
 
  <sect1 id="view-pg-stats">

@@ -3,7 +3,7 @@
 #################################################################
 # version_stamp.pl -- update version stamps throughout the source tree
 #
-# Copyright (c) 2008-2019, PostgreSQL Global Development Group
+# Copyright (c) 2008-2020, PostgreSQL Global Development Group
 #
 # src/tools/version_stamp.pl
 #################################################################
@@ -30,32 +30,27 @@ my $majorversion = 13;
 my $minor = shift;
 defined($minor) || die "$0: missing required argument: minor-version\n";
 
-my ($dotneeded, $numericminor);
+my ($dotneeded);
 
 if ($minor =~ m/^\d+$/)
 {
 	$dotneeded    = 1;
-	$numericminor = $minor;
 }
 elsif ($minor eq "devel")
 {
 	$dotneeded    = 0;
-	$numericminor = 0;
 }
 elsif ($minor =~ m/^alpha\d+$/)
 {
 	$dotneeded    = 0;
-	$numericminor = 0;
 }
 elsif ($minor =~ m/^beta\d+$/)
 {
 	$dotneeded    = 0;
-	$numericminor = 0;
 }
 elsif ($minor =~ m/^rc\d+$/)
 {
 	$dotneeded    = 0;
-	$numericminor = 0;
 }
 else
 {
@@ -73,8 +68,6 @@ else
 {
 	$fullversion = $majorversion . $minor;
 }
-my $numericversion = $majorversion . "." . $numericminor;
-my $padnumericversion = sprintf("%d%04d", $majorversion, $numericminor);
 
 # Get the autoconf version number for eventual nag message
 # (this also ensures we're in the right directory)
@@ -100,25 +93,6 @@ my $fixedfiles = "";
 
 sed_file("configure.in",
 	"-e 's/AC_INIT(\\[PostgreSQL\\], \\[[0-9a-z.]*\\]/AC_INIT([PostgreSQL], [$fullversion]/'"
-);
-
-sed_file("src/include/pg_config.h.win32",
-	"-e 's/#define PACKAGE_STRING \"PostgreSQL .*\"/#define PACKAGE_STRING \"PostgreSQL $fullversion\"/' "
-	  . "-e 's/#define PACKAGE_VERSION \".*\"/#define PACKAGE_VERSION \"$fullversion\"/' "
-	  . "-e 's/#define PG_VERSION \".*\"/#define PG_VERSION \"$fullversion\"/' "
-	  . "-e 's/#define PG_VERSION_NUM .*/#define PG_VERSION_NUM $padnumericversion/'"
-);
-
-sed_file("src/interfaces/libpq/libpq.rc.in",
-	"-e 's/FILEVERSION [0-9]*,[0-9]*,[0-9]*,0/FILEVERSION $majorversion,0,$numericminor,0/' "
-	  . "-e 's/PRODUCTVERSION [0-9]*,[0-9]*,[0-9]*,0/PRODUCTVERSION $majorversion,0,$numericminor,0/' "
-	  . "-e 's/VALUE \"FileVersion\", \"[0-9.]*/VALUE \"FileVersion\", \"$numericversion/' "
-	  . "-e 's/VALUE \"ProductVersion\", \"[0-9.]*/VALUE \"ProductVersion\", \"$numericversion/'"
-);
-
-sed_file("src/port/win32ver.rc",
-	"-e 's/FILEVERSION    [0-9]*,[0-9]*,[0-9]*,0/FILEVERSION    $majorversion,0,$numericminor,0/' "
-	  . "-e 's/PRODUCTVERSION [0-9]*,[0-9]*,[0-9]*,0/PRODUCTVERSION $majorversion,0,$numericminor,0/'"
 );
 
 print "Stamped these files with version number $fullversion:\n$fixedfiles";

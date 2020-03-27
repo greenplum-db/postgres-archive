@@ -925,10 +925,15 @@ postgresql:///mydb?host=localhost&amp;port=5433
    </para>
 
    <para>
-    Percent-encoding may be used to include symbols with special meaning in any
-    of the <acronym>URI</acronym> parts, e.g. replace <literal>=</literal> with
-    <literal>%3D</literal>.
-
+    Connection <acronym>URI</acronym> needs to be encoded with 
+    <ulink url="https://tools.ietf.org/html/rfc3986#section-2.1">Percent-encoding</ulink> 
+    if it includes symbols with special meaning in any of its parts. 
+    Here is an example where equal sign (<literal>=</literal>) is replaced
+    with <literal>%3D</literal> and whitespace character with
+    <literal>%20</literal>:
+<programlisting>
+postgresql://user@localhost:5433/mydb?options=-c%20synchronous_commit%3Doff
+</programlisting>
    </para>
 
    <para>
@@ -1608,10 +1613,6 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
         compression by default, and many operating system distributions
         disable it in prior versions as well, so setting this parameter to on
         will not have any effect if the server does not accept compression.
-        On the other hand, <productname>OpenSSL</productname> before 1.0.0
-        does not support disabling compression, so this parameter is ignored
-        with those versions, and whether compression is used depends on the
-        server.
        </para>
 
        <para>
@@ -1731,6 +1732,40 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
       </listitem>
      </varlistentry>
 
+     <varlistentry id="libpq-connect-sslminprotocolversion" xreflabel="sslminprotocolversion">
+      <term><literal>sslminprotocolversion</literal></term>
+      <listitem>
+       <para>
+        This parameter specifies the minimum SSL/TLS protocol version to allow
+        for the connection. Valid values are <literal>TLSv1</literal>,
+        <literal>TLSv1.1</literal>, <literal>TLSv1.2</literal> and
+        <literal>TLSv1.3</literal>. The supported protocols depend on the
+        version of <productname>OpenSSL</productname> used, older versions
+        not supporting the most modern protocol versions. If not set, this
+        parameter is ignored and the connection will use the minimum bound
+        defined by the backend.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="libpq-connect-sslmaxprotocolversion" xreflabel="sslmaxprotocolversion">
+      <term><literal>sslmaxprotocolversion</literal></term>
+      <listitem>
+       <para>
+        This parameter specifies the maximum SSL/TLS protocol version to allow
+        for the connection. Valid values are <literal>TLSv1</literal>,
+        <literal>TLSv1.1</literal>, <literal>TLSv1.2</literal> and
+        <literal>TLSv1.3</literal>. The supported protocols depend on the
+        version of <productname>OpenSSL</productname> used, older versions
+        not supporting the most modern protocol versions. If not set, this
+        parameter is ignored and the connection will use the maximum bound
+        defined by the backend, if set. Setting the maximum protocol version
+        is mainly useful for testing or if some component has issues working
+        with a newer protocol.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="libpq-connect-krbsrvname" xreflabel="krbsrvname">
       <term><literal>krbsrvname</literal></term>
       <listitem>
@@ -1747,8 +1782,10 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
       <term><literal>gsslib</literal></term>
       <listitem>
        <para>
-        GSS library to use for GSSAPI authentication. Only used on Windows.
-        Set to <literal>gssapi</literal> to force libpq to use the GSSAPI
+        GSS library to use for GSSAPI authentication.
+        Currently this is disregarded except on Windows builds that include
+        both GSSAPI and SSPI support.  In that case, set
+        this to <literal>gssapi</literal> to cause libpq to use the GSSAPI
         library for authentication instead of the default SSPI.
        </para>
       </listitem>
@@ -1863,24 +1900,6 @@ char *PQpass(const PGconn *conn);
        not possible to rely on the result of <xref linkend="libpq-PQpass"/> until
        the connection is established.  The status of the connection can be
        checked using the function <xref linkend="libpq-PQstatus"/>.
-      </para>
-     </listitem>
-    </varlistentry>
-
-    <varlistentry id="libpq-PQsslpassword">
-     <term><function>PQsslpassword</function><indexterm><primary>PQsslpassword</primary></indexterm></term>
-
-     <listitem>
-      <para>
-       Returns the password for the SSL client key.
-<synopsis>
-char *PQsslpassword(const PGconn *conn);
-</synopsis>
-      </para>
-
-      <para>
-       <xref linkend="libpq-PQsslpassword"/> will return the SSL password specified
-       in the connection parameters.
       </para>
      </listitem>
     </varlistentry>
@@ -7132,6 +7151,26 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
       </indexterm>
       <envar>PGREQUIREPEER</envar> behaves the same as the <xref
       linkend="libpq-connect-requirepeer"/> connection parameter.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PGSSLMINPROTOCOLVERSION</envar></primary>
+      </indexterm>
+      <envar>PGSSLMINPROTOCOLVERSION</envar> behaves the same as the <xref
+      linkend="libpq-connect-sslminprotocolversion"/> connection parameter.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PGSSLMAXPROTOCOLVERSION</envar></primary>
+      </indexterm>
+      <envar>PGSSLMAXPROTOCOLVERSION</envar> behaves the same as the <xref
+      linkend="libpq-connect-sslminprotocolversion"/> connection parameter.
      </para>
     </listitem>
 

@@ -3,7 +3,7 @@
  * extended_stats_internal.h
  *	  POSTGRES extended statistics internal declarations
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -96,8 +96,8 @@ extern SortItem *build_sorted_items(int numrows, int *nitems, HeapTuple *rows,
 									TupleDesc tdesc, MultiSortSupport mss,
 									int numattrs, AttrNumber *attnums);
 
-extern bool examine_opclause_expression(OpExpr *expr, Var **varp,
-										Const **cstp, bool *varonleftp);
+extern bool examine_clause_args(List *args, Var **varp,
+								Const **cstp, bool *varonleftp);
 
 extern Selectivity mcv_clauselist_selectivity(PlannerInfo *root,
 											  StatisticExtInfo *stat,

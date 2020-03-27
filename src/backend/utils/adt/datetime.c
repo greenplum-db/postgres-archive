@@ -3,7 +3,7 @@
  * datetime.c
  *	  Support functions for date/time types.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -388,9 +388,9 @@ AppendSeconds(char *cp, int sec, fsec_t fsec, int precision, bool fillzeros)
 	Assert(precision >= 0);
 
 	if (fillzeros)
-		cp = pg_ltostr_zeropad(cp, Abs(sec), 2);
+		cp = pg_ultostr_zeropad(cp, Abs(sec), 2);
 	else
-		cp = pg_ltostr(cp, Abs(sec));
+		cp = pg_ultostr(cp, Abs(sec));
 
 	/* fsec_t is just an int32 */
 	if (fsec != 0)
@@ -430,7 +430,7 @@ AppendSeconds(char *cp, int sec, fsec_t fsec, int precision, bool fillzeros)
 		 * which will generate a correct answer in the minimum valid width.
 		 */
 		if (value)
-			return pg_ltostr(cp, Abs(fsec));
+			return pg_ultostr(cp, Abs(fsec));
 
 		return end;
 	}
@@ -3831,20 +3831,20 @@ EncodeTimezone(char *str, int tz, int style)
 
 	if (sec != 0)
 	{
-		str = pg_ltostr_zeropad(str, hour, 2);
+		str = pg_ultostr_zeropad(str, hour, 2);
 		*str++ = ':';
-		str = pg_ltostr_zeropad(str, min, 2);
+		str = pg_ultostr_zeropad(str, min, 2);
 		*str++ = ':';
-		str = pg_ltostr_zeropad(str, sec, 2);
+		str = pg_ultostr_zeropad(str, sec, 2);
 	}
 	else if (min != 0 || style == USE_XSD_DATES)
 	{
-		str = pg_ltostr_zeropad(str, hour, 2);
+		str = pg_ultostr_zeropad(str, hour, 2);
 		*str++ = ':';
-		str = pg_ltostr_zeropad(str, min, 2);
+		str = pg_ultostr_zeropad(str, min, 2);
 	}
 	else
-		str = pg_ltostr_zeropad(str, hour, 2);
+		str = pg_ultostr_zeropad(str, hour, 2);
 	return str;
 }
 
@@ -3861,40 +3861,40 @@ EncodeDateOnly(struct pg_tm *tm, int style, char *str)
 		case USE_ISO_DATES:
 		case USE_XSD_DATES:
 			/* compatible with ISO date formats */
-			str = pg_ltostr_zeropad(str,
+			str = pg_ultostr_zeropad(str,
 									(tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
 			*str++ = '-';
-			str = pg_ltostr_zeropad(str, tm->tm_mon, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
 			*str++ = '-';
-			str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 			break;
 
 		case USE_SQL_DATES:
 			/* compatible with Oracle/Ingres date formats */
 			if (DateOrder == DATEORDER_DMY)
 			{
-				str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 				*str++ = '/';
-				str = pg_ltostr_zeropad(str, tm->tm_mon, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
 			}
 			else
 			{
-				str = pg_ltostr_zeropad(str, tm->tm_mon, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
 				*str++ = '/';
-				str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 			}
 			*str++ = '/';
-			str = pg_ltostr_zeropad(str,
+			str = pg_ultostr_zeropad(str,
 									(tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
 			break;
 
 		case USE_GERMAN_DATES:
 			/* German-style date format */
-			str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 			*str++ = '.';
-			str = pg_ltostr_zeropad(str, tm->tm_mon, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
 			*str++ = '.';
-			str = pg_ltostr_zeropad(str,
+			str = pg_ultostr_zeropad(str,
 									(tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
 			break;
 
@@ -3903,18 +3903,18 @@ EncodeDateOnly(struct pg_tm *tm, int style, char *str)
 			/* traditional date-only style for Postgres */
 			if (DateOrder == DATEORDER_DMY)
 			{
-				str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 				*str++ = '-';
-				str = pg_ltostr_zeropad(str, tm->tm_mon, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
 			}
 			else
 			{
-				str = pg_ltostr_zeropad(str, tm->tm_mon, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
 				*str++ = '-';
-				str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 			}
 			*str++ = '-';
-			str = pg_ltostr_zeropad(str,
+			str = pg_ultostr_zeropad(str,
 									(tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
 			break;
 	}
@@ -3939,9 +3939,9 @@ EncodeDateOnly(struct pg_tm *tm, int style, char *str)
 void
 EncodeTimeOnly(struct pg_tm *tm, fsec_t fsec, bool print_tz, int tz, int style, char *str)
 {
-	str = pg_ltostr_zeropad(str, tm->tm_hour, 2);
+	str = pg_ultostr_zeropad(str, tm->tm_hour, 2);
 	*str++ = ':';
-	str = pg_ltostr_zeropad(str, tm->tm_min, 2);
+	str = pg_ultostr_zeropad(str, tm->tm_min, 2);
 	*str++ = ':';
 	str = AppendSeconds(str, tm->tm_sec, fsec, MAX_TIME_PRECISION, true);
 	if (print_tz)
@@ -3984,16 +3984,16 @@ EncodeDateTime(struct pg_tm *tm, fsec_t fsec, bool print_tz, int tz, const char 
 		case USE_ISO_DATES:
 		case USE_XSD_DATES:
 			/* Compatible with ISO-8601 date formats */
-			str = pg_ltostr_zeropad(str,
+			str = pg_ultostr_zeropad(str,
 									(tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
 			*str++ = '-';
-			str = pg_ltostr_zeropad(str, tm->tm_mon, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
 			*str++ = '-';
-			str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 			*str++ = (style == USE_ISO_DATES) ? ' ' : 'T';
-			str = pg_ltostr_zeropad(str, tm->tm_hour, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_hour, 2);
 			*str++ = ':';
-			str = pg_ltostr_zeropad(str, tm->tm_min, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_min, 2);
 			*str++ = ':';
 			str = AppendTimestampSeconds(str, tm, fsec);
 			if (print_tz)
@@ -4004,23 +4004,23 @@ EncodeDateTime(struct pg_tm *tm, fsec_t fsec, bool print_tz, int tz, const char 
 			/* Compatible with Oracle/Ingres date formats */
 			if (DateOrder == DATEORDER_DMY)
 			{
-				str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 				*str++ = '/';
-				str = pg_ltostr_zeropad(str, tm->tm_mon, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
 			}
 			else
 			{
-				str = pg_ltostr_zeropad(str, tm->tm_mon, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
 				*str++ = '/';
-				str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 			}
 			*str++ = '/';
-			str = pg_ltostr_zeropad(str,
+			str = pg_ultostr_zeropad(str,
 									(tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
 			*str++ = ' ';
-			str = pg_ltostr_zeropad(str, tm->tm_hour, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_hour, 2);
 			*str++ = ':';
-			str = pg_ltostr_zeropad(str, tm->tm_min, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_min, 2);
 			*str++ = ':';
 			str = AppendTimestampSeconds(str, tm, fsec);
 
@@ -4043,16 +4043,16 @@ EncodeDateTime(struct pg_tm *tm, fsec_t fsec, bool print_tz, int tz, const char 
 
 		case USE_GERMAN_DATES:
 			/* German variant on European style */
-			str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 			*str++ = '.';
-			str = pg_ltostr_zeropad(str, tm->tm_mon, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_mon, 2);
 			*str++ = '.';
-			str = pg_ltostr_zeropad(str,
+			str = pg_ultostr_zeropad(str,
 									(tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
 			*str++ = ' ';
-			str = pg_ltostr_zeropad(str, tm->tm_hour, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_hour, 2);
 			*str++ = ':';
-			str = pg_ltostr_zeropad(str, tm->tm_min, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_min, 2);
 			*str++ = ':';
 			str = AppendTimestampSeconds(str, tm, fsec);
 
@@ -4078,7 +4078,7 @@ EncodeDateTime(struct pg_tm *tm, fsec_t fsec, bool print_tz, int tz, const char 
 			*str++ = ' ';
 			if (DateOrder == DATEORDER_DMY)
 			{
-				str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 				*str++ = ' ';
 				memcpy(str, months[tm->tm_mon - 1], 3);
 				str += 3;
@@ -4088,16 +4088,16 @@ EncodeDateTime(struct pg_tm *tm, fsec_t fsec, bool print_tz, int tz, const char 
 				memcpy(str, months[tm->tm_mon - 1], 3);
 				str += 3;
 				*str++ = ' ';
-				str = pg_ltostr_zeropad(str, tm->tm_mday, 2);
+				str = pg_ultostr_zeropad(str, tm->tm_mday, 2);
 			}
 			*str++ = ' ';
-			str = pg_ltostr_zeropad(str, tm->tm_hour, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_hour, 2);
 			*str++ = ':';
-			str = pg_ltostr_zeropad(str, tm->tm_min, 2);
+			str = pg_ultostr_zeropad(str, tm->tm_min, 2);
 			*str++ = ':';
 			str = AppendTimestampSeconds(str, tm, fsec);
 			*str++ = ' ';
-			str = pg_ltostr_zeropad(str,
+			str = pg_ultostr_zeropad(str,
 									(tm->tm_year > 0) ? tm->tm_year : -(tm->tm_year - 1), 4);
 
 			if (print_tz)
@@ -4755,12 +4755,12 @@ pg_timezone_abbrevs(PG_FUNCTION_ARGS)
 Datum
 pg_timezone_names(PG_FUNCTION_ARGS)
 {
-	MemoryContext oldcontext;
-	FuncCallContext *funcctx;
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	bool		randomAccess;
+	TupleDesc	tupdesc;
+	Tuplestorestate *tupstore;
 	pg_tzenum  *tzenum;
 	pg_tz	   *tz;
-	Datum		result;
-	HeapTuple	tuple;
 	Datum		values[4];
 	bool		nulls[4];
 	int			tzoff;
@@ -4769,59 +4769,41 @@ pg_timezone_names(PG_FUNCTION_ARGS)
 	const char *tzn;
 	Interval   *resInterval;
 	struct pg_tm itm;
+	MemoryContext oldcontext;
 
-	/* stuff done only on the first call of the function */
-	if (SRF_IS_FIRSTCALL())
-	{
-		TupleDesc	tupdesc;
+	/* check to see if caller supports us returning a tuplestore */
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in context that cannot accept a set")));
+	if (!(rsinfo->allowedModes & SFRM_Materialize))
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("materialize mode required, but it is not allowed in this context")));
 
-		/* create a function context for cross-call persistence */
-		funcctx = SRF_FIRSTCALL_INIT();
+	/* The tupdesc and tuplestore must be created in ecxt_per_query_memory */
+	oldcontext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 
-		/*
-		 * switch to memory context appropriate for multiple function calls
-		 */
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
 
-		/* initialize timezone scanning code */
-		tzenum = pg_tzenumerate_start();
-		funcctx->user_fctx = (void *) tzenum;
+	randomAccess = (rsinfo->allowedModes & SFRM_Materialize_Random) != 0;
+	tupstore = tuplestore_begin_heap(randomAccess, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = tupdesc;
 
-		/*
-		 * build tupdesc for result tuples. This must match this function's
-		 * pg_proc entry!
-		 */
-		tupdesc = CreateTemplateTupleDesc(4);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "name",
-						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "abbrev",
-						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "utc_offset",
-						   INTERVALOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "is_dst",
-						   BOOLOID, -1, 0);
+	MemoryContextSwitchTo(oldcontext);
 
-		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
-		MemoryContextSwitchTo(oldcontext);
-	}
-
-	/* stuff done on every call of the function */
-	funcctx = SRF_PERCALL_SETUP();
-	tzenum = (pg_tzenum *) funcctx->user_fctx;
+	/* initialize timezone scanning code */
+	tzenum = pg_tzenumerate_start();
 
 	/* search for another zone to display */
 	for (;;)
 	{
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 		tz = pg_tzenumerate_next(tzenum);
-		MemoryContextSwitchTo(oldcontext);
-
 		if (!tz)
-		{
-			pg_tzenumerate_end(tzenum);
-			funcctx->user_fctx = NULL;
-			SRF_RETURN_DONE(funcctx);
-		}
+			break;
 
 		/* Convert now() to local time in this zone */
 		if (timestamp2tm(GetCurrentTransactionStartTimestamp(),
@@ -4840,25 +4822,22 @@ pg_timezone_names(PG_FUNCTION_ARGS)
 		if (tzn && strlen(tzn) > 31)
 			continue;
 
-		/* Found a displayable zone */
-		break;
+		MemSet(nulls, 0, sizeof(nulls));
+
+		values[0] = CStringGetTextDatum(pg_get_timezone_name(tz));
+		values[1] = CStringGetTextDatum(tzn ? tzn : "");
+
+		MemSet(&itm, 0, sizeof(struct pg_tm));
+		itm.tm_sec = -tzoff;
+		resInterval = (Interval *) palloc(sizeof(Interval));
+		tm2interval(&itm, 0, resInterval);
+		values[2] = IntervalPGetDatum(resInterval);
+
+		values[3] = BoolGetDatum(tm.tm_isdst > 0);
+
+		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
 	}
 
-	MemSet(nulls, 0, sizeof(nulls));
-
-	values[0] = CStringGetTextDatum(pg_get_timezone_name(tz));
-	values[1] = CStringGetTextDatum(tzn ? tzn : "");
-
-	MemSet(&itm, 0, sizeof(struct pg_tm));
-	itm.tm_sec = -tzoff;
-	resInterval = (Interval *) palloc(sizeof(Interval));
-	tm2interval(&itm, 0, resInterval);
-	values[2] = IntervalPGetDatum(resInterval);
-
-	values[3] = BoolGetDatum(tm.tm_isdst > 0);
-
-	tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
-	result = HeapTupleGetDatum(tuple);
-
-	SRF_RETURN_NEXT(funcctx, result);
+	pg_tzenumerate_end(tzenum);
+	return (Datum) 0;
 }

@@ -59,7 +59,7 @@
  * counter does not fall within the wraparound horizon considering the global
  * minimum value.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/multixact.c
@@ -3387,10 +3387,6 @@ pg_get_multixact_members(PG_FUNCTION_ARGS)
 		pfree(values[0]);
 		SRF_RETURN_NEXT(funccxt, HeapTupleGetDatum(tuple));
 	}
-
-	if (multi->nmembers > 0)
-		pfree(multi->members);
-	pfree(multi);
 
 	SRF_RETURN_DONE(funccxt);
 }

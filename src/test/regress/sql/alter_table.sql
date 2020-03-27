@@ -1342,17 +1342,19 @@ alter table anothertab alter column f5 type bigint;
 
 drop table anothertab;
 
-create table another (f1 int, f2 text);
+-- test that USING expressions are parsed before column alter type / drop steps
+create table another (f1 int, f2 text, f3 text);
 
-insert into another values(1, 'one');
-insert into another values(2, 'two');
-insert into another values(3, 'three');
+insert into another values(1, 'one', 'uno');
+insert into another values(2, 'two', 'due');
+insert into another values(3, 'three', 'tre');
 
 select * from another;
 
 alter table another
-  alter f1 type text using f2 || ' more',
-  alter f2 type bigint using f1 * 10;
+  alter f1 type text using f2 || ' and ' || f3 || ' more',
+  alter f2 type bigint using f1 * 10,
+  drop column f3;
 
 select * from another;
 
@@ -2170,22 +2172,50 @@ ALTER TABLE ONLY test_add_column
 \d test_add_column
 ALTER TABLE test_add_column
 	ADD COLUMN c2 integer, -- fail because c2 already exists
-	ADD COLUMN c3 integer;
+	ADD COLUMN c3 integer primary key;
 \d test_add_column
 ALTER TABLE test_add_column
 	ADD COLUMN IF NOT EXISTS c2 integer, -- skipping because c2 already exists
-	ADD COLUMN c3 integer; -- fail because c3 already exists
+	ADD COLUMN c3 integer primary key;
 \d test_add_column
 ALTER TABLE test_add_column
 	ADD COLUMN IF NOT EXISTS c2 integer, -- skipping because c2 already exists
-	ADD COLUMN IF NOT EXISTS c3 integer; -- skipping because c3 already exists
+	ADD COLUMN IF NOT EXISTS c3 integer primary key; -- skipping because c3 already exists
 \d test_add_column
 ALTER TABLE test_add_column
 	ADD COLUMN IF NOT EXISTS c2 integer, -- skipping because c2 already exists
 	ADD COLUMN IF NOT EXISTS c3 integer, -- skipping because c3 already exists
-	ADD COLUMN c4 integer;
+	ADD COLUMN c4 integer REFERENCES test_add_column;
 \d test_add_column
+ALTER TABLE test_add_column
+	ADD COLUMN IF NOT EXISTS c4 integer REFERENCES test_add_column;
+\d test_add_column
+ALTER TABLE test_add_column
+	ADD COLUMN IF NOT EXISTS c5 SERIAL CHECK (c5 > 8);
+\d test_add_column
+ALTER TABLE test_add_column
+	ADD COLUMN IF NOT EXISTS c5 SERIAL CHECK (c5 > 10);
+\d test_add_column*
 DROP TABLE test_add_column;
+\d test_add_column*
+
+-- assorted cases with multiple ALTER TABLE steps
+CREATE TABLE ataddindex(f1 INT);
+INSERT INTO ataddindex VALUES (42), (43);
+CREATE UNIQUE INDEX ataddindexi0 ON ataddindex(f1);
+ALTER TABLE ataddindex
+  ADD PRIMARY KEY USING INDEX ataddindexi0,
+  ALTER f1 TYPE BIGINT;
+\d ataddindex
+DROP TABLE ataddindex;
+
+CREATE TABLE ataddindex(f1 VARCHAR(10));
+INSERT INTO ataddindex(f1) VALUES ('foo'), ('a');
+ALTER TABLE ataddindex
+  ALTER f1 SET DATA TYPE TEXT,
+  ADD EXCLUDE ((f1 LIKE 'a') WITH =);
+\d ataddindex
+DROP TABLE ataddindex;
 
 -- unsupported constraint types for partitioned tables
 CREATE TABLE partitioned (
@@ -2771,3 +2801,42 @@ alter table at_test_sql_partop attach partition at_test_sql_partop_1 for values 
 drop table at_test_sql_partop;
 drop operator class at_test_sql_partop using btree;
 drop function at_test_sql_partop;
+
+
+/* Test case for bug #16242 */
+
+-- We create a parent and child where the child has missing
+-- non-null attribute values, and arrange to pass them through
+-- tuple conversion from the child to the parent tupdesc
+create table bar1 (a integer, b integer not null default 1)
+  partition by range (a);
+create table bar2 (a integer);
+insert into bar2 values (1);
+alter table bar2 add column b integer not null default 1;
+-- (at this point bar2 contains tuple with natts=1)
+alter table bar1 attach partition bar2 default;
+
+-- this works:
+select * from bar1;
+
+-- this exercises tuple conversion:
+create function xtrig()
+  returns trigger language plpgsql
+as $$
+  declare
+    r record;
+  begin
+    for r in select * from old loop
+      raise info 'a=%, b=%', r.a, r.b;
+    end loop;
+    return NULL;
+  end;
+$$;
+create trigger xtrig
+  after update on bar1
+  referencing old table as old
+  for each statement execute procedure xtrig();
+
+update bar1 set a = a + 1;
+
+/* End test case for bug #16242 */

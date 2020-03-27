@@ -3,7 +3,7 @@
  * plpgsql.h		- Definitions for the PL/pgSQL
  *			  procedural language
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -231,10 +231,19 @@ typedef struct PLpgSQL_expr
 
 	/* fields for "simple expression" fast-path execution: */
 	Expr	   *expr_simple_expr;	/* NULL means not a simple expr */
-	int			expr_simple_generation; /* plancache generation we checked */
 	Oid			expr_simple_type;	/* result type Oid, if simple */
 	int32		expr_simple_typmod; /* result typmod, if simple */
 	bool		expr_simple_mutable;	/* true if simple expr is mutable */
+
+	/*
+	 * If the expression was ever determined to be simple, we remember its
+	 * CachedPlanSource and CachedPlan here.  If expr_simple_plan_lxid matches
+	 * current LXID, then we hold a refcount on expr_simple_plan in the
+	 * current transaction.  Otherwise we need to get one before re-using it.
+	 */
+	CachedPlanSource *expr_simple_plansource;	/* extracted from "plan" */
+	CachedPlan *expr_simple_plan;	/* extracted from "plan" */
+	LocalTransactionId expr_simple_plan_lxid;
 
 	/*
 	 * if expr is simple AND prepared in current transaction,
@@ -939,7 +948,8 @@ typedef struct PLpgSQL_func_hashkey
 {
 	Oid			funcOid;
 
-	bool		isTrigger;		/* true if called as a trigger */
+	bool		isTrigger;		/* true if called as a DML trigger */
+	bool		isEventTrigger; /* true if called as an event trigger */
 
 	/* be careful that pad bytes in this struct get zeroed! */
 
@@ -947,7 +957,7 @@ typedef struct PLpgSQL_func_hashkey
 	 * For a trigger function, the OID of the trigger is part of the hash key
 	 * --- we want to compile the trigger function separately for each trigger
 	 * it is used with, in case the rowtype or transition table names are
-	 * different.  Zero if not called as a trigger.
+	 * different.  Zero if not called as a DML trigger.
 	 */
 	Oid			trigOid;
 
@@ -1081,8 +1091,9 @@ typedef struct PLpgSQL_execstate
 	 */
 	ParamListInfo paramLI;
 
-	/* EState to use for "simple" expression evaluation */
+	/* EState and resowner to use for "simple" expression evaluation */
 	EState	   *simple_eval_estate;
+	ResourceOwner simple_eval_resowner;
 
 	/* lookup table to use for executing type casts */
 	HTAB	   *cast_hash;
@@ -1267,6 +1278,7 @@ extern void _PG_init(void);
 extern Datum plpgsql_exec_function(PLpgSQL_function *func,
 								   FunctionCallInfo fcinfo,
 								   EState *simple_eval_estate,
+								   ResourceOwner simple_eval_resowner,
 								   bool atomic);
 extern HeapTuple plpgsql_exec_trigger(PLpgSQL_function *func,
 									  TriggerData *trigdata);

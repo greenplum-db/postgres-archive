@@ -3,7 +3,7 @@
  * logicalproto.h
  *		logical replication protocol
  *
- * Copyright (c) 2015-2019, PostgreSQL Global Development Group
+ * Copyright (c) 2015-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		src/include/replication/logicalproto.h
@@ -49,6 +49,7 @@ typedef struct LogicalRepRelation
 	char	  **attnames;		/* column names */
 	Oid		   *atttyps;		/* column types */
 	char		replident;		/* replica identity */
+	char		relkind;		/* remote relation kind */
 	Bitmapset  *attkeys;		/* Bitmap of key columns */
 } LogicalRepRelation;
 

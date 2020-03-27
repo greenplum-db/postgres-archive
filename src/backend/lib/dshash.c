@@ -20,7 +20,7 @@
  * Future versions may support iterators and incremental resizing; for now
  * the implementation is minimalist.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -31,11 +31,11 @@
 
 #include "postgres.h"
 
+#include "common/hashfn.h"
 #include "lib/dshash.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "utils/dsa.h"
-#include "utils/hsearch.h"
 #include "utils/memutils.h"
 
 /*

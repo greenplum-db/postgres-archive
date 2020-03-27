@@ -137,6 +137,7 @@ AttoptCacheEntry
 AttoptCacheKey
 AttrDefInfo
 AttrDefault
+AttrMap
 AttrMissing
 AttrNumber
 AttributeOpts
@@ -536,6 +537,7 @@ DropSubscriptionStmt
 DropTableSpaceStmt
 DropUserMappingStmt
 DropdbStmt
+DummyAmEnum
 DummyIndexOptions
 DumpComponents
 DumpId
@@ -908,6 +910,7 @@ GistBulkDeleteResult
 GistEntryVector
 GistInetKey
 GistNSN
+GistOptBufferingMode
 GistSplitUnion
 GistSplitVector
 GistVacState
@@ -1215,7 +1218,11 @@ LPVOID
 LPWSTR
 LSEG
 LUID
+LVDeadTuples
+LVParallelState
 LVRelStats
+LVShared
+LVSharedIndStats
 LWLock
 LWLockHandle
 LWLockMinimallyPadded
@@ -2354,8 +2361,6 @@ TBlockState
 TIDBitmap
 TM_FailureData
 TM_Result
-ToastAttrInfo
-ToastTupleContext
 TOKEN_DEFAULT_DACL
 TOKEN_INFORMATION_CLASS
 TOKEN_PRIVILEGES
@@ -2451,6 +2456,8 @@ Timestamp
 TimestampTz
 TmFromChar
 TmToChar
+ToastAttrInfo
+ToastTupleContext
 TocEntry
 TokenAuxData
 TokenizedLine
@@ -2585,6 +2592,7 @@ VariableSubstituteHook
 VersionedQuery
 Vfd
 ViewCheckOption
+ViewOptCheckOption
 ViewOptions
 ViewStmt
 VirtualTransactionId
@@ -3177,6 +3185,8 @@ regmatch_t
 regoff_t
 regproc
 relopt_bool
+relopt_enum
+relopt_enum_elt_def
 relopt_gen
 relopt_int
 relopt_kind

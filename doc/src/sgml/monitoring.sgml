@@ -345,6 +345,14 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      </row>
 
      <row>
+      <entry><structname>pg_stat_progress_analyze</structname><indexterm><primary>pg_stat_progress_analyze</primary></indexterm></entry>
+      <entry>One row for each backend (including autovacuum worker processes) running
+       <command>ANALYZE</command>, showing current progress.
+       See <xref linkend='analyze-progress-reporting'/>.
+      </entry>
+     </row>
+
+     <row>
       <entry><structname>pg_stat_progress_create_index</structname><indexterm><primary>pg_stat_progress_create_index</primary></indexterm></entry>
       <entry>One row for each backend running <command>CREATE INDEX</command> or <command>REINDEX</command>, showing
       current progress.
@@ -365,6 +373,14 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       <entry>One row for each backend running
        <command>CLUSTER</command> or <command>VACUUM FULL</command>, showing current progress.
        See <xref linkend='cluster-progress-reporting'/>.
+      </entry>
+     </row>
+
+     <row>
+      <entry><structname>pg_stat_progress_basebackup</structname><indexterm><primary>pg_stat_progress_basebackup</primary></indexterm></entry>
+      <entry>One row for each WAL sender process streaming a base backup,
+       showing current progress.
+       See <xref linkend='basebackup-progress-reporting'/>.
       </entry>
      </row>
 
@@ -613,6 +629,18 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      <entry><structfield>pid</structfield></entry>
      <entry><type>integer</type></entry>
      <entry>Process ID of this backend</entry>
+    </row>
+    <row>
+     <entry><structfield>leader_pid</structfield></entry>
+     <entry><type>integer</type></entry>
+     <entry>
+      Process ID of the parallel group leader if this process is or
+      has been involved in parallel query, or null. This field is set
+      when a process wants to cooperate with parallel workers, and
+      remains set as long as the process exists. For a parallel group leader,
+      this field is set to its own process ID. For a parallel worker,
+      this field is set to the process ID of the parallel group leader.
+     </entry>
     </row>
     <row>
      <entry><structfield>usesysid</structfield></entry>
@@ -1216,7 +1244,7 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
          <entry>Waiting to acquire a pin on a buffer.</entry>
         </row>
         <row>
-         <entry morerows="13"><literal>Activity</literal></entry>
+         <entry morerows="12"><literal>Activity</literal></entry>
          <entry><literal>ArchiverMain</literal></entry>
          <entry>Waiting in main loop of the archiver process.</entry>
         </row>
@@ -1249,10 +1277,6 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
          <entry>Waiting in main loop of the statistics collector process.</entry>
         </row>
         <row>
-         <entry><literal>RecoveryWalAll</literal></entry>
-         <entry>Waiting for WAL from any kind of source (local, archive or stream) at recovery.</entry>
-        </row>
-        <row>
          <entry><literal>RecoveryWalStream</literal></entry>
          <entry>Waiting for WAL from a stream at recovery.</entry>
         </row>
@@ -1273,13 +1297,17 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
          <entry>Waiting in main loop of WAL writer process.</entry>
         </row>
         <row>
-         <entry morerows="7"><literal>Client</literal></entry>
+         <entry morerows="8"><literal>Client</literal></entry>
          <entry><literal>ClientRead</literal></entry>
          <entry>Waiting to read data from the client.</entry>
         </row>
         <row>
          <entry><literal>ClientWrite</literal></entry>
          <entry>Waiting to write data to the client.</entry>
+        </row>
+        <row>
+         <entry><literal>GSSOpenServer</literal></entry>
+         <entry>Waiting to read data from the client while establishing the GSSAPI session.</entry>
         </row>
         <row>
          <entry><literal>LibPQWalReceiverConnect</literal></entry>
@@ -1311,7 +1339,11 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
          <entry>Waiting in an extension.</entry>
         </row>
         <row>
-         <entry morerows="36"><literal>IPC</literal></entry>
+         <entry morerows="38"><literal>IPC</literal></entry>
+         <entry><literal>BackupWaitWalArchive</literal></entry>
+         <entry>Waiting for WAL files required for the backup to be successfully archived.</entry>
+        </row>
+        <row>
          <entry><literal>BgWorkerShutdown</literal></entry>
          <entry>Waiting for background worker to shut down.</entry>
         </row>
@@ -1444,6 +1476,10 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
          <entry>Waiting for standby promotion.</entry>
         </row>
         <row>
+         <entry><literal>RecoveryPause</literal></entry>
+         <entry>Waiting for recovery to be resumed.</entry>
+        </row>
+        <row>
          <entry><literal>ReplicationOriginDrop</literal></entry>
          <entry>Waiting for a replication origin to become inactive to be dropped.</entry>
         </row>
@@ -1460,7 +1496,7 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
          <entry>Waiting for confirmation from remote server during synchronous replication.</entry>
         </row>
         <row>
-         <entry morerows="2"><literal>Timeout</literal></entry>
+         <entry morerows="4"><literal>Timeout</literal></entry>
          <entry><literal>BaseBackupThrottle</literal></entry>
          <entry>Waiting during base backup when throttling activity.</entry>
         </row>
@@ -1473,7 +1509,19 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
          <entry>Waiting to apply WAL at recovery because it is delayed.</entry>
         </row>
         <row>
-         <entry morerows="66"><literal>IO</literal></entry>
+         <entry><literal>RecoveryRetrieveRetryInterval</literal></entry>
+         <entry>
+          Waiting when WAL data is not available from any kind of sources
+          (<filename>pg_wal</filename>, archive or stream) before trying
+          again to retrieve WAL data, at recovery.
+         </entry>
+        </row>
+        <row>
+         <entry><literal>VacuumDelay</literal></entry>
+         <entry>Waiting in a cost-based vacuum delay point.</entry>
+        </row>
+        <row>
+         <entry morerows="68"><literal>IO</literal></entry>
          <entry><literal>BufFileRead</literal></entry>
          <entry>Waiting for a read from a buffered file.</entry>
         </row>
@@ -1590,8 +1638,16 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
          <entry>Waiting for logical rewrite mappings to reach stable storage.</entry>
         </row>
         <row>
+         <entry><literal>LogicalRewriteTruncate</literal></entry>
+         <entry>Waiting for truncate of mapping data during a logical rewrite.</entry>
+        </row>
+        <row>
          <entry><literal>LogicalRewriteWrite</literal></entry>
          <entry>Waiting for a write of logical rewrite mappings.</entry>
+        </row>
+        <row>
+         <entry><literal>ProcSignalBarrier</literal></entry>
+         <entry>Waiting for a barrier event to be processed by all backends.</entry>
         </row>
         <row>
          <entry><literal>RelationMapRead</literal></entry>
@@ -3501,10 +3557,189 @@ SELECT pg_stat_get_backend_pid(s.backendid) AS pid,
   <para>
    <productname>PostgreSQL</productname> has the ability to report the progress of
    certain commands during command execution.  Currently, the only commands
-   which support progress reporting are <command>CREATE INDEX</command>,
-   <command>VACUUM</command> and
-   <command>CLUSTER</command>. This may be expanded in the future.
+   which support progress reporting are <command>ANALYZE</command>,
+   <command>CLUSTER</command>,
+   <command>CREATE INDEX</command>, <command>VACUUM</command>,
+   and <xref linkend="protocol-replication-base-backup"/> (i.e., replication
+   command that <xref linkend="app-pgbasebackup"/> issues to take
+   a base backup).
+   This may be expanded in the future.
   </para>
+
+ <sect2 id="analyze-progress-reporting">
+  <title>ANALYZE Progress Reporting</title>
+
+  <para>
+   Whenever <command>ANALYZE</command> is running, the
+   <structname>pg_stat_progress_analyze</structname> view will contain a
+   row for each backend that is currently running that command.  The tables
+   below describe the information that will be reported and provide
+   information about how to interpret it.
+  </para>
+
+  <table id="pg-stat-progress-analyze-view" xreflabel="pg_stat_progress_analyze">
+   <title><structname>pg_stat_progress_analyze</structname> View</title>
+   <tgroup cols="3">
+    <thead>
+    <row>
+      <entry>Column</entry>
+      <entry>Type</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+   <tbody>
+    <row>
+     <entry><structfield>pid</structfield></entry>
+     <entry><type>integer</type></entry>
+     <entry>Process ID of backend.</entry>
+    </row>
+    <row>
+     <entry><structfield>datid</structfield></entry>
+     <entry><type>oid</type></entry>
+     <entry>OID of the database to which this backend is connected.</entry>
+    </row>
+    <row>
+     <entry><structfield>datname</structfield></entry>
+     <entry><type>name</type></entry>
+     <entry>Name of the database to which this backend is connected.</entry>
+    </row>
+    <row>
+     <entry><structfield>relid</structfield></entry>
+     <entry><type>oid</type></entry>
+     <entry>OID of the table being analyzed.</entry>
+    </row>
+    <row>
+     <entry><structfield>phase</structfield></entry>
+     <entry><type>text</type></entry>
+     <entry>Current processing phase. See <xref linkend="analyze-phases" />.</entry>
+    </row>
+    <row>
+     <entry><structfield>sample_blks_total</structfield></entry>
+     <entry><type>bigint</type></entry>
+     <entry>
+      Total number of heap blocks that will be sampled.
+     </entry>
+    </row>
+    <row>
+     <entry><structfield>sample_blks_scanned</structfield></entry>
+     <entry><type>bigint</type></entry>
+     <entry>
+      Number of heap blocks scanned.
+     </entry>
+    </row>
+    <row>
+     <entry><structfield>ext_stats_total</structfield></entry>
+     <entry><type>bigint</type></entry>
+     <entry>
+      Number of extended statistics.
+     </entry>
+    </row>
+    <row>
+     <entry><structfield>ext_stats_computed</structfield></entry>
+     <entry><type>bigint</type></entry>
+     <entry>
+      Number of extended statistics computed. This counter only advances
+      when the phase is <literal>computing extended statistics</literal>.
+     </entry>
+    </row>
+    <row>
+     <entry><structfield>child_tables_total</structfield></entry>
+     <entry><type>bigint</type></entry>
+     <entry>
+      Number of child tables.
+     </entry>
+    </row>
+    <row>
+     <entry><structfield>child_tables_done</structfield></entry>
+     <entry><type>bigint</type></entry>
+     <entry>
+      Number of child tables scanned. This counter only advances when the
+      phase is <literal>acquiring inherited sample rows</literal>.
+     </entry>
+    </row>
+    <row>
+     <entry><structfield>current_child_table_relid</structfield></entry>
+     <entry><type>oid</type></entry>
+     <entry>
+      OID of the child table currently being scanned. This field is
+      only valid when the phase is
+      <literal>acquiring inherited sample rows</literal>.
+     </entry>
+    </row>
+   </tbody>
+   </tgroup>
+  </table>
+
+  <table id="analyze-phases">
+   <title>ANALYZE phases</title>
+   <tgroup cols="2">
+    <thead>
+     <row>
+      <entry>Phase</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry><literal>initializing</literal></entry>
+      <entry>
+       The command is preparing to begin scanning the heap.  This phase is
+       expected to be very brief.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>acquiring sample rows</literal></entry>
+      <entry>
+       The command is currently scanning the table given by
+       <structfield>relid</structfield> to obtain sample rows.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>acquiring inherited sample rows</literal></entry>
+      <entry>
+       The command is currently scanning child tables to obtain sample rows.
+       Columns <structfield>child_tables_total</structfield>,
+       <structfield>child_tables_done</structfield>, and
+       <structfield>current_child_table_relid</structfield> contain the
+       progress information for this phase.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>computing statistics</literal></entry>
+      <entry>
+       The command is computing statistics from the sample rows obtained
+       during the table scan.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>computing extended statistics</literal></entry>
+      <entry>
+       The command is computing extended statistics from the sample rows
+       obtained during the table scan.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>finalizing analyze</literal></entry>
+      <entry>
+       The command is updating pg_class. When this phase is completed, 
+       <command>ANALYZE</command> will end.
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <note>
+   <para>
+    Note that when <command>ANALYZE</command> is run on a partitioned table,
+    all of its partitions are also recursively analyzed as also mentioned in
+    <xref linkend="sql-analyze"/>.  In that case, <command>ANALYZE</command>
+    progress is reported first for the parent table, whereby its inheritance
+    statistics are collected, followed by that for each partition.
+   </para>
+  </note>
+ </sect2>
 
  <sect2 id="create-index-progress-reporting">
   <title>CREATE INDEX Progress Reporting</title>
@@ -4126,6 +4361,156 @@ SELECT pg_stat_get_backend_pid(s.backendid) AS pid,
      </entry>
     </row>
    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
+ <sect2 id="basebackup-progress-reporting">
+  <title>Base Backup Progress Reporting</title>
+
+  <para>
+   Whenever an application like <application>pg_basebackup</application>
+   is taking a base backup, the
+   <structname>pg_stat_progress_basebackup</structname>
+   view will contain a row for each WAL sender process that is currently
+   running <command>BASE_BACKUP</command> replication command
+   and streaming the backup. The tables below describe the information
+   that will be reported and provide information about how to interpret it.
+  </para>
+
+  <table id="pg-stat-progress-basebackup-view" xreflabel="pg_stat_progress_basebackup">
+   <title><structname>pg_stat_progress_basebackup</structname> View</title>
+   <tgroup cols="3">
+    <thead>
+    <row>
+      <entry>Column</entry>
+      <entry>Type</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+
+   <tbody>
+    <row>
+     <entry><structfield>pid</structfield></entry>
+     <entry><type>integer</type></entry>
+     <entry>Process ID of a WAL sender process.</entry>
+    </row>
+    <row>
+     <entry><structfield>phase</structfield></entry>
+     <entry><type>text</type></entry>
+     <entry>Current processing phase. See <xref linkend="basebackup-phases" />.</entry>
+    </row>
+    <row>
+     <entry><structfield>backup_total</structfield></entry>
+     <entry><type>bigint</type></entry>
+     <entry>
+      Total amount of data that will be streamed. This is estimated and
+      reported as of the beginning of
+      <literal>streaming database files</literal> phase. Note that
+      this is only an approximation since the database
+      may change during <literal>streaming database files</literal> phase
+      and WAL log may be included in the backup later. This is always
+      the same value as <structfield>backup_streamed</structfield>
+      once the amount of data streamed exceeds the estimated
+      total size. If the estimation is disabled in
+      <application>pg_basebackup</application>
+      (i.e., <literal>--no-estimate-size</literal> option is specified),
+      this is <literal>NULL</literal>.
+     </entry>
+    </row>
+    <row>
+     <entry><structfield>backup_streamed</structfield></entry>
+     <entry><type>bigint</type></entry>
+     <entry>
+      Amount of data streamed. This counter only advances
+      when the phase is <literal>streaming database files</literal> or
+      <literal>transferring wal files</literal>.
+     </entry>
+    </row>
+    <row>
+     <entry><structfield>tablespaces_total</structfield></entry>
+     <entry><type>bigint</type></entry>
+     <entry>
+      Total number of tablespaces that will be streamed.
+     </entry>
+    </row>
+    <row>
+     <entry><structfield>tablespaces_streamed</structfield></entry>
+     <entry><type>bigint</type></entry>
+     <entry>
+      Number of tablespaces streamed. This counter only
+      advances when the phase is <literal>streaming database files</literal>.
+     </entry>
+    </row>
+   </tbody>
+   </tgroup>
+  </table>
+
+  <table id="basebackup-phases">
+   <title>Base backup phases</title>
+   <tgroup cols="2">
+    <thead>
+     <row>
+      <entry>Phase</entry>
+      <entry>Description</entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry><literal>initializing</literal></entry>
+      <entry>
+       The WAL sender process is preparing to begin the backup.
+       This phase is expected to be very brief.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>waiting for checkpoint to finish</literal></entry>
+      <entry>
+       The WAL sender process is currently performing
+       <function>pg_start_backup</function> to set up for
+       taking a base backup, and waiting for backup start
+       checkpoint to finish.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>estimating backup size</literal></entry>
+      <entry>
+       The WAL sender process is currently estimating the total amount
+       of database files that will be streamed as a base backup.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>streaming database files</literal></entry>
+      <entry>
+       The WAL sender process is currently streaming database files
+       as a base backup.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>waiting for wal archiving to finish</literal></entry>
+      <entry>
+       The WAL sender process is currently performing
+       <function>pg_stop_backup</function> to finish the backup,
+       and waiting for all the WAL files required for the base backup
+       to be successfully archived.
+       If either <literal>--wal-method=none</literal> or
+       <literal>--wal-method=stream</literal> is specified in
+       <application>pg_basebackup</application>, the backup will end
+       when this phase is completed.
+      </entry>
+     </row>
+     <row>
+      <entry><literal>transferring wal files</literal></entry>
+      <entry>
+       The WAL sender process is currently transferring all WAL logs
+       generated during the backup. This phase occurs after
+       <literal>waiting for wal archiving to finish</literal> phase if
+       <literal>--wal-method=fetch</literal> is specified in
+       <application>pg_basebackup</application>. The backup will end
+       when this phase is completed.
+      </entry>
+     </row>
+    </tbody>
    </tgroup>
   </table>
 

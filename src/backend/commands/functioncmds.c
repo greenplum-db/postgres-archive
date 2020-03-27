@@ -5,7 +5,7 @@
  *	  Routines for CREATE and DROP FUNCTION commands and CREATE and DROP
  *	  CAST commands.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -49,6 +49,7 @@
 #include "catalog/pg_type.h"
 #include "commands/alter.h"
 #include "commands/defrem.h"
+#include "commands/extension.h"
 #include "commands/proclang.h"
 #include "executor/execdesc.h"
 #include "executor/executor.h"
@@ -285,8 +286,8 @@ interpret_function_parameter_list(ParseState *pstate,
 			if (fp->mode == FUNC_PARAM_OUT)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 (errmsg("procedures cannot have OUT arguments"),
-						  errhint("INOUT arguments are permitted."))));
+						 errmsg("procedures cannot have OUT arguments"),
+						 errhint("INOUT arguments are permitted.")));
 		}
 
 		/* handle input parameters */
@@ -319,6 +320,7 @@ interpret_function_parameter_list(ParseState *pstate,
 			switch (toid)
 			{
 				case ANYARRAYOID:
+				case ANYCOMPATIBLEARRAYOID:
 				case ANYOID:
 					/* okay */
 					break;
@@ -432,9 +434,9 @@ interpret_function_parameter_list(ParseState *pstate,
 	if (outCount > 0 || varCount > 0)
 	{
 		*allParameterTypes = construct_array(allTypes, parameterCount, OIDOID,
-											 sizeof(Oid), true, 'i');
+											 sizeof(Oid), true, TYPALIGN_INT);
 		*parameterModes = construct_array(paramModes, parameterCount, CHAROID,
-										  1, true, 'c');
+										  1, true, TYPALIGN_CHAR);
 		if (outCount > 1)
 			*requiredResultType = RECORDOID;
 		/* otherwise we set requiredResultType correctly above */
@@ -453,7 +455,7 @@ interpret_function_parameter_list(ParseState *pstate,
 				paramNames[i] = CStringGetTextDatum("");
 		}
 		*parameterNames = construct_array(paramNames, parameterCount, TEXTOID,
-										  -1, false, 'i');
+										  -1, false, TYPALIGN_INT);
 	}
 	else
 		*parameterNames = NULL;
@@ -991,7 +993,7 @@ CreateFunction(ParseState *pstate, CreateFunctionStmt *stmt)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("language \"%s\" does not exist", language),
-				 (PLTemplateExists(language) ?
+				 (extension_file_exists(language) ?
 				  errhint("Use CREATE EXTENSION to load the language into the database.") : 0)));
 
 	languageStruct = (Form_pg_language) GETSTRUCT(languageTuple);
@@ -1106,7 +1108,7 @@ CreateFunction(ParseState *pstate, CreateFunctionStmt *stmt)
 		foreach(lc, trftypes_list)
 			arr[i++] = ObjectIdGetDatum(lfirst_oid(lc));
 		trftypes = construct_array(arr, list_length(trftypes_list),
-								   OIDOID, sizeof(Oid), true, 'i');
+								   OIDOID, sizeof(Oid), true, TYPALIGN_INT);
 	}
 	else
 	{
@@ -1398,93 +1400,6 @@ AlterFunction(ParseState *pstate, AlterFunctionStmt *stmt)
 	return address;
 }
 
-/*
- * SetFunctionReturnType - change declared return type of a function
- *
- * This is presently only used for adjusting legacy functions that return
- * OPAQUE to return whatever we find their correct definition should be.
- * The caller should emit a suitable warning explaining what we did.
- */
-void
-SetFunctionReturnType(Oid funcOid, Oid newRetType)
-{
-	Relation	pg_proc_rel;
-	HeapTuple	tup;
-	Form_pg_proc procForm;
-	ObjectAddress func_address;
-	ObjectAddress type_address;
-
-	pg_proc_rel = table_open(ProcedureRelationId, RowExclusiveLock);
-
-	tup = SearchSysCacheCopy1(PROCOID, ObjectIdGetDatum(funcOid));
-	if (!HeapTupleIsValid(tup)) /* should not happen */
-		elog(ERROR, "cache lookup failed for function %u", funcOid);
-	procForm = (Form_pg_proc) GETSTRUCT(tup);
-
-	if (procForm->prorettype != OPAQUEOID)	/* caller messed up */
-		elog(ERROR, "function %u doesn't return OPAQUE", funcOid);
-
-	/* okay to overwrite copied tuple */
-	procForm->prorettype = newRetType;
-
-	/* update the catalog and its indexes */
-	CatalogTupleUpdate(pg_proc_rel, &tup->t_self, tup);
-
-	table_close(pg_proc_rel, RowExclusiveLock);
-
-	/*
-	 * Also update the dependency to the new type. Opaque is a pinned type, so
-	 * there is no old dependency record for it that we would need to remove.
-	 */
-	ObjectAddressSet(type_address, TypeRelationId, newRetType);
-	ObjectAddressSet(func_address, ProcedureRelationId, funcOid);
-	recordDependencyOn(&func_address, &type_address, DEPENDENCY_NORMAL);
-}
-
-
-/*
- * SetFunctionArgType - change declared argument type of a function
- *
- * As above, but change an argument's type.
- */
-void
-SetFunctionArgType(Oid funcOid, int argIndex, Oid newArgType)
-{
-	Relation	pg_proc_rel;
-	HeapTuple	tup;
-	Form_pg_proc procForm;
-	ObjectAddress func_address;
-	ObjectAddress type_address;
-
-	pg_proc_rel = table_open(ProcedureRelationId, RowExclusiveLock);
-
-	tup = SearchSysCacheCopy1(PROCOID, ObjectIdGetDatum(funcOid));
-	if (!HeapTupleIsValid(tup)) /* should not happen */
-		elog(ERROR, "cache lookup failed for function %u", funcOid);
-	procForm = (Form_pg_proc) GETSTRUCT(tup);
-
-	if (argIndex < 0 || argIndex >= procForm->pronargs ||
-		procForm->proargtypes.values[argIndex] != OPAQUEOID)
-		elog(ERROR, "function %u doesn't take OPAQUE", funcOid);
-
-	/* okay to overwrite copied tuple */
-	procForm->proargtypes.values[argIndex] = newArgType;
-
-	/* update the catalog and its indexes */
-	CatalogTupleUpdate(pg_proc_rel, &tup->t_self, tup);
-
-	table_close(pg_proc_rel, RowExclusiveLock);
-
-	/*
-	 * Also update the dependency to the new type. Opaque is a pinned type, so
-	 * there is no old dependency record for it that we would need to remove.
-	 */
-	ObjectAddressSet(type_address, TypeRelationId, newArgType);
-	ObjectAddressSet(func_address, ProcedureRelationId, funcOid);
-	recordDependencyOn(&func_address, &type_address, DEPENDENCY_NORMAL);
-}
-
-
 
 /*
  * CREATE CAST
@@ -1497,17 +1412,12 @@ CreateCast(CreateCastStmt *stmt)
 	char		sourcetyptype;
 	char		targettyptype;
 	Oid			funcid;
-	Oid			castid;
 	int			nargs;
 	char		castcontext;
 	char		castmethod;
-	Relation	relation;
 	HeapTuple	tuple;
-	Datum		values[Natts_pg_cast];
-	bool		nulls[Natts_pg_cast];
-	ObjectAddress myself,
-				referenced;
 	AclResult	aclresult;
+	ObjectAddress	myself;
 
 	sourcetypeid = typenameTypeId(NULL, stmt->sourcetype);
 	targettypeid = typenameTypeId(NULL, stmt->targettype);
@@ -1731,98 +1641,9 @@ CreateCast(CreateCastStmt *stmt)
 			break;
 	}
 
-	relation = table_open(CastRelationId, RowExclusiveLock);
-
-	/*
-	 * Check for duplicate.  This is just to give a friendly error message,
-	 * the unique index would catch it anyway (so no need to sweat about race
-	 * conditions).
-	 */
-	tuple = SearchSysCache2(CASTSOURCETARGET,
-							ObjectIdGetDatum(sourcetypeid),
-							ObjectIdGetDatum(targettypeid));
-	if (HeapTupleIsValid(tuple))
-		ereport(ERROR,
-				(errcode(ERRCODE_DUPLICATE_OBJECT),
-				 errmsg("cast from type %s to type %s already exists",
-						format_type_be(sourcetypeid),
-						format_type_be(targettypeid))));
-
-	/* ready to go */
-	castid = GetNewOidWithIndex(relation, CastOidIndexId, Anum_pg_cast_oid);
-	values[Anum_pg_cast_oid - 1] = ObjectIdGetDatum(castid);
-	values[Anum_pg_cast_castsource - 1] = ObjectIdGetDatum(sourcetypeid);
-	values[Anum_pg_cast_casttarget - 1] = ObjectIdGetDatum(targettypeid);
-	values[Anum_pg_cast_castfunc - 1] = ObjectIdGetDatum(funcid);
-	values[Anum_pg_cast_castcontext - 1] = CharGetDatum(castcontext);
-	values[Anum_pg_cast_castmethod - 1] = CharGetDatum(castmethod);
-
-	MemSet(nulls, false, sizeof(nulls));
-
-	tuple = heap_form_tuple(RelationGetDescr(relation), values, nulls);
-
-	CatalogTupleInsert(relation, tuple);
-
-	/* make dependency entries */
-	myself.classId = CastRelationId;
-	myself.objectId = castid;
-	myself.objectSubId = 0;
-
-	/* dependency on source type */
-	referenced.classId = TypeRelationId;
-	referenced.objectId = sourcetypeid;
-	referenced.objectSubId = 0;
-	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-
-	/* dependency on target type */
-	referenced.classId = TypeRelationId;
-	referenced.objectId = targettypeid;
-	referenced.objectSubId = 0;
-	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-
-	/* dependency on function */
-	if (OidIsValid(funcid))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = funcid;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	/* dependency on extension */
-	recordDependencyOnCurrentExtension(&myself, false);
-
-	/* Post creation hook for new cast */
-	InvokeObjectPostCreateHook(CastRelationId, castid, 0);
-
-	heap_freetuple(tuple);
-
-	table_close(relation, RowExclusiveLock);
-
+	myself = CastCreate(sourcetypeid, targettypeid, funcid, castcontext,
+						castmethod, DEPENDENCY_NORMAL);
 	return myself;
-}
-
-/*
- * get_cast_oid - given two type OIDs, look up a cast OID
- *
- * If missing_ok is false, throw an error if the cast is not found.  If
- * true, just return InvalidOid.
- */
-Oid
-get_cast_oid(Oid sourcetypeid, Oid targettypeid, bool missing_ok)
-{
-	Oid			oid;
-
-	oid = GetSysCacheOid2(CASTSOURCETARGET, Anum_pg_cast_oid,
-						  ObjectIdGetDatum(sourcetypeid),
-						  ObjectIdGetDatum(targettypeid));
-	if (!OidIsValid(oid) && !missing_ok)
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("cast from type %s to type %s does not exist",
-						format_type_be(sourcetypeid),
-						format_type_be(targettypeid))));
-	return oid;
 }
 
 void
@@ -2225,7 +2046,7 @@ ExecuteDoStmt(DoStmt *stmt, bool atomic)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("language \"%s\" does not exist", language),
-				 (PLTemplateExists(language) ?
+				 (extension_file_exists(language) ?
 				  errhint("Use CREATE EXTENSION to load the language into the database.") : 0)));
 
 	languageStruct = (Form_pg_language) GETSTRUCT(languageTuple);

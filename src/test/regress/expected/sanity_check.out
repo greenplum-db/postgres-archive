@@ -91,6 +91,7 @@ num_exp_sqrt|t
 num_exp_sub|t
 num_input_test|f
 num_result|f
+numrange_test|t
 onek|t
 onek2|t
 path_tbl|f
@@ -133,7 +134,6 @@ pg_opclass|t
 pg_operator|t
 pg_opfamily|t
 pg_partitioned_table|t
-pg_pltemplate|t
 pg_policy|t
 pg_proc|t
 pg_publication|t
@@ -201,11 +201,15 @@ test_range_spgist|t
 test_tsvector|f
 testjsonb|f
 text_tbl|f
+textrange_test|t
 time_tbl|f
 timestamp_tbl|f
 timestamptz_tbl|f
 timetz_tbl|f
 tmp|f
+trigger_parted|t
+trigger_parted_p1|t
+trigger_parted_p1_1|t
 varchar_tbl|f
 view_base_table|t
 -- restore normal output mode

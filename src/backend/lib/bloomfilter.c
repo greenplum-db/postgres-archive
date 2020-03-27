@@ -24,7 +24,7 @@
  * caller many authoritative lookups, such as expensive probes of a much larger
  * on-disk structure.
  *
- * Copyright (c) 2018-2019, PostgreSQL Global Development Group
+ * Copyright (c) 2018-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/lib/bloomfilter.c
@@ -35,9 +35,9 @@
 
 #include <math.h>
 
+#include "common/hashfn.h"
 #include "lib/bloomfilter.h"
 #include "port/pg_bitutils.h"
-#include "utils/hashutils.h"
 
 #define MAX_HASH_FUNCS		10
 

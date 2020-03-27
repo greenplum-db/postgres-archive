@@ -3,7 +3,7 @@
  * pg_depend.c
  *	  routines to support manipulation of the pg_depend relation
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -639,6 +639,49 @@ getExtensionOfObject(Oid classId, Oid objectId)
 			result = depform->refobjid;
 			break;				/* no need to keep scanning */
 		}
+	}
+
+	systable_endscan(scan);
+
+	table_close(depRel, AccessShareLock);
+
+	return result;
+}
+
+/*
+ * Return (possibly NIL) list of extensions that the given object depends on
+ * in DEPENDENCY_AUTO_EXTENSION mode.
+ */
+List *
+getAutoExtensionsOfObject(Oid classId, Oid objectId)
+{
+	List	   *result = NIL;
+	Relation	depRel;
+	ScanKeyData	key[2];
+	SysScanDesc	scan;
+	HeapTuple	tup;
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_classid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(classId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_objid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(objectId));
+
+	scan = systable_beginscan(depRel, DependDependerIndexId, true,
+							  NULL, 2, key);
+
+	while (HeapTupleIsValid((tup = systable_getnext(scan))))
+	{
+		Form_pg_depend depform = (Form_pg_depend) GETSTRUCT(tup);
+
+		if (depform->refclassid == ExtensionRelationId &&
+			depform->deptype == DEPENDENCY_AUTO_EXTENSION)
+			result = lappend_oid(result, depform->refobjid);
 	}
 
 	systable_endscan(scan);

@@ -31,7 +31,6 @@ include $(top_builddir)/src/Makefile.global
 # don't include subdirectory-path-dependent -I and -L switches
 STD_CPPFLAGS := $(filter-out -I$(top_srcdir)/src/include -I$(top_builddir)/src/include,$(CPPFLAGS))
 STD_LDFLAGS := $(filter-out -L$(top_builddir)/src/common -L$(top_builddir)/src/port,$(LDFLAGS))
-override CPPFLAGS += -DVAL_CONFIGURE="\"$(configure_args)\""
 override CPPFLAGS += -DVAL_CC="\"$(CC)\""
 override CPPFLAGS += -DVAL_CPPFLAGS="\"$(STD_CPPFLAGS)\""
 override CPPFLAGS += -DVAL_CFLAGS="\"$(CFLAGS)\""
@@ -47,14 +46,18 @@ LIBS += $(PTHREAD_LIBS)
 # If you add objects here, see also src/tools/msvc/Mkvcbuild.pm
 
 OBJS_COMMON = \
+	archive.o \
 	base64.o \
 	config_info.o \
 	controldata_utils.o \
 	d2s.o \
+	encnames.o \
 	exec.o \
 	f2s.o \
 	file_perm.o \
+	hashfn.o \
 	ip.o \
+	jsonapi.o \
 	keywords.o \
 	kwlookup.o \
 	link-canary.o \
@@ -70,10 +73,13 @@ OBJS_COMMON = \
 	stringinfo.o \
 	unicode_norm.o \
 	username.o \
-	wait_error.o
+	wait_error.o \
+	wchar.o
 
 ifeq ($(with_openssl),yes)
-OBJS_COMMON += sha2_openssl.o
+OBJS_COMMON += \
+	protocol_openssl.o \
+	sha2_openssl.o
 else
 OBJS_COMMON += sha2.o
 endif

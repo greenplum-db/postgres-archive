@@ -7,7 +7,7 @@
  *
  * src/backend/utils/misc/ps_status.c
  *
- * Copyright (c) 2000-2019, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2020, PostgreSQL Global Development Group
  * various details abducted from various places
  *--------------------------------------------------------------------
  */
@@ -28,6 +28,7 @@
 
 #include "libpq/libpq.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "utils/guc.h"
 #include "utils/ps_status.h"
 
@@ -89,6 +90,8 @@ bool		update_process_title = true;
 #endif
 
 
+#ifndef PS_USE_NONE
+
 #ifndef PS_USE_CLOBBER_ARGV
 /* all but one option need a buffer to write their ps line in */
 #define PS_BUFFER_SIZE 256
@@ -103,6 +106,8 @@ static size_t last_status_len;	/* use to minimize length of clobber */
 static size_t ps_buffer_cur_len;	/* nominal strlen(ps_buffer) */
 
 static size_t ps_buffer_fixed_size; /* size of the constant prefix */
+
+#endif							/* not PS_USE_NONE */
 
 /* save the original argv[] location here */
 static int	save_argc;
@@ -243,15 +248,22 @@ save_ps_display_args(int argc, char **argv)
 
 /*
  * Call this once during subprocess startup to set the identification
- * values.  At this point, the original argv[] array may be overwritten.
+ * values.
+ *
+ * If fixed_part is NULL, a default will be obtained from MyBackendType.
+ *
+ * At this point, the original argv[] array may be overwritten.
  */
 void
-init_ps_display(const char *username, const char *dbname,
-				const char *host_info, const char *initial_str)
+init_ps_display(const char *fixed_part)
 {
-	Assert(username);
-	Assert(dbname);
-	Assert(host_info);
+#ifndef PS_USE_NONE
+	bool		save_update_process_title;
+#endif
+
+	Assert(fixed_part || MyBackendType);
+	if (!fixed_part)
+		fixed_part = GetBackendTypeDesc(MyBackendType);
 
 #ifndef PS_USE_NONE
 	/* no ps display for stand-alone backend */
@@ -305,19 +317,25 @@ init_ps_display(const char *username, const char *dbname,
 	if (*cluster_name == '\0')
 	{
 		snprintf(ps_buffer, ps_buffer_size,
-				 PROGRAM_NAME_PREFIX "%s %s %s ",
-				 username, dbname, host_info);
+				 PROGRAM_NAME_PREFIX "%s ",
+				 fixed_part);
 	}
 	else
 	{
 		snprintf(ps_buffer, ps_buffer_size,
-				 PROGRAM_NAME_PREFIX "%s: %s %s %s ",
-				 cluster_name, username, dbname, host_info);
+				 PROGRAM_NAME_PREFIX "%s: %s ",
+				 cluster_name, fixed_part);
 	}
 
 	ps_buffer_cur_len = ps_buffer_fixed_size = strlen(ps_buffer);
 
-	set_ps_display(initial_str, true);
+	/*
+	 * On the first run, force the update.
+	 */
+	save_update_process_title = update_process_title;
+	update_process_title = true;
+	set_ps_display("");
+	update_process_title = save_update_process_title;
 #endif							/* not PS_USE_NONE */
 }
 
@@ -328,11 +346,11 @@ init_ps_display(const char *username, const char *dbname,
  * indication of what you're currently doing passed in the argument.
  */
 void
-set_ps_display(const char *activity, bool force)
+set_ps_display(const char *activity)
 {
 #ifndef PS_USE_NONE
-	/* update_process_title=off disables updates, unless force = true */
-	if (!force && !update_process_title)
+	/* update_process_title=off disables updates */
+	if (!update_process_title)
 		return;
 
 	/* no ps display for stand-alone backend */
@@ -420,7 +438,11 @@ get_ps_display(int *displen)
 	}
 #endif
 
+#ifndef PS_USE_NONE
 	*displen = (int) (ps_buffer_cur_len - ps_buffer_fixed_size);
 
 	return ps_buffer + ps_buffer_fixed_size;
+#else
+	return "";
+#endif
 }

@@ -4,7 +4,7 @@
  *	  This file contains routines to support creation of toast tables
  *
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -221,9 +221,9 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	 * toast :-(.  This is essential for chunk_data because type bytea is
 	 * toastable; hit the other two just to be sure.
 	 */
-	TupleDescAttr(tupdesc, 0)->attstorage = 'p';
-	TupleDescAttr(tupdesc, 1)->attstorage = 'p';
-	TupleDescAttr(tupdesc, 2)->attstorage = 'p';
+	TupleDescAttr(tupdesc, 0)->attstorage = TYPSTORAGE_PLAIN;
+	TupleDescAttr(tupdesc, 1)->attstorage = TYPSTORAGE_PLAIN;
+	TupleDescAttr(tupdesc, 2)->attstorage = TYPSTORAGE_PLAIN;
 
 	/*
 	 * Toast tables for regular relations go in pg_toast; those for temp
@@ -258,7 +258,7 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 										   toast_typid,
 										   InvalidOid,
 										   rel->rd_rel->relowner,
-										   rel->rd_rel->relam,
+										   table_relation_toast_am(rel),
 										   tupdesc,
 										   NIL,
 										   RELKIND_TOASTVALUE,

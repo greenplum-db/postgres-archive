@@ -3,7 +3,7 @@
  * planner.c
  *	  The query optimizer external interface.
  *
- * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -304,6 +304,7 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	glob->finalrowmarks = NIL;
 	glob->resultRelations = NIL;
 	glob->rootResultRelations = NIL;
+	glob->appendRelations = NIL;
 	glob->relationOids = NIL;
 	glob->invalItems = NIL;
 	glob->paramExecTypes = NIL;
@@ -321,14 +322,11 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	 * functions are present in the query tree.
 	 *
 	 * (Note that we do allow CREATE TABLE AS, SELECT INTO, and CREATE
-	 * MATERIALIZED VIEW to use parallel plans, but this is safe only because
-	 * the command is writing into a completely new table which workers won't
-	 * be able to see.  If the workers could see the table, the fact that
-	 * group locking would cause them to ignore the leader's heavyweight
-	 * relation extension lock and GIN page locks would make this unsafe.
-	 * We'll have to fix that somehow if we want to allow parallel inserts in
-	 * general; updates and deletes have additional problems especially around
-	 * combo CIDs.)
+	 * MATERIALIZED VIEW to use parallel plans, but as of now, only the leader
+	 * backend writes into a completely new table.  In the future, we can
+	 * extend it to allow workers to write into the table.  However, to allow
+	 * parallel updates and deletes, we have to solve other problems,
+	 * especially around combo CIDs.)
 	 *
 	 * For now, we don't try to use parallel mode if we're running inside a
 	 * parallel worker.  We might eventually be able to relax this
@@ -494,6 +492,7 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	Assert(glob->finalrowmarks == NIL);
 	Assert(glob->resultRelations == NIL);
 	Assert(glob->rootResultRelations == NIL);
+	Assert(glob->appendRelations == NIL);
 	top_plan = set_plan_references(root, top_plan);
 	/* ... and the subplans (both regular subplans and initplans) */
 	Assert(list_length(glob->subplans) == list_length(glob->subroots));
@@ -520,6 +519,7 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	result->rtable = glob->finalrtable;
 	result->resultRelations = glob->resultRelations;
 	result->rootResultRelations = glob->rootResultRelations;
+	result->appendRelations = glob->appendRelations;
 	result->subplans = glob->subplans;
 	result->rewindPlanIDs = glob->rewindPlanIDs;
 	result->rowMarks = glob->finalrowmarks;
@@ -1219,6 +1219,7 @@ inheritance_planner(PlannerInfo *root)
 	Index		rootRelation = 0;
 	List	   *final_rtable = NIL;
 	List	   *final_rowmarks = NIL;
+	List	   *final_appendrels = NIL;
 	int			save_rel_array_size = 0;
 	RelOptInfo **save_rel_array = NULL;
 	AppendRelInfo **save_append_rel_array = NULL;
@@ -1627,12 +1628,13 @@ inheritance_planner(PlannerInfo *root)
 		 * modified subquery RTEs into final_rtable, to ensure we have sane
 		 * copies of those.  Also save the first non-excluded child's version
 		 * of the rowmarks list; we assume all children will end up with
-		 * equivalent versions of that.
+		 * equivalent versions of that.  Likewise for append_rel_list.
 		 */
 		if (final_rtable == NIL)
 		{
 			final_rtable = subroot->parse->rtable;
 			final_rowmarks = subroot->rowMarks;
+			final_appendrels = subroot->append_rel_list;
 		}
 		else
 		{
@@ -1764,8 +1766,9 @@ inheritance_planner(PlannerInfo *root)
 			root->simple_rte_array[rti++] = rte;
 		}
 
-		/* Put back adjusted rowmarks, too */
+		/* Put back adjusted rowmarks and appendrels, too */
 		root->rowMarks = final_rowmarks;
+		root->append_rel_list = final_appendrels;
 	}
 
 	/*
@@ -4252,11 +4255,12 @@ consider_groupingsets_paths(PlannerInfo *root,
 											  dNumGroups - exclude_groups);
 
 		/*
-		 * gd->rollups is empty if we have only unsortable columns to work
-		 * with.  Override work_mem in that case; otherwise, we'll rely on the
-		 * sorted-input case to generate usable mixed paths.
+		 * If we have sortable columns to work with (gd->rollups is non-empty)
+		 * and enable_groupingsets_hash_disk is disabled, don't generate
+		 * hash-based paths that will exceed work_mem.
 		 */
-		if (hashsize > work_mem * 1024L && gd->rollups)
+		if (!enable_groupingsets_hash_disk &&
+			hashsize > work_mem * 1024L && gd->rollups)
 			return;				/* nope, won't fit */
 
 		/*
@@ -4861,16 +4865,11 @@ create_distinct_paths(PlannerInfo *root,
 		allow_hash = false;		/* policy-based decision not to hash */
 	else
 	{
-		Size		hashentrysize;
+		Size		hashentrysize = hash_agg_entry_size(
+			0, cheapest_input_path->pathtarget->width, 0);
 
-		/* Estimate per-hash-entry space at tuple width... */
-		hashentrysize = MAXALIGN(cheapest_input_path->pathtarget->width) +
-			MAXALIGN(SizeofMinimalTupleHeader);
-		/* plus the per-hash-entry overhead */
-		hashentrysize += hash_agg_entry_size(0);
-
-		/* Allow hashing only if hashtable is predicted to fit in work_mem */
-		allow_hash = (hashentrysize * numDistinctRows <= work_mem * 1024L);
+		allow_hash = enable_hashagg_disk ||
+			(hashentrysize * numDistinctRows <= work_mem * 1024L);
 	}
 
 	if (allow_hash && grouping_is_hashable(parse->distinctClause))
@@ -6527,7 +6526,8 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 			 * were unable to sort above, then we'd better generate a Path, so
 			 * that we at least have one.
 			 */
-			if (hashaggtablesize < work_mem * 1024L ||
+			if (enable_hashagg_disk ||
+				hashaggtablesize < work_mem * 1024L ||
 				grouped_rel->pathlist == NIL)
 			{
 				/*
@@ -6560,7 +6560,8 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 														  agg_final_costs,
 														  dNumGroups);
 
-			if (hashaggtablesize < work_mem * 1024L)
+			if (enable_hashagg_disk ||
+				hashaggtablesize < work_mem * 1024L)
 				add_path(grouped_rel, (Path *)
 						 create_agg_path(root,
 										 grouped_rel,
@@ -6829,7 +6830,7 @@ create_partial_grouping_paths(PlannerInfo *root,
 		 * Tentatively produce a partial HashAgg Path, depending on if it
 		 * looks as if the hash table will fit in work_mem.
 		 */
-		if (hashaggtablesize < work_mem * 1024L &&
+		if ((enable_hashagg_disk || hashaggtablesize < work_mem * 1024L) &&
 			cheapest_total_path != NULL)
 		{
 			add_path(partially_grouped_rel, (Path *)
@@ -6856,7 +6857,7 @@ create_partial_grouping_paths(PlannerInfo *root,
 									   dNumPartialPartialGroups);
 
 		/* Do the same for partial paths. */
-		if (hashaggtablesize < work_mem * 1024L &&
+		if ((enable_hashagg_disk || hashaggtablesize < work_mem * 1024L) &&
 			cheapest_partial_path != NULL)
 		{
 			add_partial_path(partially_grouped_rel, (Path *)
