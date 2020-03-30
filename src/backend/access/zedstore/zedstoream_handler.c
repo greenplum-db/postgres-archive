@@ -1038,9 +1038,7 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	 * covering the predicate. But in that case we still have to lock any
 	 * matching heap tuples.
 	 */
-	if (!(flags & SO_TYPE_BITMAPSCAN) &&
-		!(flags & SO_TYPE_ANALYZE) &&
-		!(flags & SO_TYPE_TIDSCAN))
+	if (flags & (SO_TYPE_SEQSCAN | SO_TYPE_SAMPLESCAN))
 		PredicateLockRelation(relation, snapshot);
 
 	/*
