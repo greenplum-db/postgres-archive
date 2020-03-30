@@ -135,8 +135,11 @@ zedstoream_fetch_row_version(Relation rel,
 		 * opposite order, because CheckForSerializableConflictOut()
 		 * call as done in zsbt_get_last_tid() already. Does it matter?
 		 * I'm not sure.
+		 *
+		 * We pass in InvalidTransactionId as we are sure that the current
+		 * transaction hasn't locked tid_p.
 		 */
-		PredicateLockTID(rel, tid_p, snapshot);
+		PredicateLockTID(rel, tid_p, snapshot, InvalidTransactionId);
 	}
 	ExecMaterializeSlot(slot);
 	slot->tts_tableOid = RelationGetRelid(rel);
@@ -1036,7 +1039,8 @@ zedstoream_beginscan_with_column_projection(Relation relation, Snapshot snapshot
 	 * matching heap tuples.
 	 */
 	if (!(flags & SO_TYPE_BITMAPSCAN) &&
-		!(flags & SO_TYPE_ANALYZE))
+		!(flags & SO_TYPE_ANALYZE) &&
+		!(flags & SO_TYPE_TIDSCAN))
 		PredicateLockRelation(relation, snapshot);
 
 	/*
@@ -1426,8 +1430,11 @@ zedstoream_index_fetch_tuple(struct IndexFetchTableData *scan,
 		 * opposite order, because CheckForSerializableConflictOut()
 		 * call as done in zsbt_get_last_tid() already. Does it matter?
 		 * I'm not sure.
+		 *
+		 * We pass in InvalidTransactionId as we are sure that the current
+		 * transaction hasn't locked tid_p.
 		 */
-		PredicateLockTID(scan->rel, tid_p, snapshot);
+		PredicateLockTID(scan->rel, tid_p, snapshot, InvalidTransactionId);
 	}
 
 	return result;
@@ -2756,7 +2763,11 @@ zs_blkscan_next_block(TableScanDesc sscan,
 				 * not visible to the snapshot.
 				 */
 				if (predicatelocks)
-					PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot);
+					/*
+					 * We pass in InvalidTransactionId as we are sure that the current
+					 * transaction hasn't locked itemptr.
+					 */
+					PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot, InvalidTransactionId);
 
 				idx++;
 			}
@@ -2775,7 +2786,11 @@ zs_blkscan_next_block(TableScanDesc sscan,
 		 * I'm not sure.
 		 */
 		if (predicatelocks)
-			PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot);
+			/*
+			 * We pass in InvalidTransactionId as we are sure that the current
+			 * transaction hasn't locked itemptr.
+			 */
+			PredicateLockTID(scan->rs_scan.rs_rd, &itemptr, scan->rs_scan.rs_snapshot, InvalidTransactionId);
 
 		scan->bmscan_tids[ntuples] = tid;
 		ntuples++;

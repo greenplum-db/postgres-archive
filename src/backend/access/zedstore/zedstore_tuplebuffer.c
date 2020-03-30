@@ -15,9 +15,9 @@
 #include "access/table.h"
 #include "access/zedstoream.h"
 #include "access/zedstore_internal.h"
+#include "common/hashfn.h"
 #include "miscadmin.h"
 #include "utils/datum.h"
-#include "utils/hashutils.h"
 
 /*
  * Single inserts:
