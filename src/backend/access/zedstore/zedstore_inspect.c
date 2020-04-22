@@ -494,7 +494,7 @@ pg_zs_dump_attstreams(PG_FUNCTION_ARGS)
 	Page		page;
 	ZSBtreePageOpaque *opaque;
 	int			chunkno;
-	bool		upperstream;
+	bool		upperstream = -1;
 	bool		attbyval;
 	int16		attlen;
 	int			chunk_start;
@@ -687,7 +687,7 @@ pg_zs_decode_chunk(PG_FUNCTION_ARGS)
 		for (int i = 0; i < decoder.num_elements; i++)
 		{
 
-			bytea	   *attr_data;
+			bytea	   *attr_data = NULL;
 
 			astate_tids = accumArrayResult(astate_tids,
 										   ZSTidGetDatum(decoder.tids[i]),

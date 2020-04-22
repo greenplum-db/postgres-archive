@@ -208,11 +208,11 @@ zspage_getnewbuf(Relation rel, AttrNumber attrNumber)
 		 */
 		StdRdOptions *rd_options = (StdRdOptions *)rel->rd_options;
 		int extension_factor = rd_options ? rd_options->zedstore_rel_extension_factor : ZEDSTORE_DEFAULT_REL_EXTENSION_FACTOR;
+		Buffer *extrabufs = palloc((extension_factor - 1) * sizeof(Buffer));
 
 		buf = zspage_extendrel_newbuf(rel);
 		blk = BufferGetBlockNumber(buf);
 
-		Buffer *extrabufs = palloc((extension_factor - 1) * sizeof(Buffer));
 		for (int i = 0; i < extension_factor - 1; i++) {
 			extrabufs[i] = zspage_extendrel_newbuf(rel);
 			/*

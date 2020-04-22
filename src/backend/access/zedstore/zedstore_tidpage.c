@@ -651,7 +651,7 @@ zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot)
 	ZSUndoRecPtr item_undoptr;
 	bool		item_isdead;
 	int			idx;
-	Buffer		buf;
+	Buffer		buf = InvalidBuffer;
 	/* Just using meta attribute, we can follow the update chain */
 	zstid curr_tid = *tid;
 
@@ -753,9 +753,9 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 						 ZSUndoRecPtr *prevundoptr_p)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
-	Buffer		buf;
+	Buffer		buf = InvalidBuffer;
 	ZSUndoRecPtr olditem_undoptr;
-	bool		olditem_isdead;
+	bool		olditem_isdead = false;
 	int			idx;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
@@ -1054,7 +1054,7 @@ zsbt_collect_dead_tids(Relation rel, zstid starttid, zstid *endtid, uint64 *num_
 void
 zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo)
 {
-	Buffer		buf;
+	Buffer		buf = InvalidBuffer;
 	Page		page;
 	ZSUndoRecPtr item_undoptr;
 	OffsetNumber off;

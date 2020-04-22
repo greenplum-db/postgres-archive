@@ -1099,8 +1099,6 @@ acquire_sample_rows(Relation onerel, int elevel,
 	TransactionId OldestXmin;
 	BlockSamplerData bs;
 	ReservoirStateData rstate;
-	TupleTableSlot *slot;
-	TableScanDesc scan;
 	BlockNumber nblocks;
 	BlockNumber blksdone = 0;
 
