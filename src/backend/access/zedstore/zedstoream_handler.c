@@ -465,6 +465,7 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	bool		locked_something = false;
 	ZSUndoSlotVisibility *visi_info = &((ZedstoreTupleTableSlot *) slot)->visi_info_buf;
 	bool		follow_updates = false;
+	ZSUndoRecPtr *undoRecPtr = palloc0(sizeof(ZSUndoRecPtr));
 
 	zsbt_tuplebuffer_flush(relation);
 
@@ -478,8 +479,9 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	 */
 retry:
 	result = zsbt_tid_lock(relation, tid, xid, cid, mode, follow_updates,
-						   snapshot, tmfd, &next_tid, &this_xact_has_lock, visi_info);
+						   snapshot, tmfd, &next_tid, &this_xact_has_lock, visi_info, undoRecPtr);
 	((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
+	((ZedstoreTupleTableSlot *) slot)->undoRecPtr = *undoRecPtr;
 
 	if (result == TM_Invisible)
 	{
@@ -1276,6 +1278,7 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction,
 	slotno = ZSTidScanCurUndoSlotNo(&scan_proj->tid_scan);
 	visi_info = &scan_proj->tid_scan.array_iter.undoslot_visibility[slotno];
 	((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
+	((ZedstoreTupleTableSlot *) slot)->undoRecPtr = scan_proj->tid_scan.array_iter.undoslots[slotno];
 
 	slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
 	slot->tts_tid = ItemPointerFromZSTid(this_tid);
@@ -1324,23 +1327,18 @@ static bool
 zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 									Snapshot snapshot)
 {
-	/*
-	 * TODO: we didn't keep any visibility information about the tuple in the
-	 * slot, so we have to fetch it again. A custom slot type might be a
-	 * good idea..
-	 */
 	zstid		tid = ZSTidFromItemPointer(slot->tts_tid);
+	TransactionId obsoleting_xid;
 	ZSTidTreeScan meta_scan;
-	bool		found;
+	bool		result;
+	ZedstoreTupleTableSlot *zslot = (ZedstoreTupleTableSlot *) slot;
 
 	/* Use the meta-data tree for the visibility information. */
 	zsbt_tid_begin_scan(rel, tid, tid + 1, snapshot, &meta_scan);
-
-	found = zsbt_tid_scan_next(&meta_scan, ForwardScanDirection) != InvalidZSTid;
-
+	result = zs_SatisfiesVisibility(&meta_scan, zslot->undoRecPtr, &obsoleting_xid, NULL, zslot->visi_info);
 	zsbt_tid_end_scan(&meta_scan);
 
-	return found;
+	return result;
 }
 
 static TransactionId
@@ -1534,6 +1532,7 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 		visi_info = &fetch_proj->tid_scan.array_iter.undoslot_visibility[slotno];
 
 		((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
+		((ZedstoreTupleTableSlot *) slot)->undoRecPtr = fetch_proj->tid_scan.array_iter.undoslots[slotno];
 		slot->tts_tableOid = RelationGetRelid(rel);
 		slot->tts_tid = ItemPointerFromZSTid(tid);
 		slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
