@@ -894,12 +894,11 @@ TM_Result
 zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 			  LockTupleMode mode, bool follow_updates, Snapshot snapshot,
 			  TM_FailureData *hufd, zstid *next_tid, bool *this_xact_has_lock,
-			  ZSUndoSlotVisibility *visi_info)
+			  ZSUndoSlotVisibility *visi_info, ZSUndoRecPtr *undoRecPtr)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
 	Buffer		buf;
 	Page		page;
-	ZSUndoRecPtr item_undoptr;
 	bool		item_isdead;
 	OffsetNumber off;
 	TM_Result	result;
@@ -910,7 +909,7 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 
 	*next_tid = tid;
 
-	off = zsbt_tid_fetch(rel, tid, &buf, &item_undoptr, &item_isdead);
+	off = zsbt_tid_fetch(rel, tid, &buf, undoRecPtr, &item_isdead);
 	if (!OffsetNumberIsValid(off) || item_isdead)
 	{
 		/*
@@ -921,7 +920,7 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid));
 	}
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
-								tid, item_undoptr, mode,
+								tid, *undoRecPtr, mode,
 								&keep_old_undo_ptr, this_xact_has_lock,
 								hufd, next_tid, visi_info);
 
@@ -944,7 +943,7 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 
 	/* Create UNDO record. */
 	undo_op = zsundo_create_for_tuple_lock(rel, xid, cid, tid, mode,
-										   keep_old_undo_ptr ? item_undoptr : InvalidUndoPtr);
+										   keep_old_undo_ptr ? *undoRecPtr : InvalidUndoPtr);
 
 	/* Replace the item with an identical one, but with updated undo pointer. */
 	page = BufferGetPage(buf);

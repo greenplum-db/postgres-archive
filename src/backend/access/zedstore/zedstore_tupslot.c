@@ -26,6 +26,7 @@ tts_zedstore_init(TupleTableSlot *slot)
 {
 	ZedstoreTupleTableSlot *zslot = (ZedstoreTupleTableSlot *) slot;
 	zslot->visi_info = NULL;
+	zslot->undoRecPtr = InvalidUndoPtr;
 }
 
 static void
@@ -50,6 +51,7 @@ tts_zedstore_clear(TupleTableSlot *slot)
 	ItemPointerSetInvalid(&slot->tts_tid);
 
 	zslot->visi_info = NULL;
+	zslot->undoRecPtr = InvalidUndoPtr;
 }
 
 /*
@@ -215,9 +217,15 @@ tts_zedstore_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 	}
 
 	if (srcslot->tts_ops == &TTSOpsZedstore)
+	{
 		zdstslot->visi_info = ((ZedstoreTupleTableSlot *) srcslot)->visi_info;
+		zdstslot->undoRecPtr = ((ZedstoreTupleTableSlot *) srcslot)->undoRecPtr;
+	}
 	else
+	{
 		zdstslot->visi_info = NULL;
+		zdstslot->undoRecPtr = InvalidUndoPtr;
+	}
 
 	dstslot->tts_nvalid = srcdesc->natts;
 	dstslot->tts_flags &= ~TTS_FLAG_EMPTY;

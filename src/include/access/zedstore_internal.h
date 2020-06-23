@@ -889,7 +889,8 @@ extern TM_Result zsbt_tid_lock(Relation rel, zstid tid,
 							   LockTupleMode lockmode, bool follow_updates,
 							   Snapshot snapshot, TM_FailureData *hufd,
 							   zstid *next_tid, bool *this_xact_has_lock,
-							   ZSUndoSlotVisibility *visi_info);
+							   ZSUndoSlotVisibility *visi_info,
+							   ZSUndoRecPtr *undoRecPtr);
 extern void zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr, ZSUndoRecPtr recent_oldest_undo);
 extern zstid zsbt_get_first_tid(Relation rel);
 extern zstid zsbt_get_last_tid(Relation rel);
@@ -1078,6 +1079,8 @@ typedef struct ZedstoreTupleTableSlot
 	 * fill in 'visi_info_buf', and set visi_info = &visi_info_buf.
 	 */
 	ZSUndoSlotVisibility visi_info_buf;
+
+	ZSUndoRecPtr undoRecPtr;
 } ZedstoreTupleTableSlot;
 
 #endif							/* ZEDSTORE_INTERNAL_H */
