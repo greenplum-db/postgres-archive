@@ -64,10 +64,14 @@ zsbt_tid_item_unpack(ZSTidArrayItem *item, ZSTidItemIterator *iter)
 	slotwords_to_slotnos(slotwords, num_tids, iter->tid_undoslotnos);
 
 	/* also copy out the slots to the iterator */
-	iter->undoslots[ZSBT_OLD_UNDO_SLOT] = InvalidUndoPtr;
-	iter->undoslots[ZSBT_DEAD_UNDO_SLOT] = DeadUndoPtr;
+	InvalidateUndoVisibility(&iter->visi_infos[ZSBT_OLD_UNDO_SLOT]);
+	InvalidateUndoVisibility(&iter->visi_infos[ZSBT_DEAD_UNDO_SLOT]);
+	iter->visi_infos[ZSBT_DEAD_UNDO_SLOT].undoptr = DeadUndoPtr;
 	for (int i = ZSBT_FIRST_NORMAL_UNDO_SLOT; i < item->t_num_undo_slots; i++)
-		iter->undoslots[i] = slots[i - ZSBT_FIRST_NORMAL_UNDO_SLOT];
+	{
+		InvalidateUndoVisibility(&iter->visi_infos[i]);
+		iter->visi_infos[i].undoptr = slots[i - ZSBT_FIRST_NORMAL_UNDO_SLOT];
+	}
 }
 
 /*

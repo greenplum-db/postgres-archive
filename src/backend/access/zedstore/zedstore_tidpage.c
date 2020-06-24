@@ -42,7 +42,7 @@
 /* prototypes for local functions */
 static void zsbt_tid_recompress_replace(Relation rel, Buffer oldbuf, List *items, zs_pending_undo_op *undo_op);
 static OffsetNumber zsbt_tid_fetch(Relation rel, zstid tid,
-								   Buffer *buf_p, ZSUndoRecPtr *undo_ptr_p, bool *isdead_p);
+								   Buffer *buf_p, ZSUndoSlotVisibility *visi_info, bool *isdead_p);
 static void zsbt_tid_add_items(Relation rel, Buffer buf, List *newitems,
 								  zs_pending_undo_op *pending_undo_op);
 static void zsbt_tid_replace_item(Relation rel, Buffer buf, OffsetNumber off, List *newitems,
@@ -140,21 +140,14 @@ zsbt_tid_scan_extract_array(ZSTidTreeScan *scan, ZSTidArrayItem *aitem)
 
 	slots_visible[ZSBT_OLD_UNDO_SLOT] = true;
 	slots_visible[ZSBT_DEAD_UNDO_SLOT] = false;
-
-	scan->array_iter.undoslot_visibility[ZSBT_OLD_UNDO_SLOT] = InvalidUndoSlotVisibility;
-	scan->array_iter.undoslot_visibility[ZSBT_OLD_UNDO_SLOT].xmin = FrozenTransactionId;
-
-	scan->array_iter.undoslot_visibility[ZSBT_DEAD_UNDO_SLOT] = InvalidUndoSlotVisibility;
+	scan->array_iter.visi_infos[ZSBT_OLD_UNDO_SLOT].xmin = FrozenTransactionId;
 
 	for (int i = 2; i < aitem->t_num_undo_slots; i++)
 	{
-		ZSUndoRecPtr undoptr = scan->array_iter.undoslots[i];
 		TransactionId obsoleting_xid;
 
-		scan->array_iter.undoslot_visibility[i] = InvalidUndoSlotVisibility;
-
-		slots_visible[i] = zs_SatisfiesVisibility(scan, undoptr, &obsoleting_xid,
-												  NULL, &scan->array_iter.undoslot_visibility[i]);
+		slots_visible[i] = zs_SatisfiesVisibility(scan, &obsoleting_xid,
+												  NULL, &scan->array_iter.visi_infos[i]);
 		if (scan->serializable && TransactionIdIsValid(obsoleting_xid))
 			CheckForSerializableConflictOut(scan->rel, obsoleting_xid, scan->snapshot);
 	}
@@ -564,7 +557,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 				TM_FailureData *hufd, bool changingPart, bool *this_xact_has_lock)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
-	ZSUndoRecPtr item_undoptr;
+	ZSUndoSlotVisibility visi_info;
 	bool		item_isdead;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
@@ -577,7 +570,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 	List	   *newitems = NIL;
 
 	/* Find the item to delete. (It could be compressed) */
-	off = zsbt_tid_fetch(rel, tid, &buf, &item_undoptr, &item_isdead);
+	off = zsbt_tid_fetch(rel, tid, &buf, &visi_info, &item_isdead);
 	if (!OffsetNumberIsValid(off))
 	{
 		/*
@@ -596,9 +589,9 @@ zsbt_tid_delete(Relation rel, zstid tid,
 	if (snapshot)
 	{
 		result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
-									tid, item_undoptr, LockTupleExclusive,
+									tid, LockTupleExclusive,
 									&keep_old_undo_ptr, this_xact_has_lock,
-									hufd, &next_tid, NULL);
+									hufd, &next_tid, &visi_info);
 		if (result != TM_Ok)
 		{
 			UnlockReleaseBuffer(buf);
@@ -612,14 +605,13 @@ zsbt_tid_delete(Relation rel, zstid tid,
 			/* FIXME: dummmy scan */
 			ZSTidTreeScan scan;
 			TransactionId obsoleting_xid;
-			ZSUndoSlotVisibility visi_info;
 
 			memset(&scan, 0, sizeof(scan));
 			scan.rel = rel;
 			scan.snapshot = crosscheck;
 			scan.recent_oldest_undo = recent_oldest_undo;
 
-			if (!zs_SatisfiesVisibility(&scan, item_undoptr, &obsoleting_xid, NULL, &visi_info))
+			if (!zs_SatisfiesVisibility(&scan, &obsoleting_xid, NULL, &visi_info))
 			{
 				UnlockReleaseBuffer(buf);
 				/* FIXME: We should fill TM_FailureData *hufd correctly */
@@ -630,7 +622,7 @@ zsbt_tid_delete(Relation rel, zstid tid,
 
 	/* Create UNDO record. */
 	undo_op = zsundo_create_for_delete(rel, xid, cid, tid, changingPart,
-									   keep_old_undo_ptr ? item_undoptr : InvalidUndoPtr);
+									   keep_old_undo_ptr ? visi_info.undoptr : InvalidUndoPtr);
 
 	/* Update the tid with the new UNDO pointer. */
 	page = BufferGetPage(buf);
@@ -648,7 +640,7 @@ void
 zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
-	ZSUndoRecPtr item_undoptr;
+	ZSUndoSlotVisibility visi_info;
 	bool		item_isdead;
 	int			idx;
 	Buffer		buf = InvalidBuffer;
@@ -662,7 +654,7 @@ zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot)
 			break;
 
 		/* Find the item */
-		idx = zsbt_tid_fetch(rel, curr_tid, &buf, &item_undoptr, &item_isdead);
+		idx = zsbt_tid_fetch(rel, curr_tid, &buf, &visi_info, &item_isdead);
 		if (idx == -1 || item_isdead)
 			break;
 
@@ -671,14 +663,13 @@ zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot)
 			/* FIXME: dummmy scan */
 			ZSTidTreeScan scan;
 			TransactionId obsoleting_xid;
-			ZSUndoSlotVisibility visi_info;
 
 			memset(&scan, 0, sizeof(scan));
 			scan.rel = rel;
 			scan.snapshot = snapshot;
 			scan.recent_oldest_undo = recent_oldest_undo;
 
-			if (zs_SatisfiesVisibility(&scan, item_undoptr,
+			if (zs_SatisfiesVisibility(&scan,
 									   &obsoleting_xid, &next_tid, &visi_info))
 			{
 				*tid = curr_tid;
@@ -754,7 +745,7 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
 	Buffer		buf = InvalidBuffer;
-	ZSUndoRecPtr olditem_undoptr;
+	ZSUndoSlotVisibility olditem_visi_info;
 	bool		olditem_isdead = false;
 	int			idx;
 	TM_Result	result;
@@ -764,7 +755,7 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 	/*
 	 * Find the item to delete.
 	 */
-	idx = zsbt_tid_fetch(rel, otid, &buf, &olditem_undoptr, &olditem_isdead);
+	idx = zsbt_tid_fetch(rel, otid, &buf, &olditem_visi_info, &olditem_isdead);
 	if (idx == -1 || olditem_isdead)
 	{
 		/*
@@ -774,16 +765,16 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 		elog(ERROR, "could not find old tuple to update with TID (%u, %u) in TID tree",
 			 ZSTidGetBlockNumber(otid), ZSTidGetOffsetNumber(otid));
 	}
-	*prevundoptr_p = olditem_undoptr;
+	*prevundoptr_p = olditem_visi_info.undoptr;
 
 	/*
 	 * Is it visible to us?
 	 */
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
-								otid, olditem_undoptr,
+								otid,
 								key_update ? LockTupleExclusive : LockTupleNoKeyExclusive,
 								&keep_old_undo_ptr, this_xact_has_lock,
-								hufd, &next_tid, NULL);
+								hufd, &next_tid, &olditem_visi_info);
 	if (result != TM_Ok)
 	{
 		UnlockReleaseBuffer(buf);
@@ -797,14 +788,12 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 		/* FIXME: dummmy scan */
 		ZSTidTreeScan scan;
 		TransactionId obsoleting_xid;
-		ZSUndoSlotVisibility visi_info;
-
 		memset(&scan, 0, sizeof(scan));
 		scan.rel = rel;
 		scan.snapshot = crosscheck;
 		scan.recent_oldest_undo = recent_oldest_undo;
 
-		if (!zs_SatisfiesVisibility(&scan, olditem_undoptr, &obsoleting_xid, NULL, &visi_info))
+		if (!zs_SatisfiesVisibility(&scan, &obsoleting_xid, NULL, &olditem_visi_info))
 		{
 			UnlockReleaseBuffer(buf);
 			/* FIXME: We should fill TM_FailureData *hufd correctly */
@@ -841,7 +830,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, false /* we trimmed in the zsbt_tid_update_lock_old() call */);
 	Buffer		buf;
 	Page		page;
-	ZSUndoRecPtr olditem_undoptr;
+	ZSUndoSlotVisibility olditem_visi_info;
 	bool		olditem_isdead;
 	OffsetNumber off;
 	bool		keep_old_undo_ptr = true;
@@ -853,7 +842,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	 * Find the item to delete.  It could be part of a compressed item,
 	 * we let zsbt_fetch() handle that.
 	 */
-	off = zsbt_tid_fetch(rel, otid, &buf, &olditem_undoptr, &olditem_isdead);
+	off = zsbt_tid_fetch(rel, otid, &buf, &olditem_visi_info, &olditem_isdead);
 	if (!OffsetNumberIsValid(off) || olditem_isdead)
 	{
 		/*
@@ -867,7 +856,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 	/*
 	 * Did it change while we were inserting new row version?
 	 */
-	if (!ZSUndoRecPtrEquals(olditem_undoptr, prevrecptr))
+	if (!ZSUndoRecPtrEquals(olditem_visi_info.undoptr, prevrecptr))
 	{
 		UnlockReleaseBuffer(buf);
 		return false;
@@ -875,7 +864,7 @@ zsbt_tid_mark_old_updated(Relation rel, zstid otid, zstid newtid,
 
 	/* Prepare an UNDO record. */
 	undo_op = zsundo_create_for_update(rel, xid, cid, otid, newtid,
-									   keep_old_undo_ptr ? olditem_undoptr : InvalidUndoPtr,
+									   keep_old_undo_ptr ? olditem_visi_info.undoptr : InvalidUndoPtr,
 									   key_update);
 
 	/* Replace the ZSBreeItem with one with the updated undo pointer. */
@@ -894,7 +883,7 @@ TM_Result
 zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 			  LockTupleMode mode, bool follow_updates, Snapshot snapshot,
 			  TM_FailureData *hufd, zstid *next_tid, bool *this_xact_has_lock,
-			  ZSUndoSlotVisibility *visi_info, ZSUndoRecPtr *undoRecPtr)
+			  ZSUndoSlotVisibility *visi_info)
 {
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
 	Buffer		buf;
@@ -909,7 +898,7 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 
 	*next_tid = tid;
 
-	off = zsbt_tid_fetch(rel, tid, &buf, undoRecPtr, &item_isdead);
+	off = zsbt_tid_fetch(rel, tid, &buf, visi_info, &item_isdead);
 	if (!OffsetNumberIsValid(off) || item_isdead)
 	{
 		/*
@@ -920,7 +909,7 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid));
 	}
 	result = zs_SatisfiesUpdate(rel, snapshot, recent_oldest_undo,
-								tid, *undoRecPtr, mode,
+								tid, mode,
 								&keep_old_undo_ptr, this_xact_has_lock,
 								hufd, next_tid, visi_info);
 
@@ -943,7 +932,7 @@ zsbt_tid_lock(Relation rel, zstid tid, TransactionId xid, CommandId cid,
 
 	/* Create UNDO record. */
 	undo_op = zsundo_create_for_tuple_lock(rel, xid, cid, tid, mode,
-										   keep_old_undo_ptr ? *undoRecPtr : InvalidUndoPtr);
+										   keep_old_undo_ptr ? visi_info->undoptr : InvalidUndoPtr);
 
 	/* Replace the item with an identical one, but with updated undo pointer. */
 	page = BufferGetPage(buf);
@@ -1055,14 +1044,14 @@ zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo)
 {
 	Buffer		buf = InvalidBuffer;
 	Page		page;
-	ZSUndoRecPtr item_undoptr;
+	ZSUndoSlotVisibility visi_info;
 	OffsetNumber off;
 	ZSTidArrayItem *origitem;
 	List	   *newitems;
 	bool		isdead;
 
 	/* Find the item to delete. (It could be compressed) */
-	off = zsbt_tid_fetch(rel, tid, &buf, &item_undoptr, &isdead);
+	off = zsbt_tid_fetch(rel, tid, &buf, &visi_info, &isdead);
 	if (!OffsetNumberIsValid(off))
 	{
 		/*
@@ -1215,12 +1204,12 @@ zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr,
 {
 	Buffer		buf;
 	Page		page;
-	ZSUndoRecPtr item_undoptr;
+	ZSUndoSlotVisibility visi_info;
 	bool		item_isdead;
 	OffsetNumber off;
 
 	/* Find the item to delete. (It could be compressed) */
-	off = zsbt_tid_fetch(rel, tid, &buf, &item_undoptr, &item_isdead);
+	off = zsbt_tid_fetch(rel, tid, &buf, &visi_info, &item_isdead);
 	if (!OffsetNumberIsValid(off))
 	{
 		elog(WARNING, "could not find aborted tuple to remove with TID (%u, %u)",
@@ -1228,7 +1217,7 @@ zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr,
 		return;
 	}
 
-	if (ZSUndoRecPtrEquals(item_undoptr, undoptr))
+	if (ZSUndoRecPtrEquals(visi_info.undoptr, undoptr))
 	{
 		ZSTidArrayItem *origitem;
 		List	   *newitems;
@@ -1249,8 +1238,8 @@ zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr,
 	else
 	{
 		Assert(item_isdead ||
-			   item_undoptr.counter > undoptr.counter ||
-			   !IsZSUndoRecPtrValid(&item_undoptr));
+			   visi_info.undoptr.counter > undoptr.counter ||
+			   !IsZSUndoRecPtrValid(&visi_info.undoptr));
 		UnlockReleaseBuffer(buf);
 	}
 }
@@ -1264,16 +1253,16 @@ void
 zsbt_tid_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool forcomplete)
 {
 	Buffer		buf;
-	ZSUndoRecPtr item_undoptr;
 	bool		item_isdead;
+	ZSUndoSlotVisibility visi_info;
 	bool		found;
 
-	found = zsbt_tid_fetch(rel, tid, &buf, &item_undoptr, &item_isdead);
+	found = zsbt_tid_fetch(rel, tid, &buf, &visi_info, &item_isdead);
 	if (!found || item_isdead)
 		elog(ERROR, "couldn't find item for meta column for inserted tuple with TID (%u, %u) in rel %s",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), rel->rd_rel->relname.data);
 
-	zsundo_clear_speculative_token(rel, item_undoptr);
+	zsundo_clear_speculative_token(rel, visi_info.undoptr);
 
 	UnlockReleaseBuffer(buf);
 }
@@ -1284,7 +1273,7 @@ zsbt_tid_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool
  * or deleting it.
  */
 static OffsetNumber
-zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoRecPtr *undoptr_p, bool *isdead_p)
+zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoSlotVisibility *visi_info, bool *isdead_p)
 {
 	Buffer		buf;
 	Page		page;
@@ -1295,7 +1284,7 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoRecPtr *undoptr_p, 
 	if (buf == InvalidBuffer)
 	{
 		*buf_p = InvalidBuffer;
-		*undoptr_p = InvalidUndoPtr;
+		InvalidateUndoVisibility(visi_info);
 		return InvalidOffsetNumber;
 	}
 	page = BufferGetPage(buf);
@@ -1324,10 +1313,9 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoRecPtr *undoptr_p, 
 				if (iter.tids[i] == tid)
 				{
 					int			slotno = iter.tid_undoslotnos[i];
-					ZSUndoRecPtr undoptr = iter.undoslots[slotno];
 
 					*isdead_p = (slotno == ZSBT_DEAD_UNDO_SLOT);
-					*undoptr_p = undoptr;
+					*visi_info = iter.visi_infos[slotno];
 					*buf_p = buf;
 
 					if (iter.tids)
