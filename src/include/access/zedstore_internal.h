@@ -587,29 +587,29 @@ typedef struct ZSUndoSlotVisibility
 {
 	TransactionId xmin;
 	TransactionId xmax;
-	CommandId	cmin;
-	uint32		speculativeToken;
-	ZSNV_Result nonvacuumable_status;
+	CommandId     cmin;
+	uint32        speculativeToken;
+	ZSNV_Result   nonvacuumable_status;
+	ZSUndoRecPtr  undoptr;
 } ZSUndoSlotVisibility;
 
-static const ZSUndoSlotVisibility InvalidUndoSlotVisibility = {
-	.xmin = InvalidTransactionId,
-	.xmax = InvalidTransactionId,
-	.cmin = InvalidCommandId,
-	.speculativeToken = INVALID_SPECULATIVE_TOKEN,
-	.nonvacuumable_status = ZSNV_NONE
+static inline void InvalidateUndoVisibility(ZSUndoSlotVisibility *visi_info)
+{
+	visi_info->xmin = InvalidTransactionId;
+	visi_info->xmax = InvalidTransactionId;
+	visi_info->cmin = InvalidCommandId;
+	visi_info->speculativeToken = INVALID_SPECULATIVE_TOKEN;
+	visi_info->nonvacuumable_status = ZSNV_NONE;
 };
 
 typedef struct ZSTidItemIterator
 {
-	int			tids_allocated_size;
-	zstid	   *tids;
-	uint8	   *tid_undoslotnos;
-	int			num_tids;
-	MemoryContext context;
-
-	ZSUndoRecPtr  undoslots[ZSBT_MAX_ITEM_UNDO_SLOTS];
-	ZSUndoSlotVisibility undoslot_visibility[ZSBT_MAX_ITEM_UNDO_SLOTS];
+	int                  tids_allocated_size;
+	zstid                *tids;
+	uint8                *tid_undoslotnos;
+	int                  num_tids;
+	MemoryContext        context;
+	ZSUndoSlotVisibility visi_infos[ZSBT_MAX_ITEM_UNDO_SLOTS];
 } ZSTidItemIterator;
 
 /*
@@ -845,7 +845,7 @@ zsbt_tid_scan_next(ZSTidTreeScan *scan, ScanDirection direction)
 			if (scan->snapshot->snapshot_type == SNAPSHOT_DIRTY)
 			{
 				int			slotno = scan->array_iter.tid_undoslotnos[idx];
-				ZSUndoSlotVisibility *visi_info = &scan->array_iter.undoslot_visibility[slotno];
+				ZSUndoSlotVisibility *visi_info = &scan->array_iter.visi_infos[slotno];
 
 				if (visi_info->xmin != FrozenTransactionId)
 					scan->snapshot->xmin = visi_info->xmin;
@@ -889,8 +889,7 @@ extern TM_Result zsbt_tid_lock(Relation rel, zstid tid,
 							   LockTupleMode lockmode, bool follow_updates,
 							   Snapshot snapshot, TM_FailureData *hufd,
 							   zstid *next_tid, bool *this_xact_has_lock,
-							   ZSUndoSlotVisibility *visi_info,
-							   ZSUndoRecPtr *undoRecPtr);
+							   ZSUndoSlotVisibility *visi_info);
 extern void zsbt_tid_undo_deletion(Relation rel, zstid tid, ZSUndoRecPtr undoptr, ZSUndoRecPtr recent_oldest_undo);
 extern zstid zsbt_get_first_tid(Relation rel);
 extern zstid zsbt_get_last_tid(Relation rel);
@@ -1037,12 +1036,12 @@ extern void zsmeta_add_root_for_new_attributes(Relation rel, Page page);
 /* prototypes for functions in zedstore_visibility.c */
 extern TM_Result zs_SatisfiesUpdate(Relation rel, Snapshot snapshot,
 									ZSUndoRecPtr recent_oldest_undo,
-									zstid item_tid, ZSUndoRecPtr item_undoptr,
+									zstid item_tid,
 									LockTupleMode mode,
 									bool *undo_record_needed, bool *this_xact_has_lock,
 									TM_FailureData *tmfd, zstid *next_tid,
 									ZSUndoSlotVisibility *visi_info);
-extern bool zs_SatisfiesVisibility(ZSTidTreeScan *scan, ZSUndoRecPtr item_undoptr,
+extern bool zs_SatisfiesVisibility(ZSTidTreeScan *scan,
 								   TransactionId *obsoleting_xid, zstid *next_tid,
 								   ZSUndoSlotVisibility *visi_info);
 
@@ -1079,8 +1078,6 @@ typedef struct ZedstoreTupleTableSlot
 	 * fill in 'visi_info_buf', and set visi_info = &visi_info_buf.
 	 */
 	ZSUndoSlotVisibility visi_info_buf;
-
-	ZSUndoRecPtr undoRecPtr;
 } ZedstoreTupleTableSlot;
 
 #endif							/* ZEDSTORE_INTERNAL_H */

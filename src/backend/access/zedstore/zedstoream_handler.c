@@ -465,7 +465,6 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	bool		locked_something = false;
 	ZSUndoSlotVisibility *visi_info = &((ZedstoreTupleTableSlot *) slot)->visi_info_buf;
 	bool		follow_updates = false;
-	ZSUndoRecPtr *undoRecPtr = palloc0(sizeof(ZSUndoRecPtr));
 
 	zsbt_tuplebuffer_flush(relation);
 
@@ -479,9 +478,8 @@ zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 	 */
 retry:
 	result = zsbt_tid_lock(relation, tid, xid, cid, mode, follow_updates,
-						   snapshot, tmfd, &next_tid, &this_xact_has_lock, visi_info, undoRecPtr);
+						   snapshot, tmfd, &next_tid, &this_xact_has_lock, visi_info);
 	((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
-	((ZedstoreTupleTableSlot *) slot)->undoRecPtr = *undoRecPtr;
 
 	if (result == TM_Invisible)
 	{
@@ -1276,9 +1274,8 @@ zedstoream_getnextslot(TableScanDesc sscan, ScanDirection direction,
 
 	/* Fill in the rest of the fields in the slot, and return the tuple */
 	slotno = ZSTidScanCurUndoSlotNo(&scan_proj->tid_scan);
-	visi_info = &scan_proj->tid_scan.array_iter.undoslot_visibility[slotno];
+	visi_info = &scan_proj->tid_scan.array_iter.visi_infos[slotno];
 	((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
-	((ZedstoreTupleTableSlot *) slot)->undoRecPtr = scan_proj->tid_scan.array_iter.undoslots[slotno];
 
 	slot->tts_tableOid = RelationGetRelid(scan->rs_scan.rs_rd);
 	slot->tts_tid = ItemPointerFromZSTid(this_tid);
@@ -1335,7 +1332,7 @@ zedstoream_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 
 	/* Use the meta-data tree for the visibility information. */
 	zsbt_tid_begin_scan(rel, tid, tid + 1, snapshot, &meta_scan);
-	result = zs_SatisfiesVisibility(&meta_scan, zslot->undoRecPtr, &obsoleting_xid, NULL, zslot->visi_info);
+	result = zs_SatisfiesVisibility(&meta_scan, &obsoleting_xid, NULL, zslot->visi_info);
 	zsbt_tid_end_scan(&meta_scan);
 
 	return result;
@@ -1529,10 +1526,9 @@ zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 		uint8		slotno = ZSTidScanCurUndoSlotNo(&fetch_proj->tid_scan);
 		ZSUndoSlotVisibility *visi_info;
 
-		visi_info = &fetch_proj->tid_scan.array_iter.undoslot_visibility[slotno];
+		visi_info = &fetch_proj->tid_scan.array_iter.visi_infos[slotno];
 
 		((ZedstoreTupleTableSlot *) slot)->visi_info = visi_info;
-		((ZedstoreTupleTableSlot *) slot)->undoRecPtr = fetch_proj->tid_scan.array_iter.undoslots[slotno];
 		slot->tts_tableOid = RelationGetRelid(rel);
 		slot->tts_tid = ItemPointerFromZSTid(tid);
 		slot->tts_nvalid = slot->tts_tupleDescriptor->natts;
@@ -2367,7 +2363,7 @@ zedstoream_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		if (old_tid != fetchtid)
 			continue;
 
-		old_undoptr = tid_scan.array_iter.undoslots[ZSTidScanCurUndoSlotNo(&tid_scan)];
+		old_undoptr = tid_scan.array_iter.visi_infos[ZSTidScanCurUndoSlotNo(&tid_scan)].undoptr;
 
 		new_tid = zs_cluster_process_tuple(OldHeap, NewHeap,
 										   old_tid, old_undoptr,
