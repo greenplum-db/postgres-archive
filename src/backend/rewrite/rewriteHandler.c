@@ -1640,6 +1640,7 @@ ApplyRetrieveRule(Query *parsetree,
 			rte->checkAsUser = InvalidOid;
 			rte->selectedCols = NULL;
 			rte->insertedCols = NULL;
+			rte->returningCols = NULL;
 			rte->updatedCols = NULL;
 
 			/*
@@ -1740,6 +1741,7 @@ ApplyRetrieveRule(Query *parsetree,
 	subrte->checkAsUser = rte->checkAsUser;
 	subrte->selectedCols = rte->selectedCols;
 	subrte->insertedCols = rte->insertedCols;
+	subrte->returningCols = rte->returningCols;
 	subrte->updatedCols = rte->updatedCols;
 	subrte->extraUpdatedCols = rte->extraUpdatedCols;
 
@@ -1747,6 +1749,7 @@ ApplyRetrieveRule(Query *parsetree,
 	rte->checkAsUser = InvalidOid;
 	rte->selectedCols = NULL;
 	rte->insertedCols = NULL;
+	rte->returningCols = NULL;
 	rte->updatedCols = NULL;
 	rte->extraUpdatedCols = NULL;
 
