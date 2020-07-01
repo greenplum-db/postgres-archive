@@ -366,6 +366,7 @@ TidNext(TidScanState *node)
 	while (node->tss_TidPtr >= 0 && node->tss_TidPtr < numTids)
 	{
 		ItemPointerData tid = tidList[node->tss_TidPtr];
+		Bitmapset *project_cols = NULL;
 
 		/*
 		 * For WHERE CURRENT OF, the tuple retrieved from the cursor might
@@ -375,7 +376,15 @@ TidNext(TidScanState *node)
 		if (node->tss_isCurrentOf)
 			table_tuple_get_latest_tid(scan, &tid);
 
-		if (table_tuple_fetch_row_version(heapRelation, &tid, snapshot, slot, NULL))
+		/*
+		 * TODO: Remove this hack!! This should be done once at the start of the tid scan.
+		 * Ideally we should probably set the list of projection cols in the
+		 * generic scan desc, perhaps in TableScanDesc.
+		 */
+		project_cols = PopulateNeededColumnsForScan((ScanState *) node,
+													 RelationGetDescr(heapRelation)->natts);
+
+		if (table_tuple_fetch_row_version(heapRelation, &tid, snapshot, slot, project_cols))
 			return slot;
 
 		/* Bad TID or failed snapshot qual; try next */
