@@ -393,7 +393,8 @@ typedef struct TableAmRoutine
 	bool		(*tuple_fetch_row_version) (Relation rel,
 											ItemPointer tid,
 											Snapshot snapshot,
-											TupleTableSlot *slot);
+											TupleTableSlot *slot,
+											Bitmapset *project_cols);
 
 	/*
 	 * Is tid valid for a scan of this relation.
@@ -1158,9 +1159,10 @@ static inline bool
 table_tuple_fetch_row_version(Relation rel,
 							  ItemPointer tid,
 							  Snapshot snapshot,
-							  TupleTableSlot *slot)
+							  TupleTableSlot *slot,
+							  Bitmapset *project_cols)
 {
-	return rel->rd_tableam->tuple_fetch_row_version(rel, tid, snapshot, slot);
+	return rel->rd_tableam->tuple_fetch_row_version(rel, tid, snapshot, slot, project_cols);
 }
 
 /*

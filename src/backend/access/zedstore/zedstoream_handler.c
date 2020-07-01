@@ -88,6 +88,8 @@ typedef struct ZedStoreIndexFetchData *ZedStoreIndexFetch;
 typedef struct ParallelZSScanDescData *ParallelZSScanDesc;
 
 static IndexFetchTableData *zedstoream_begin_index_fetch(Relation rel);
+static void zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
+									   Bitmapset *project_cols);
 static void zedstoream_end_index_fetch(IndexFetchTableData *scan);
 static bool zedstoream_fetch_row(ZedStoreIndexFetchData *fetch,
 								 ItemPointer tid_p,
@@ -117,7 +119,8 @@ static bool
 zedstoream_fetch_row_version(Relation rel,
 							 ItemPointer tid_p,
 							 Snapshot snapshot,
-							 TupleTableSlot *slot)
+							 TupleTableSlot *slot,
+							 Bitmapset *project_cols)
 {
 	IndexFetchTableData *fetcher;
 	bool		result;
@@ -125,6 +128,7 @@ zedstoream_fetch_row_version(Relation rel,
 	zsbt_tuplebuffer_flush(rel);
 
 	fetcher = zedstoream_begin_index_fetch(rel);
+	zedstoream_fetch_set_column_projection(fetcher, project_cols);
 
 	result = zedstoream_fetch_row((ZedStoreIndexFetchData *) fetcher,
 								  tid_p, snapshot, slot);
@@ -658,7 +662,7 @@ retry:
 	}
 
 	/* Fetch the tuple, too. */
-	if (!zedstoream_fetch_row_version(relation, tid_p, SnapshotAny, slot))
+	if (!zedstoream_fetch_row_version(relation, tid_p, SnapshotAny, slot, NULL))
 		elog(ERROR, "could not fetch locked tuple");
 
 	return TM_Ok;
@@ -1364,10 +1368,10 @@ zedstoream_begin_index_fetch(Relation rel)
 
 static void
 zedstoream_fetch_set_column_projection(struct IndexFetchTableData *scan,
-									   Bitmapset *project_columns)
+									   Bitmapset *project_cols)
 {
 	ZedStoreIndexFetch zscan = (ZedStoreIndexFetch) scan;
-	zscan->proj_data.project_columns = project_columns;
+	zscan->proj_data.project_columns = project_cols;
 }
 
 static void

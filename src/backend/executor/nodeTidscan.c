@@ -375,7 +375,7 @@ TidNext(TidScanState *node)
 		if (node->tss_isCurrentOf)
 			table_tuple_get_latest_tid(scan, &tid);
 
-		if (table_tuple_fetch_row_version(heapRelation, &tid, snapshot, slot))
+		if (table_tuple_fetch_row_version(heapRelation, &tid, snapshot, slot, NULL))
 			return slot;
 
 		/* Bad TID or failed snapshot qual; try next */

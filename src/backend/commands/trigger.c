@@ -3059,7 +3059,7 @@ GetTupleForTrigger(EState *estate,
 		 * suffices.
 		 */
 		if (!table_tuple_fetch_row_version(relation, tid, SnapshotAny,
-										   oldslot))
+										   oldslot, NULL))
 			elog(ERROR, "failed to fetch tuple for trigger");
 	}
 
@@ -3921,7 +3921,7 @@ AfterTriggerExecute(EState *estate,
 
 				if (!table_tuple_fetch_row_version(rel, &(event->ate_ctid1),
 												   SnapshotAny,
-												   LocTriggerData.tg_trigslot))
+												   LocTriggerData.tg_trigslot, NULL))
 					elog(ERROR, "failed to fetch tuple1 for AFTER trigger");
 				LocTriggerData.tg_trigtuple =
 					ExecFetchSlotHeapTuple(LocTriggerData.tg_trigslot, false, &should_free_trig);
@@ -3940,7 +3940,7 @@ AfterTriggerExecute(EState *estate,
 
 				if (!table_tuple_fetch_row_version(rel, &(event->ate_ctid2),
 												   SnapshotAny,
-												   LocTriggerData.tg_newslot))
+												   LocTriggerData.tg_newslot, NULL))
 					elog(ERROR, "failed to fetch tuple2 for AFTER trigger");
 				LocTriggerData.tg_newtuple =
 					ExecFetchSlotHeapTuple(LocTriggerData.tg_newslot, false, &should_free_new);

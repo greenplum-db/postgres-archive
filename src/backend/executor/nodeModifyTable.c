@@ -236,7 +236,7 @@ ExecCheckTIDVisible(EState *estate,
 	if (!IsolationUsesXactSnapshot())
 		return;
 
-	if (!table_tuple_fetch_row_version(rel, tid, SnapshotAny, tempSlot))
+	if (!table_tuple_fetch_row_version(rel, tid, SnapshotAny, tempSlot, NULL))
 		elog(ERROR, "failed to fetch conflicting tuple for ON CONFLICT");
 	ExecCheckTupleVisible(estate, rel, tempSlot);
 	ExecClearTuple(tempSlot);
@@ -1014,8 +1014,10 @@ ldelete:;
 			}
 			else
 			{
+				RangeTblEntry *resultrte = exec_rt_fetch(resultRelInfo->ri_RangeTableIndex, estate);
 				if (!table_tuple_fetch_row_version(resultRelationDesc, tupleid,
-												   SnapshotAny, slot))
+												   SnapshotAny, slot,
+												   resultrte->returningCols))
 					elog(ERROR, "failed to fetch deleted tuple for DELETE RETURNING");
 			}
 		}

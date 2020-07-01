@@ -181,7 +181,8 @@ static bool
 heapam_fetch_row_version(Relation relation,
 						 ItemPointer tid,
 						 Snapshot snapshot,
-						 TupleTableSlot *slot)
+						 TupleTableSlot *slot,
+						 Bitmapset *project_cols)
 {
 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
 	Buffer		buffer;
