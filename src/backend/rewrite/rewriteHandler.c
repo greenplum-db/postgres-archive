@@ -3085,6 +3085,7 @@ rewriteTargetView(Query *parsetree, Relation view)
 	 * base_rte instead of copying it.
 	 */
 	new_rte = base_rte;
+	new_rte->returningCols = bms_copy(view_rte->returningCols);
 	new_rte->rellockmode = RowExclusiveLock;
 
 	parsetree->rtable = lappend(parsetree->rtable, new_rte);
@@ -3437,6 +3438,7 @@ rewriteTargetView(Query *parsetree, Relation view)
 		}
 	}
 
+	new_rte->returningCols = bms_copy(view_rte->returningCols);
 	table_close(base_rel, NoLock);
 
 	return parsetree;

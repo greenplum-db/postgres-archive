@@ -1165,14 +1165,6 @@ table_tuple_fetch_row_version(Relation rel,
 	return rel->rd_tableam->tuple_fetch_row_version(rel, tid, snapshot, slot, project_cols);
 }
 
-static inline Bitmapset *
-get_ordinal_attnos(Relation rel)
-{
-	Bitmapset *attnos = NULL;
-	attnos = bms_add_range(attnos, 1, RelationGetDescr(rel)->natts);
-	return attnos;
-}
-
 /*
  * Verify that `tid` is a potentially valid tuple identifier. That doesn't
  * mean that the pointed to row needs to exist or be visible, but that

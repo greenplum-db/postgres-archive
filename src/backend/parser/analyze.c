@@ -2421,9 +2421,7 @@ transformReturningList(ParseState *pstate, Query *qry, List *returningList)
 			/*
 			 * If there is a whole-row var, we have to fetch the whole row.
 			 */
-			TupleDesc tupleDesc = RelationGetDescr(pstate->p_target_relation);
-			for (int attno = 1; attno <= tupleDesc->natts; attno++)
-				bms_add_member(rte->returningCols, attno);
+			rte->returningCols = get_ordinal_attnos(pstate->p_target_relation);
 			break;
 		}
 	}
