@@ -1015,6 +1015,15 @@ ldelete:;
 			else
 			{
 				RangeTblEntry *resultrte = exec_rt_fetch(resultRelInfo->ri_RangeTableIndex, estate);
+				/*
+				 * XXX returningCols should never be empty if we have a RETURNING
+				 * clause. Right now, if we have a view, we fail to populate the
+				 * returningCols of it's base table's RTE.
+				 * If we encounter such a situation now, for correctness, ensure
+				 * that we fetch all the columns.
+				 */
+				if(bms_is_empty(resultrte->returningCols))
+					resultrte->returningCols = get_ordinal_attnos(resultRelationDesc);
 				if (!table_tuple_fetch_row_version(resultRelationDesc, tupleid,
 												   SnapshotAny, slot,
 												   resultrte->returningCols))

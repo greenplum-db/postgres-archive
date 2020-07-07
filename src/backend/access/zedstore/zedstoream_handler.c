@@ -662,7 +662,8 @@ retry:
 	}
 
 	/* Fetch the tuple, too. */
-	if (!zedstoream_fetch_row_version(relation, tid_p, SnapshotAny, slot, NULL))
+	if (!zedstoream_fetch_row_version(relation, tid_p, SnapshotAny, slot,
+									  get_ordinal_attnos(relation)))
 		elog(ERROR, "could not fetch locked tuple");
 
 	return TM_Ok;
@@ -930,36 +931,40 @@ zs_initialize_proj_attributes(TupleDesc tupledesc, ZedStoreProjectData *proj_dat
 	if (proj_data->num_proj_atts != 0)
 		return;
 
-	oldcontext = MemoryContextSwitchTo(proj_data->context);
-	/* add one for meta-attribute */
-	proj_data->proj_atts = palloc((tupledesc->natts + 1) * sizeof(int));
-	proj_data->attr_scans = palloc0(tupledesc->natts * sizeof(ZSAttrTreeScan));
 	proj_data->tid_scan.active = false;
 
-	proj_data->proj_atts[proj_data->num_proj_atts++] = ZS_META_ATTRIBUTE_NUM;
-
-	/*
-	 * convert booleans array into an array of the attribute numbers of the
-	 * required columns.
-	 */
-	for (int idx = 0; idx < tupledesc->natts; idx++)
+	if (bms_is_empty(proj_data->project_columns))
 	{
-		int			att_no = idx + 1;
-
-		/*
-		 * never project dropped columns, null will be returned for them
-		 * in slot by default.
-		 */
-		if  (TupleDescAttr(tupledesc, idx)->attisdropped)
-			continue;
-
-		/* project_columns empty also conveys need all the columns */
-		if (proj_data->project_columns == NULL ||
-			bms_is_member(att_no, proj_data->project_columns))
-			proj_data->proj_atts[proj_data->num_proj_atts++] = att_no;
+		proj_data->proj_atts = palloc(sizeof(int));
+		proj_data->proj_atts[proj_data->num_proj_atts++] = ZS_META_ATTRIBUTE_NUM;
+		proj_data->attr_scans = NULL;
 	}
+	else
+	{
+		oldcontext = MemoryContextSwitchTo(proj_data->context);
+		/* add one for meta-attribute */
+		proj_data->proj_atts = palloc((tupledesc->natts + 1) * sizeof(int));
+		proj_data->attr_scans = palloc0(tupledesc->natts * sizeof(ZSAttrTreeScan));
+		proj_data->proj_atts[proj_data->num_proj_atts++] = ZS_META_ATTRIBUTE_NUM;
 
-	MemoryContextSwitchTo(oldcontext);
+		/* Convert column bitmap into an array of attnos.*/
+		for (int idx = 0; idx < tupledesc->natts; idx++)
+		{
+			int			att_no = idx + 1;
+
+			/*
+			 * never project dropped columns, null will be returned for them
+			 * in slot by default.
+			 */
+			if  (TupleDescAttr(tupledesc, idx)->attisdropped)
+				continue;
+
+			if (bms_is_member(att_no, proj_data->project_columns))
+				proj_data->proj_atts[proj_data->num_proj_atts++] = att_no;
+		}
+
+		MemoryContextSwitchTo(oldcontext);
+	}
 }
 
 static void
@@ -1063,7 +1068,9 @@ zedstoream_beginscan(Relation relation, Snapshot snapshot,
 					 uint32 flags)
 {
 	return zedstoream_beginscan_with_column_projection(relation, snapshot,
-													   nkeys, key, parallel_scan, flags, NULL);
+													   nkeys, key, parallel_scan,
+													   flags,
+													   get_ordinal_attnos(relation));
 }
 
 static void
@@ -1362,6 +1369,7 @@ zedstoream_begin_index_fetch(Relation rel)
 	zscan = palloc0(sizeof(ZedStoreIndexFetchData));
 	zscan->idx_fetch_data.rel = rel;
 	zscan->proj_data.context = CurrentMemoryContext;
+	zscan->proj_data.project_columns = get_ordinal_attnos(rel);
 
 	return (IndexFetchTableData *) zscan;
 }
