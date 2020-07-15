@@ -793,6 +793,7 @@ apply_handle_update_internal(ResultRelInfo *relinfo,
 	TupleTableSlot *localslot;
 	bool		found;
 	MemoryContext oldctx;
+	Bitmapset	  *epqCols = NULL;
 
 	localslot = table_slot_create(localrel, &estate->es_tupleTable);
 	EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1);
@@ -807,13 +808,16 @@ apply_handle_update_internal(ResultRelInfo *relinfo,
 	Assert(OidIsValid(idxoid) ||
 		   (relmapentry->remoterel.replident == REPLICA_IDENTITY_FULL));
 
+	epqCols = PopulateNeededColumnsForEPQ(&epqstate,
+										  RelationGetDescr(localrel)->natts);
+
 	if (OidIsValid(idxoid))
 		found = RelationFindReplTupleByIndex(localrel, idxoid,
 											 LockTupleExclusive,
-											 remoteslot, localslot);
+											 remoteslot, localslot, epqCols);
 	else
 		found = RelationFindReplTupleSeq(localrel, LockTupleExclusive,
-										 remoteslot, localslot);
+										 remoteslot, localslot, epqCols);
 
 	ExecClearTuple(remoteslot);
 
@@ -926,6 +930,7 @@ apply_handle_delete_internal(ResultRelInfo *relinfo, EState *estate,
 	EPQState	epqstate;
 	TupleTableSlot *localslot;
 	bool		found;
+	Bitmapset	*epqCols = NULL;
 
 	localslot = table_slot_create(localrel, &estate->es_tupleTable);
 	EvalPlanQualInit(&epqstate, estate, NULL, NIL, -1);
@@ -940,13 +945,16 @@ apply_handle_delete_internal(ResultRelInfo *relinfo, EState *estate,
 	Assert(OidIsValid(idxoid) ||
 		   (remoterel->replident == REPLICA_IDENTITY_FULL));
 
+	epqCols = PopulateNeededColumnsForEPQ(&epqstate,
+										  RelationGetDescr(localrel)->natts);
+
 	if (OidIsValid(idxoid))
 		found = RelationFindReplTupleByIndex(localrel, idxoid,
 											 LockTupleExclusive,
-											 remoteslot, localslot);
+											 remoteslot, localslot, epqCols);
 	else
 		found = RelationFindReplTupleSeq(localrel, LockTupleExclusive,
-										 remoteslot, localslot);
+										 remoteslot, localslot, epqCols);
 
 	/* If found delete it. */
 	if (found)

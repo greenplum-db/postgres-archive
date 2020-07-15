@@ -482,7 +482,8 @@ typedef struct TableAmRoutine
 							   LockTupleMode mode,
 							   LockWaitPolicy wait_policy,
 							   uint8 flags,
-							   TM_FailureData *tmfd);
+							   TM_FailureData *tmfd,
+							   Bitmapset *project_cols);
 
 	/*
 	 * Perform operations necessary to complete insertions made via
@@ -1440,11 +1441,11 @@ static inline TM_Result
 table_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
 				 TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
 				 LockWaitPolicy wait_policy, uint8 flags,
-				 TM_FailureData *tmfd)
+				 TM_FailureData *tmfd, Bitmapset *project_cols)
 {
 	return rel->rd_tableam->tuple_lock(rel, tid, snapshot, slot,
 									   cid, mode, wait_policy,
-									   flags, tmfd);
+									   flags, tmfd, project_cols);
 }
 
 /*

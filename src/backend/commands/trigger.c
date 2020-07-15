@@ -2984,7 +2984,8 @@ GetTupleForTrigger(EState *estate,
 								estate->es_output_cid,
 								lockmode, LockWaitBlock,
 								lockflags,
-								&tmfd);
+								&tmfd,
+								get_ordinal_attnos(relation));
 
 		switch (test)
 		{

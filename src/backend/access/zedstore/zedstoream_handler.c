@@ -457,7 +457,8 @@ static TM_Result
 zedstoream_lock_tuple(Relation relation, ItemPointer tid_p, Snapshot snapshot,
 					  TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
 					  LockWaitPolicy wait_policy, uint8 flags,
-					  TM_FailureData *tmfd)
+					  TM_FailureData *tmfd,
+					  Bitmapset *project_cols)
 {
 	zstid		tid = ZSTidFromItemPointer(*tid_p);
 	TransactionId xid = GetCurrentTransactionId();
@@ -663,7 +664,7 @@ retry:
 
 	/* Fetch the tuple, too. */
 	if (!zedstoream_fetch_row_version(relation, tid_p, SnapshotAny, slot,
-									  get_ordinal_attnos(relation)))
+									  project_cols))
 		elog(ERROR, "could not fetch locked tuple");
 
 	return TM_Ok;

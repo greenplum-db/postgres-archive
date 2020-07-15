@@ -80,6 +80,7 @@ lnext:
 		int			lockflags = 0;
 		TM_Result	test;
 		TupleTableSlot *markSlot;
+		Bitmapset *epqCols = NULL;
 
 		/* clear any leftover test tuple for this rel */
 		markSlot = EvalPlanQualSlot(&node->lr_epqstate, erm->relation, erm->rti);
@@ -179,11 +180,15 @@ lnext:
 		if (!IsolationUsesXactSnapshot())
 			lockflags |= TUPLE_LOCK_FLAG_FIND_LAST_VERSION;
 
+		epqCols = PopulateNeededColumnsForEPQ(&node->lr_epqstate,
+											  RelationGetDescr(erm->relation)->natts);
+
 		test = table_tuple_lock(erm->relation, &tid, estate->es_snapshot,
 								markSlot, estate->es_output_cid,
 								lockmode, erm->waitPolicy,
 								lockflags,
-								&tmfd);
+								&tmfd,
+								epqCols);
 
 		switch (test)
 		{

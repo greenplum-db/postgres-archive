@@ -588,9 +588,11 @@ extern void check_exclusion_constraint(Relation heap, Relation index,
 extern bool RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
 										 LockTupleMode lockmode,
 										 TupleTableSlot *searchslot,
-										 TupleTableSlot *outslot);
+										 TupleTableSlot *outslot,
+										 Bitmapset *project_cols);
 extern bool RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
-									 TupleTableSlot *searchslot, TupleTableSlot *outslot);
+									 TupleTableSlot *searchslot, TupleTableSlot *outslot,
+									 Bitmapset *project_cols);
 
 extern void ExecSimpleRelationInsert(EState *estate, TupleTableSlot *slot);
 extern void ExecSimpleRelationUpdate(EState *estate, EPQState *epqstate,
@@ -605,5 +607,7 @@ extern void
 PopulateNeededColumnsForNode(Node *expr, int n, Bitmapset **scanCols);
 extern Bitmapset *
 PopulateNeededColumnsForScan(ScanState *scanstate, int ncol);
+extern Bitmapset *PopulateNeededColumnsForEPQ(EPQState *epqstate, int ncol);
+extern void PopulateNeededColumnsForOnConflictUpdate(ResultRelInfo *resultRelInfo);
 
 #endif							/* EXECUTOR_H  */

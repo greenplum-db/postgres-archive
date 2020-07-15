@@ -350,7 +350,7 @@ static TM_Result
 heapam_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 				  TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
 				  LockWaitPolicy wait_policy, uint8 flags,
-				  TM_FailureData *tmfd)
+				  TM_FailureData *tmfd, Bitmapset *project_cols)
 {
 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
 	TM_Result	result;

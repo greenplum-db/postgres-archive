@@ -410,3 +410,42 @@ PopulateNeededColumnsForScan(ScanState *scanstate, int ncol)
 
 	return result;
 }
+
+Bitmapset *
+PopulateNeededColumnsForEPQ(EPQState *epqstate, int ncol)
+{
+	Bitmapset *epqCols = NULL;
+	PopulateNeededColumnsForNode((Node *) epqstate->plan->qual,
+								 ncol,
+								 &epqCols);
+	return epqCols;
+}
+
+void
+PopulateNeededColumnsForOnConflictUpdate(ResultRelInfo *resultRelInfo)
+{
+	ExprState  *onConflictSetWhere = resultRelInfo->ri_onConflict->oc_WhereClause;
+	ProjectionInfo *oc_ProjInfo = resultRelInfo->ri_onConflict->oc_ProjInfo;
+	Relation relation = resultRelInfo->ri_RelationDesc;
+	Bitmapset *proj_cols = NULL;
+	ListCell *lc;
+
+	if (onConflictSetWhere && onConflictSetWhere->expr)
+		PopulateNeededColumnsForNode((Node *) onConflictSetWhere->expr,
+									 RelationGetDescr(relation)->natts,
+									 &proj_cols);
+
+	if (oc_ProjInfo)
+		PopulateNeededColumnsForNode((Node *) oc_ProjInfo->pi_state.expr,
+									 RelationGetDescr(relation)->natts,
+									 &proj_cols);
+
+	foreach(lc, resultRelInfo->ri_WithCheckOptionExprs)
+	{
+		ExprState  *wcoExpr = (ExprState *) lfirst(lc);
+		PopulateNeededColumnsForNode((Node *) wcoExpr->expr,
+									 RelationGetDescr(relation)->natts,
+									 &proj_cols);
+	}
+	resultRelInfo->ri_onConflict->proj_cols = proj_cols;
+}

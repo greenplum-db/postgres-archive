@@ -119,7 +119,8 @@ bool
 RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
 							 LockTupleMode lockmode,
 							 TupleTableSlot *searchslot,
-							 TupleTableSlot *outslot)
+							 TupleTableSlot *outslot,
+							 Bitmapset *project_cols)
 {
 	ScanKeyData skey[INDEX_MAX_KEYS];
 	IndexScanDesc scan;
@@ -179,7 +180,8 @@ retry:
 							   lockmode,
 							   LockWaitBlock,
 							   0 /* don't follow updates */ ,
-							   &tmfd);
+							   &tmfd,
+							   project_cols);
 
 		PopActiveSnapshot();
 
@@ -285,7 +287,8 @@ tuples_equal(TupleTableSlot *slot1, TupleTableSlot *slot2)
  */
 bool
 RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
-						 TupleTableSlot *searchslot, TupleTableSlot *outslot)
+						 TupleTableSlot *searchslot, TupleTableSlot *outslot,
+						 Bitmapset *project_cols)
 {
 	TupleTableSlot *scanslot;
 	TableScanDesc scan;
@@ -346,7 +349,8 @@ retry:
 							   lockmode,
 							   LockWaitBlock,
 							   0 /* don't follow updates */ ,
-							   &tmfd);
+							   &tmfd,
+							   project_cols);
 
 		PopActiveSnapshot();
 

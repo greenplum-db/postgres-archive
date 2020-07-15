@@ -842,6 +842,7 @@ ldelete:;
 				{
 					TupleTableSlot *inputslot;
 					TupleTableSlot *epqslot;
+					Bitmapset *epqCols = NULL;
 
 					if (IsolationUsesXactSnapshot())
 						ereport(ERROR,
@@ -856,12 +857,15 @@ ldelete:;
 					inputslot = EvalPlanQualSlot(epqstate, resultRelationDesc,
 												 resultRelInfo->ri_RangeTableIndex);
 
+					epqCols = PopulateNeededColumnsForEPQ(epqstate,
+														  RelationGetDescr(resultRelationDesc)->natts);
+
 					result = table_tuple_lock(resultRelationDesc, tupleid,
 											  estate->es_snapshot,
 											  inputslot, estate->es_output_cid,
 											  LockTupleExclusive, LockWaitBlock,
 											  TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
-											  &tmfd);
+											  &tmfd, epqCols);
 
 					switch (result)
 					{
@@ -1394,6 +1398,7 @@ lreplace:;
 				{
 					TupleTableSlot *inputslot;
 					TupleTableSlot *epqslot;
+					Bitmapset *epqCols = NULL;
 
 					if (IsolationUsesXactSnapshot())
 						ereport(ERROR,
@@ -1407,12 +1412,14 @@ lreplace:;
 					inputslot = EvalPlanQualSlot(epqstate, resultRelationDesc,
 												 resultRelInfo->ri_RangeTableIndex);
 
+					epqCols = PopulateNeededColumnsForEPQ(epqstate,
+														  RelationGetDescr(resultRelationDesc)->natts);
 					result = table_tuple_lock(resultRelationDesc, tupleid,
 											  estate->es_snapshot,
 											  inputslot, estate->es_output_cid,
 											  lockmode, LockWaitBlock,
 											  TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
-											  &tmfd);
+											  &tmfd, epqCols);
 
 					switch (result)
 					{
@@ -1539,6 +1546,8 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 	Relation	relation = resultRelInfo->ri_RelationDesc;
 	ExprState  *onConflictSetWhere = resultRelInfo->ri_onConflict->oc_WhereClause;
 	TupleTableSlot *existing = resultRelInfo->ri_onConflict->oc_Existing;
+	ProjectionInfo *oc_ProjInfo = resultRelInfo->ri_onConflict->oc_ProjInfo;
+	Bitmapset *proj_cols = resultRelInfo->ri_onConflict->proj_cols;
 	TM_FailureData tmfd;
 	LockTupleMode lockmode;
 	TM_Result	test;
@@ -1559,7 +1568,7 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 							estate->es_snapshot,
 							existing, estate->es_output_cid,
 							lockmode, LockWaitBlock, 0,
-							&tmfd);
+							&tmfd, proj_cols);
 	switch (test)
 	{
 		case TM_Ok:
@@ -1707,7 +1716,7 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 	}
 
 	/* Project the new tuple version */
-	ExecProject(resultRelInfo->ri_onConflict->oc_ProjInfo);
+	ExecProject(oc_ProjInfo);
 
 	/*
 	 * Note that it is possible that the target tuple has been modified in
@@ -2597,6 +2606,8 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 									&mtstate->ps);
 			resultRelInfo->ri_onConflict->oc_WhereClause = qualexpr;
 		}
+
+		PopulateNeededColumnsForOnConflictUpdate(resultRelInfo);
 	}
 
 	/*

@@ -384,6 +384,7 @@ typedef struct OnConflictSetState
 	TupleTableSlot *oc_ProjSlot;	/* CONFLICT ... SET ... projection target */
 	ProjectionInfo *oc_ProjInfo;	/* for ON CONFLICT DO UPDATE SET */
 	ExprState  *oc_WhereClause; /* state for the WHERE clause */
+	Bitmapset *proj_cols; /* cols to be scanned during the operation */
 } OnConflictSetState;
 
 /*
