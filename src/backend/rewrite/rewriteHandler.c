@@ -1642,6 +1642,7 @@ ApplyRetrieveRule(Query *parsetree,
 			rte->insertedCols = NULL;
 			rte->returningCols = NULL;
 			rte->updatedCols = NULL;
+			rte->scanCols = NULL;
 
 			/*
 			 * For the most part, Vars referencing the view should remain as
@@ -1744,6 +1745,7 @@ ApplyRetrieveRule(Query *parsetree,
 	subrte->returningCols = rte->returningCols;
 	subrte->updatedCols = rte->updatedCols;
 	subrte->extraUpdatedCols = rte->extraUpdatedCols;
+	subrte->scanCols = rte->scanCols;
 
 	rte->requiredPerms = 0;		/* no permission check on subquery itself */
 	rte->checkAsUser = InvalidOid;
@@ -1752,6 +1754,7 @@ ApplyRetrieveRule(Query *parsetree,
 	rte->returningCols = NULL;
 	rte->updatedCols = NULL;
 	rte->extraUpdatedCols = NULL;
+	rte->scanCols = NULL;
 
 	return parsetree;
 }

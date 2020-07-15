@@ -2402,6 +2402,7 @@ _copyRangeTblEntry(const RangeTblEntry *from)
 	COPY_BITMAPSET_FIELD(returningCols);
 	COPY_BITMAPSET_FIELD(updatedCols);
 	COPY_BITMAPSET_FIELD(extraUpdatedCols);
+	COPY_BITMAPSET_FIELD(scanCols);
 	COPY_NODE_FIELD(securityQuals);
 
 	return newnode;

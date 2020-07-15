@@ -71,11 +71,13 @@ SeqNext(SeqScanState *node)
 		 */
 		if (table_scans_leverage_column_projection(node->ss.ss_currentRelation))
 		{
-			Bitmapset *proj = PopulateNeededColumnsForScan(&node->ss,
-														   node->ss.ss_currentRelation->rd_att->natts);
+			Scan *planNode = (Scan *)node->ss.ps.plan;
+			int rti = planNode->scanrelid;
+			RangeTblEntry *rte = list_nth(estate->es_plannedstmt->rtable, rti - 1);
 			scandesc = table_beginscan_with_column_projection(node->ss.ss_currentRelation,
 															  estate->es_snapshot,
-															  0, NULL, proj);
+															  0, NULL,
+															  rte->scanCols);
 		}
 		else
 		{

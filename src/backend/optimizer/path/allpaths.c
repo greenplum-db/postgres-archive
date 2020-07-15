@@ -28,6 +28,7 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "utils/rel.h"
 #ifdef OPTIMIZER_DEBUG
 #include "nodes/print.h"
 #endif
@@ -147,7 +148,7 @@ static void subquery_push_qual(Query *subquery,
 static void recurse_push_qual(Node *setOp, Query *topquery,
 							  RangeTblEntry *rte, Index rti, Node *qual);
 static void remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel);
-
+static void extract_scan_columns(PlannerInfo *root);
 
 /*
  * make_one_rel
@@ -189,6 +190,8 @@ make_one_rel(PlannerInfo *root, List *joinlist)
 	 * Compute size estimates and consider_parallel flags for each base rel.
 	 */
 	set_base_rel_sizes(root);
+
+	extract_scan_columns(root);
 
 	/*
 	 * We should now have size estimates for every actual table involved in
@@ -238,6 +241,86 @@ make_one_rel(PlannerInfo *root, List *joinlist)
 	Assert(bms_equal(rel->relids, root->all_baserels));
 
 	return rel;
+}
+
+static void
+extract_scan_columns(PlannerInfo *root)
+{
+	for (int i = 1; i < root->simple_rel_array_size; i++)
+	{
+		ListCell *lc;
+		RangeTblEntry *rte = root->simple_rte_array[i];
+		RelOptInfo    *rel = root->simple_rel_array[i];
+		if (rte == NULL)
+			continue;
+		if (rel == NULL)
+			continue;
+		if (IS_DUMMY_REL(rel))
+			continue;
+		rte->scanCols = NULL;
+		foreach(lc, rel->reltarget->exprs)
+		{
+			Node *node;
+			List *vars;
+			ListCell *lc1;
+			node = lfirst(lc);
+			/*
+			 * TODO: suggest a default for vars_only to make maintenance less burdensome
+			 */
+			vars = pull_var_clause(node,
+								   PVC_RECURSE_AGGREGATES |
+									   PVC_RECURSE_WINDOWFUNCS |
+									   PVC_RECURSE_PLACEHOLDERS);
+			foreach(lc1, vars)
+			{
+				Var *var = lfirst(lc1);
+				if (var->varno == i)
+				{
+					if (var->varattno > 0)
+						rte->scanCols = bms_add_member(rte->scanCols, var->varattno);
+					else if (var->varattno == 0)
+					{
+						/*
+						 * If there is a whole-row var, we have to fetch the whole row.
+						 */
+						bms_free(rte->scanCols);
+						rte->scanCols = bms_make_singleton(0);
+						goto outer;
+					}
+				}
+			}
+		}
+		foreach(lc, rel->baserestrictinfo)
+		{
+			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+			List *vars = pull_var_clause((Node *)rinfo->clause,
+										 PVC_RECURSE_AGGREGATES |
+											 PVC_RECURSE_WINDOWFUNCS |
+											 PVC_RECURSE_PLACEHOLDERS);
+			ListCell *lc1;
+			if (contains_whole_row_col(rte->scanCols))
+				break;
+			foreach(lc1, vars)
+			{
+				Var *var = lfirst(lc1);
+				if (var->varno == i)
+				{
+					if (var->varattno > 0)
+						rte->scanCols = bms_add_member(rte->scanCols, var->varattno);
+					else if (var->varattno == 0)
+					{
+						/*
+						 * If there is a whole-row var, we have to fetch the whole row.
+						 */
+						bms_free(rte->scanCols);
+						rte->scanCols = bms_make_singleton(0);
+						break;
+					}
+				}
+			}
+		}
+		outer:;
+	}
 }
 
 /*

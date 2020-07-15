@@ -190,8 +190,19 @@ preprocess_targetlist(PlannerInfo *root)
 	 * to make these Vars available for the RETURNING calculation.  Vars that
 	 * belong to the result rel don't need to be added, because they will be
 	 * made to refer to the actual heap tuple.
+	 *
+	 * XXX: Avoid adding cols from the returningList to avoid overestimation
+	 * of scanCols from RelOptInfo->reltarget exprs. This is done to avoid
+	 * additional cols from the RETURNING clause making its way into scanCols
+	 * for queries such as:
+	 * delete from base_tbl using other_tbl t where base_tbl.col1 = t.col1 returning *;
+	 * where base_tbl is the root table of an inheritance hierarchy
+	 * TODO: Delete the result_relation guard below if and when
+	 * inheritance_planner() is refactored to not fake a round of planning
+	 * pretending we have a SELECT query (which causes result_relation to be 0
+	 * in the first place)
 	 */
-	if (parse->returningList && list_length(parse->rtable) > 1)
+	if (result_relation && parse->returningList && list_length(parse->rtable) > 1)
 	{
 		List	   *vars;
 		ListCell   *l;

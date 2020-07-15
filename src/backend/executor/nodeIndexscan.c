@@ -118,7 +118,10 @@ IndexNext(IndexScanState *node)
 		if (table_scans_leverage_column_projection(node->ss.ss_currentRelation))
 		{
 			Bitmapset *proj = NULL;
-			proj = PopulateNeededColumnsForScan(&node->ss, node->ss.ss_currentRelation->rd_att->natts);
+			Scan *planNode = (Scan *)node->ss.ps.plan;
+			int rti = planNode->scanrelid;
+			RangeTblEntry *rte = list_nth(estate->es_plannedstmt->rtable, rti - 1);
+			proj = rte->scanCols;
 			table_index_fetch_set_column_projection(scandesc->xs_heapfetch, proj);
 		}
 
