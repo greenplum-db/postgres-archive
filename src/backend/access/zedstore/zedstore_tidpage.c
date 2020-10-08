@@ -642,7 +642,7 @@ zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot)
 	ZSUndoRecPtr recent_oldest_undo = zsundo_get_oldest_undo_ptr(rel, true);
 	ZSUndoSlotVisibility visi_info;
 	bool		item_isdead;
-	int			idx;
+	OffsetNumber off;
 	Buffer		buf = InvalidBuffer;
 	/* Just using meta attribute, we can follow the update chain */
 	zstid curr_tid = *tid;
@@ -654,9 +654,14 @@ zsbt_find_latest_tid(Relation rel, zstid *tid, Snapshot snapshot)
 			break;
 
 		/* Find the item */
-		idx = zsbt_tid_fetch(rel, curr_tid, &buf, &visi_info, &item_isdead);
-		if (idx == -1 || item_isdead)
+		off = zsbt_tid_fetch(rel, curr_tid, &buf, &visi_info, &item_isdead);
+		if (!OffsetNumberIsValid(off))
 			break;
+
+		if (item_isdead) {
+			UnlockReleaseBuffer(buf);
+			break;
+		}
 
 		if (snapshot)
 		{
@@ -747,7 +752,7 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 	Buffer		buf = InvalidBuffer;
 	ZSUndoSlotVisibility olditem_visi_info;
 	bool		olditem_isdead = false;
-	int			idx;
+	OffsetNumber	off;
 	TM_Result	result;
 	bool		keep_old_undo_ptr = true;
 	zstid		next_tid;
@@ -755,8 +760,8 @@ zsbt_tid_update_lock_old(Relation rel, zstid otid,
 	/*
 	 * Find the item to delete.
 	 */
-	idx = zsbt_tid_fetch(rel, otid, &buf, &olditem_visi_info, &olditem_isdead);
-	if (idx == -1 || olditem_isdead)
+	off = zsbt_tid_fetch(rel, otid, &buf, &olditem_visi_info, &olditem_isdead);
+	if (!OffsetNumberIsValid(off) || olditem_isdead)
 	{
 		/*
 		 * or should this be TM_Invisible? The heapam at least just throws
@@ -1065,7 +1070,6 @@ zsbt_tid_mark_dead(Relation rel, zstid tid, ZSUndoRecPtr recent_oldest_undo)
 		 */
 		elog(DEBUG1, "could not find tuple to mark dead with TID (%u, %u)",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid));
-		UnlockReleaseBuffer(buf);
 		return;
 	}
 
@@ -1255,10 +1259,10 @@ zsbt_tid_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool
 	Buffer		buf;
 	bool		item_isdead;
 	ZSUndoSlotVisibility visi_info;
-	bool		found;
+	OffsetNumber off;
 
-	found = zsbt_tid_fetch(rel, tid, &buf, &visi_info, &item_isdead);
-	if (!found || item_isdead)
+	off = zsbt_tid_fetch(rel, tid, &buf, &visi_info, &item_isdead);
+	if (!OffsetNumberIsValid(off) || item_isdead)
 		elog(ERROR, "couldn't find item for meta column for inserted tuple with TID (%u, %u) in rel %s",
 			 ZSTidGetBlockNumber(tid), ZSTidGetOffsetNumber(tid), rel->rd_rel->relname.data);
 
@@ -1270,7 +1274,8 @@ zsbt_tid_clear_speculative_token(Relation rel, zstid tid, uint32 spectoken, bool
 /*
  * Fetch the item with given TID. The page containing the item is kept locked, and
  * returned to the caller in *buf_p. This is used to locate a tuple for updating
- * or deleting it.
+ * or deleting it. If the item with the given TID is not found, InvalidOffsetNumber
+ * is returned and buf_p is unchanged.
  */
 static OffsetNumber
 zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoSlotVisibility *visi_info, bool *isdead_p)
@@ -1282,11 +1287,8 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoSlotVisibility *vis
 
 	buf = zsbt_descend(rel, ZS_META_ATTRIBUTE_NUM, tid, 0, false);
 	if (buf == InvalidBuffer)
-	{
-		*buf_p = InvalidBuffer;
-		InvalidateUndoVisibility(visi_info);
 		return InvalidOffsetNumber;
-	}
+
 	page = BufferGetPage(buf);
 	maxoff = PageGetMaxOffsetNumber(page);
 
@@ -1333,6 +1335,11 @@ zsbt_tid_fetch(Relation rel, zstid tid, Buffer *buf_p, ZSUndoSlotVisibility *vis
 				pfree(iter.tid_undoslotnos);
 		}
 	}
+	/*
+	 * We found a page but the tid was not present in that page. So unlock
+	 * it anyway.
+	 */
+	UnlockReleaseBuffer(buf);
 	return InvalidOffsetNumber;
 }
 
