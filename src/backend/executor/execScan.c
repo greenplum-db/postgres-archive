@@ -22,6 +22,7 @@
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 
 
 
@@ -351,25 +352,22 @@ typedef struct neededColumnContext
 static bool
 neededColumnContextWalker(Node *node, neededColumnContext *c)
 {
-	if (node == NULL)
+	if (node == NULL || contains_whole_row_col(*c->mask))
 		return false;
 
 	if (IsA(node, Var))
 	{
 		Var *var = (Var *)node;
 
-		if (var->varattno >= 0)
+		if (var->varattno > 0)
 		{
 			Assert(var->varattno <= c->n);
 			*(c->mask) = bms_add_member(*(c->mask), var->varattno);
 		}
-
-		/*
-		 * varattno zero flags whole row variable, so set bits for all the
-		 * columns.
-		 */
-		if (var->varattno == 0)
-			bms_add_range(*(c->mask), 1, c->n);
+		else if(var->varattno == 0) {
+			bms_free(*(c->mask));
+			*(c->mask) = bms_make_singleton(0);
+		}
 
 		return false;
 	}

@@ -1019,6 +1019,7 @@ ldelete:;
 			else
 			{
 				RangeTblEntry *resultrte = exec_rt_fetch(resultRelInfo->ri_RangeTableIndex, estate);
+				Bitmapset *project_cols = resultrte->returningCols;
 				/*
 				 * XXX returningCols should never be empty if we have a RETURNING
 				 * clause. Right now, if we have a view, we fail to populate the
@@ -1027,10 +1028,13 @@ ldelete:;
 				 * that we fetch all the columns.
 				 */
 				if(bms_is_empty(resultrte->returningCols))
-					resultrte->returningCols = get_ordinal_attnos(resultRelationDesc);
+				{
+					bms_free(resultrte->returningCols);
+					project_cols = bms_make_singleton(0);
+				}
 				if (!table_tuple_fetch_row_version(resultRelationDesc, tupleid,
 												   SnapshotAny, slot,
-												   resultrte->returningCols))
+												   project_cols))
 					elog(ERROR, "failed to fetch deleted tuple for DELETE RETURNING");
 			}
 		}

@@ -615,6 +615,12 @@ typedef struct ViewOptions
 	 RelationNeedsWAL(relation) && \
 	 !IsCatalogRelation(relation))
 
+static inline bool
+contains_whole_row_col(Bitmapset *cols)
+{
+	return bms_is_member(0, cols);
+}
+
 static inline Bitmapset *
 get_ordinal_attnos(Relation rel)
 {

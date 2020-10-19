@@ -942,6 +942,7 @@ zs_initialize_proj_attributes(TupleDesc tupledesc, ZedStoreProjectData *proj_dat
 	}
 	else
 	{
+		bool project_whole_row = contains_whole_row_col(proj_data->project_columns);
 		oldcontext = MemoryContextSwitchTo(proj_data->context);
 		/* add one for meta-attribute */
 		proj_data->proj_atts = palloc((tupledesc->natts + 1) * sizeof(int));
@@ -960,7 +961,11 @@ zs_initialize_proj_attributes(TupleDesc tupledesc, ZedStoreProjectData *proj_dat
 			if  (TupleDescAttr(tupledesc, idx)->attisdropped)
 				continue;
 
-			if (bms_is_member(att_no, proj_data->project_columns))
+			/*
+			 * If the whole row was requested, then ensure that all columns are
+			 * added.
+			 */
+			if (project_whole_row || bms_is_member(att_no, proj_data->project_columns))
 				proj_data->proj_atts[proj_data->num_proj_atts++] = att_no;
 		}
 
@@ -1071,7 +1076,7 @@ zedstoream_beginscan(Relation relation, Snapshot snapshot,
 	return zedstoream_beginscan_with_column_projection(relation, snapshot,
 													   nkeys, key, parallel_scan,
 													   flags,
-													   get_ordinal_attnos(relation));
+													   bms_make_singleton(0));
 }
 
 static void
@@ -1370,7 +1375,7 @@ zedstoream_begin_index_fetch(Relation rel)
 	zscan = palloc0(sizeof(ZedStoreIndexFetchData));
 	zscan->idx_fetch_data.rel = rel;
 	zscan->proj_data.context = CurrentMemoryContext;
-	zscan->proj_data.project_columns = get_ordinal_attnos(rel);
+	zscan->proj_data.project_columns = bms_make_singleton(0);
 
 	return (IndexFetchTableData *) zscan;
 }

@@ -50,8 +50,9 @@ static Bitmapset *translate_col_privs(const Bitmapset *parent_privs,
 static void expand_appendrel_subquery(PlannerInfo *root, RelOptInfo *rel,
 									  RangeTblEntry *rte, Index rti);
 
-static Bitmapset *translate_parent_cols(Bitmapset *parent_cols,
-										List *translated_vars);
+static Bitmapset *
+translate_parent_cols(Bitmapset *parent_cols, List *translated_vars,
+					  Relation parent_rel);
 /*
  * expand_inherited_rtentry
  *		Expand a rangetable entry that has the "inh" bit set.
@@ -520,7 +521,7 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 	if (childOID != parentOID)
 		childrte->returningCols =
 			translate_parent_cols(parentrte->returningCols,
-								  appinfo->translated_vars);
+								  appinfo->translated_vars, parentrel);
 	else
 		childrte->returningCols = bms_copy(parentrte->returningCols);
 
@@ -599,10 +600,17 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
  */
 
 static Bitmapset *
-translate_parent_cols(Bitmapset *parent_cols, List *translated_vars)
+translate_parent_cols(Bitmapset *parent_cols, List *translated_vars,
+					  Relation parent_rel)
 {
 	int col = -1;
 	Bitmapset *result = NULL;
+	/*
+	 * Enumerate the set of parent columns for translation if there is a whole
+	 * row var
+	 */
+	if(contains_whole_row_col(parent_cols))
+		parent_cols = get_ordinal_attnos(parent_rel);
 	while ((col = bms_next_member(parent_cols, col)) >= 0)
 	{
 		Var *var = (Var *) list_nth(translated_vars, col - 1);

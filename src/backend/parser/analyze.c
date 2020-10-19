@@ -2421,7 +2421,8 @@ transformReturningList(ParseState *pstate, Query *qry, List *returningList)
 			/*
 			 * If there is a whole-row var, we have to fetch the whole row.
 			 */
-			rte->returningCols = get_ordinal_attnos(pstate->p_target_relation);
+			bms_free(rte->returningCols);
+			rte->returningCols = bms_make_singleton(0);
 			break;
 		}
 	}
