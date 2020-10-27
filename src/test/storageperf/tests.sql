@@ -5,3 +5,4 @@
 \i sql/lockperf.sql
 \i sql/inlinecompress.sql
 \i sql/toast.sql
+\i sql/dml.sql
