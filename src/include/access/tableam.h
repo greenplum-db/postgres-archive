@@ -264,12 +264,29 @@ typedef struct TableAmRoutine
 								 ParallelTableScanDesc pscan,
 								 uint32 flags);
 
+	/*
+	 * Variant of scan_begin() with a column projection bitmap that lists the
+	 * ordinal attribute numbers to be fetched during the scan.
+	 *
+	 * If project_columns is an empty bitmap, none of the data columns are to be
+	 * fetched.
+	 *
+	 * If project_columns is a singleton bitmap with a whole-row reference (0),
+	 * all of the data columns are to be fetched.
+	 *
+	 * Please note: project_cols only deals with non system columns (attnum >= 0)
+	 *
+	 * Please note: Due to the limitations of the slot_get***() APIs, the
+	 * scan_getnextslot() tableAM call must return a TupleTableSlot that is densely
+	 * populated (missing cols indicated with isnull = true upto the largest
+	 * attno in the projection list)
+	 */
 	TableScanDesc (*scan_begin_with_column_projection)(Relation relation,
 													   Snapshot snapshot,
 													   int nkeys, struct ScanKeyData *key,
 													   ParallelTableScanDesc parallel_scan,
 													   uint32 flags,
-													   Bitmapset *project_column);
+													   Bitmapset *project_columns);
 
 	/*
 	 * Release resources and deallocate scan. If TableScanDesc.temp_snap,
@@ -347,11 +364,24 @@ typedef struct TableAmRoutine
 	void		(*index_fetch_end) (struct IndexFetchTableData *data);
 
 	/*
-	 * Set column projections for AM which leverage column projections for
-	 * scanning.
+	 * Set up a column projection list that can be used by index_fetch_tuple()
+	 * to fetch a subset of columns for a tuple.
+	 *
+	 * If project_columns is an empty bitmap, none of the data columns are to be
+	 * fetched.
+	 *
+	 * If project_columns is a singleton bitmap with a whole-row reference (0),
+	 * all of the data columns are to be fetched.
+	 *
+	 * Please note: project_columns only deals with non system columns (attnum >= 0)
+	 *
+	 * Please note: Due to the limitations of the slot_get***() APIs,
+	 * index_fetch_tuple() must return a TupleTableSlot that is densely
+	 * populated (missing cols indicated with isnull = true upto the largest
+	 * attno in the projection list)
 	 */
 	void (*index_fetch_set_column_projection) (struct IndexFetchTableData *data,
-											   Bitmapset *project_column);
+											   Bitmapset *project_columns);
 
 	/*
 	 * Fetch tuple at `tid` into `slot`, after doing a visibility test
@@ -389,6 +419,21 @@ typedef struct TableAmRoutine
 	 * Fetch tuple at `tid` into `slot`, after doing a visibility test
 	 * according to `snapshot`. If a tuple was found and passed the visibility
 	 * test, returns true, false otherwise.
+	 *
+	 * project_cols is a set of columns to be fetched for the given row.
+	 *
+	 * If project_cols is an empty bitmap, none of the data columns are to be
+	 * fetched.
+	 *
+	 * If project_cols is a singleton bitmap with a whole-row reference (0),
+	 * all of the data columns are to be fetched.
+	 *
+	 * Please note: project_cols only deals with non system columns (attnum >= 0)
+	 *
+	 * Please note: Due to the limitations of the slot_get***() APIs,
+	 * tuple_fetch_row_version() must return a TupleTableSlot that is densely
+	 * populated (missing cols indicated with isnull = true upto the largest
+	 * attno in the projection list)
 	 */
 	bool		(*tuple_fetch_row_version) (Relation rel,
 											ItemPointer tid,
@@ -1420,6 +1465,20 @@ table_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
  *		also lock descendant tuples if lock modes don't conflict.
  *		If TUPLE_LOCK_FLAG_FIND_LAST_VERSION, follow the update chain and lock
  *		latest version.
+ *	project_cols: It is a set of columns to be fetched for the tuple being locked.
+ *
+ *	 If project_cols is an empty bitmap, none of the data columns are to be
+ *	 fetched.
+ *
+ *	 If project_cols is a singleton bitmap with a whole-row reference (0),
+ *	 all of the data columns are to be fetched.
+ *
+ *	 Please note: project_cols only deals with non system columns (attnum >= 0)
+ *
+ *	 Please note: Due to the limitations of the slot_get***() APIs,
+ *	 tuple_lock() must return a TupleTableSlot that is densely
+ *	 populated (missing cols indicated with isnull = true upto the largest
+ *	 attno in the projection list)
  *
  * Output parameters:
  *	*slot: contains the target tuple

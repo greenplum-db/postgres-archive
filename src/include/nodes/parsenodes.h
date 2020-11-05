@@ -1118,16 +1118,23 @@ typedef struct RangeTblEntry
 	Oid			checkAsUser;	/* if valid, check access as this role */
 	Bitmapset  *selectedCols;	/* columns needing SELECT permission */
 	Bitmapset  *insertedCols;	/* columns needing INSERT permission */
-	Bitmapset  *returningCols;  /* columns in the RETURNING clause */
 	Bitmapset  *updatedCols;	/* columns needing UPDATE permission */
 	Bitmapset  *extraUpdatedCols;	/* generated columns being updated */
-	/*
-	 * Columns to be scanned.
-	 * If the 0th element is set due to varattno == 0
-	 * that means all columns must be scanned, so handle this at scan-time
-	 */
-	Bitmapset  *scanCols;
 	List	   *securityQuals;	/* security barrier quals to apply, if any */
+
+	/*
+	 * scanCols: Columns to be retrieved during a physical scan.
+	 * returningCols: Columns to be retrieved to satisfy the RETURNING clause.
+	 *
+	 * Please note: These bitmaps only deal with non-system columns (attnum >= 0)
+	 *
+	 * These bitmaps have some special values:
+	 * - A singleton bitmap with the element 0 indicates that all non-system
+	 *   columns must be fetched.
+	 * - An empty bitmap indicates that no non-system column must be fetched.
+	 */
+	Bitmapset  *scanCols;		/* columns to be fetched during a physical scan */
+	Bitmapset  *returningCols;	/* columns in the RETURNING clause */
 } RangeTblEntry;
 
 /*
